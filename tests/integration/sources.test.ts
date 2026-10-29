@@ -1,3 +1,4 @@
+import { sql } from "kysely";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DomainError } from "../../src/domain/errors.js";
 import { migrateToLatest } from "../../src/infrastructure/db/database.js";
@@ -22,16 +23,21 @@ describe.skipIf(skipWithoutDatabase)("sources repository (PostgreSQL)", () => {
     const created = await upsertSource(schema.db, {
       id: "bip-example",
       name: "BIP Example",
-      baseUrl: "https://bip.example.gov.pl",
+      baseUrl: "HTTPS://BIP.Example.gov.pl",
       enabled: true,
     });
+    // The canonical href is what gets stored (lower-cased host, trailing slash).
     expect(created).toMatchObject({
       id: "bip-example",
       name: "BIP Example",
-      baseUrl: "https://bip.example.gov.pl",
+      baseUrl: "https://bip.example.gov.pl/",
       enabled: true,
     });
     expect(await getSource(schema.db, "bip-example")).toEqual(created);
+    const { rows } = await sql<{ base_url: string }>`
+      SELECT base_url FROM sources WHERE id = 'bip-example'
+    `.execute(schema.db);
+    expect(rows).toEqual([{ base_url: "https://bip.example.gov.pl/" }]);
   });
 
   it("upsert updates an existing source in place", async () => {
@@ -49,7 +55,7 @@ describe.skipIf(skipWithoutDatabase)("sources repository (PostgreSQL)", () => {
     });
     expect(after).toMatchObject({
       name: "New name",
-      baseUrl: "https://bip2.example.gov.pl",
+      baseUrl: "https://bip2.example.gov.pl/",
       enabled: false,
     });
     expect(after.createdAt).toEqual(before.createdAt);

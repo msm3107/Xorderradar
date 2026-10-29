@@ -38,6 +38,9 @@ Cały ruch wychodzący adapterów idzie przez `SafeHttpClient`:
   konkretnego źródła, z wpisem w DECISIONS).
 - Odrzucane: dane uwierzytelniające w URL (`user:pass@`), niestandardowe porty (chyba że
   źródło ich wymaga — wpis w adapterze), hosty IP literalne.
+- Zapisywane linki (od PR-01, `httpUrlSchema`): białe znaki, znaki sterujące i samotne
+  surogaty wewnątrz URL-a są odrzucane, a do bazy trafia kanoniczny `url.href` (zwalidowana
+  postać, nie surowy tekst wejściowy), z limitem długości także po normalizacji.
 - Linki do źródła pokazywane użytkownikowi (e-mail, UI) muszą mieć schemat `https:`/`http:`;
   inne (`javascript:`, `data:`) są odrzucane przy normalizacji.
 

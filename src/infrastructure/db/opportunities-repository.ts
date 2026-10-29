@@ -1,4 +1,5 @@
 import { sql, type Kysely, type Selectable } from "kysely";
+import type { z } from "zod";
 import { entityIdSchema, parseDomain } from "../../domain/common.js";
 import { DomainError } from "../../domain/errors.js";
 import {
@@ -18,7 +19,44 @@ export interface UpsertOpportunityResult {
   readonly opportunity: Opportunity;
 }
 
+/**
+ * Validates a jsonb value read back from the database. On failure the field
+ * paths are recorded in `invalid` (paths only, never values) and null is
+ * returned; the caller then refuses the whole row.
+ */
+function parseStoredJson<T extends z.ZodType>(
+  schema: T,
+  value: unknown,
+  field: string,
+  invalid: string[],
+): z.output<T> | null {
+  if (value === null) return null;
+  const result = schema.safeParse(value);
+  if (result.success) return result.data;
+  invalid.push(...result.error.issues.map((issue) => [field, ...issue.path.map(String)].join(".")));
+  return null;
+}
+
+/**
+ * Maps a row to the domain type. Columns are guaranteed by their SQL types
+ * and CHECKs; only jsonb needs validation. A row that no longer matches the
+ * domain schema (e.g. edited by hand) is refused as DomainError
+ * `invalid_stored_row` instead of surfacing a raw ZodError.
+ */
 function toOpportunity(row: Selectable<OpportunitiesTable>): Opportunity {
+  const invalid: string[] = [];
+  const location = parseStoredJson(locationSchema, row.location, "location", invalid);
+  const contact = parseStoredJson(contactSchema, row.contact, "contact", invalid);
+  if (invalid.length > 0) {
+    const fields = [...new Set(invalid)];
+    throw new DomainError(
+      "invalid_stored_row",
+      `Stored opportunity ${row.id} does not match the domain schema: ${fields.join(", ")}`,
+      fields,
+      null,
+      row.id,
+    );
+  }
   return {
     id: row.id,
     sourceId: row.source_id,
@@ -27,15 +65,14 @@ function toOpportunity(row: Selectable<OpportunitiesTable>): Opportunity {
     issuerName: row.issuer_name,
     title: row.title,
     description: row.description,
-    // jsonb comes back as parsed JSON; validate instead of casting.
-    location: row.location === null ? null : locationSchema.parse(row.location),
+    location,
     publishedAt: row.published_at,
     deadline: row.deadline,
     estimatedValue: row.estimated_value,
     // char(3): always exactly three letters (CHECK), so no padding to strip.
     currency: row.currency,
     categories: row.categories,
-    contact: row.contact === null ? null : contactSchema.parse(row.contact),
+    contact,
     fetchedAt: row.fetched_at,
     firstSeenAt: row.first_seen_at,
     updatedAt: row.updated_at,

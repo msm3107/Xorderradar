@@ -320,6 +320,60 @@ describe.skipIf(skipWithoutDatabase)("opportunities repository (PostgreSQL)", ()
     });
   });
 
+  describe("stored values", () => {
+    it("stores the canonical source URL and refuses whitespace in it", async () => {
+      const { opportunity } = await upsertOpportunity(
+        schema.db,
+        draft({ sourceUrl: "HTTPS://Zamowienia.Example.gov.pl/ogloszenie/<1>" }),
+      );
+      const { rows } = await sql<{ source_url: string }>`
+        SELECT source_url FROM opportunities WHERE id = ${opportunity.id}
+      `.execute(schema.db);
+      expect(rows).toEqual([
+        { source_url: "https://zamowienia.example.gov.pl/ogloszenie/%3C1%3E" },
+      ]);
+
+      const error = await domainErrorOf(
+        upsertOpportunity(
+          schema.db,
+          draft({ sourceUrl: "https://zamowienia.example.gov.pl/a b\n<script>" }),
+        ),
+      );
+      expect(error.code).toBe("invalid_input");
+      expect(error.fields).toEqual(["sourceUrl"]);
+    });
+
+    it("refuses lone surrogates instead of letting PostgreSQL replace them", async () => {
+      const error = await domainErrorOf(
+        upsertOpportunity(
+          schema.db,
+          draft({ title: "Remont\ud800", categories: ["x\udc00"], location: { city: "\ud800" } }),
+        ),
+      );
+      expect(error.code).toBe("invalid_input");
+      expect([...error.fields].sort()).toEqual(["categories.0", "location.city", "title"]);
+    });
+
+    it("a stored row that no longer matches the schema → invalid_stored_row", async () => {
+      const { opportunity } = await upsertOpportunity(
+        schema.db,
+        draft({ location: { city: "Łódź" } }),
+      );
+      // Simulate a manual edit that bypassed the application.
+      await sql`
+        UPDATE opportunities SET location = '{"foo": 1}' WHERE id = ${opportunity.id}
+      `.execute(schema.db);
+
+      const error = await domainErrorOf(getOpportunity(schema.db, opportunity.id));
+      expect(error.code).toBe("invalid_stored_row");
+      expect(error.rowId).toBe(opportunity.id);
+      expect(error.fields).toEqual(["location"]);
+      // Names the row and field only — never the stored value or its keys.
+      expect(error.message).toContain(opportunity.id);
+      expect(error.message).not.toContain("foo");
+    });
+  });
+
   describe("getOpportunity", () => {
     it("returns null for an unknown id", async () => {
       expect(await getOpportunity(schema.db, "00000000-0000-4000-8000-000000000000")).toBeNull();

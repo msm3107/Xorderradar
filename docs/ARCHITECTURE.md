@@ -64,8 +64,12 @@ składają zależności (proste wstrzykiwanie przez parametry, bez kontenera DI)
 ### Warstwa bazy danych (PR-01)
 
 - `domain/` — typy i schematy zod; importuje tylko `zod`. Brak wartości = `null` (nigdy `0`
-  ani `""`); kwoty jako string dziesiętny (`numeric` bez floatów); błąd domenowy `DomainError`
-  z kodem `invalid_input | duplicate | unknown_reference | constraint_violation`.
+  ani `""`); kwoty jako string dziesiętny (`numeric` bez floatów); teksty muszą być poprawnym
+  Unicode (bez samotnych surogatów UTF-16); linki zapisywane w postaci kanonicznej (`url.href`,
+  bez białych znaków i znaków sterujących); błąd domenowy `DomainError` z kodem
+  `invalid_input | duplicate | unknown_reference | constraint_violation | invalid_stored_row`
+  (ostatni: wiersz odczytany z bazy nie spełnia schematu domenowego — np. ręcznie zmieniony
+  jsonb; zawiera `rowId` i ścieżki pól, bez wartości).
 - `infrastructure/db/` — Kysely + `pg` (D-007). Repozytoria to zwykłe funkcje
   `(db, input) → wynik`, które walidują wejście schematem domenowym, budują wyłącznie
   parametryzowane zapytania i zamieniają naruszenia ograniczeń PostgreSQL (SQLSTATE 23505,
@@ -171,7 +175,7 @@ jawne, bo trafiają do `DomainError.constraint`.
 | ------------ | ----------- | ---- | ----------------------------------- |
 | `id`         | text        | nie  | PK, np. `baza-konkurencyjnosci`     |
 | `name`       | text        | nie  |                                     |
-| `base_url`   | text        | nie  |                                     |
+| `base_url`   | text        | nie  | kanoniczny `href` (http/https)      |
 | `enabled`    | boolean     | nie  | domyślnie `true`                    |
 | `created_at` | timestamptz | nie  | domyślnie `now()`                   |
 | `updated_at` | timestamptz | nie  | domyślnie `now()`; upsert → `now()` |
@@ -182,7 +186,7 @@ jawne, bo trafiają do `DomainError.constraint`.
 | ----------------- | ----------------- | ---- | ------------------------------------------------------------------------ |
 | `id`              | uuid              | nie  | PK, `gen_random_uuid()`                                                  |
 | `source_id`       | text FK → sources | nie  |                                                                          |
-| `source_url`      | text              | nie  | link do oryginału                                                        |
+| `source_url`      | text              | nie  | link do oryginału; kanoniczny `href` (http/https)                        |
 | `external_id`     | text              | tak  | identyfikator nadany przez źródło                                        |
 | `issuer_name`     | text              | nie  | zamawiający                                                              |
 | `title`           | text              | nie  |                                                                          |

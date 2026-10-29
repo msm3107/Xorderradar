@@ -105,7 +105,15 @@ Migracje (`src/infrastructure/db/migrations.ts`) to jawny SQL, wersjonowany w ko
 - `pnpm dev migrate` (ze źródeł, czyta `.env`) lub `node dist/main.js migrate` (build);
 - uruchamiaj po każdym wdrożeniu przed innymi komendami; ponowne uruchomienie nic nie zmienia;
 - wszystkie oczekujące migracje wykonują się w **jednej transakcji** (błąd = schemat bez zmian),
-  a równoległe uruchomienia są serializowane blokadą (PostgreSQL advisory lock);
+  a równoległe uruchomienia są serializowane blokadą (PostgreSQL advisory lock). Blokada jest
+  **jedna na bazę danych**, nie na schemat — migracje różnych schematów tej samej bazy też
+  czekają na siebie;
+- `statement_timeout` (30 s, patrz niżej) ogranicza także czekanie na tę blokadę i każdą
+  migrację: drugie, równoległe `migrate`, które czeka dłużej niż 30 s, kończy się
+  `Migration failed: timeout (57014)` (kod 1). To bezpieczne — nic nie zostało zastosowane, bo
+  migracje biegną w jednej transakcji — wystarczy uruchomić `migrate` ponownie. Przyszła
+  migracja, która może trwać dłużej (np. przebudowa dużej tabeli), musi sama podnieść limit:
+  `SET LOCAL statement_timeout = '10min'` na początku swojego `up`;
 - stan migracji: tabele `kysely_migration` i `kysely_migration_lock` w tym samym schemacie;
 - brak migracji „w dół” — wycofanie to odtworzenie z backupu albo nowa migracja.
 
@@ -131,6 +139,11 @@ przebieg nie jest pełną weryfikacją. Każdy plik testowy pracuje we własnym,
 schemacie (`search_path`), więc pliki mogą działać równolegle; schematy są usuwane po
 zakończeniu całego przebiegu. Użytkownik testowy musi móc tworzyć schematy w bazie testowej
 (właściciel bazy może). Nie wskazuj `TEST_DATABASE_URL` na bazę z danymi.
+
+W CI (ustawiona zmienna `CI`) albo z `REQUIRE_DB_TESTS=1` brak `TEST_DATABASE_URL` **przerywa
+przebieg błędem** zamiast pomijać testy — tam pominięty zestaw integracyjny nie może przejść
+jako zielony (`REQUIRE_DB_TESTS=1 pnpm check` przed oddaniem PR-a). Wartości `0`/`false`/pusta
+oznaczają „nie ustawiono”.
 
 ## Dokumentacja
 

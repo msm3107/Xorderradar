@@ -143,6 +143,42 @@ describe("opportunity draft schema", () => {
   });
 });
 
+describe("well-formed Unicode", () => {
+  const lone = "\ud800"; // an unpaired surrogate half
+
+  it("rejects lone surrogates in text, list items and jsonb object strings", () => {
+    expect(
+      invalidFields(opportunityDraftSchema, {
+        ...validDraft,
+        title: `Remont${lone}`,
+        categories: ["elektryka", `bhp${lone}`],
+        location: { city: `Łódź${lone}` },
+      }).sort(),
+    ).toEqual(["categories.1", "location.city", "title"]);
+  });
+
+  it("accepts valid surrogate pairs (e.g. emoji) and Polish letters", () => {
+    expect(
+      parseDomain(opportunityDraftSchema, { ...validDraft, title: "Zażółć gęślą jaźń 😀" }).title,
+    ).toBe("Zażółć gęślą jaźń 😀");
+  });
+
+  it("applies to company profiles too", () => {
+    expect(
+      companyProfileInputSchema.safeParse({
+        email: "a@b.pl",
+        name: `Firma${lone}`,
+        categories: [],
+        includeKeywords: [`klucz${lone}`],
+        excludeKeywords: [],
+        voivodeships: [],
+        counties: [],
+        active: true,
+      }).success,
+    ).toBe(false);
+  });
+});
+
 describe("location and contact", () => {
   it("accept partial objects with only the published parts", () => {
     expect(locationSchema.parse({ city: "Łódź" })).toEqual({ city: "Łódź" });
@@ -178,8 +214,62 @@ describe("URLs", () => {
     "https://user:pass@example.gov.pl/",
     "/relative/path",
     `https://example.gov.pl/${"a".repeat(2048)}`,
-  ])("rejects %s", (url) => {
+    // Whitespace and control characters inside the URL are rejected, not encoded.
+    "https://a.example/a b",
+    "https://a.example/a\nb",
+    "https://a.example/a b\n<script>",
+    "https://a.example/a\tb",
+    "https://a.example/a\rb",
+    "https://a.example/a\u0000b",
+    "https://a.example/a\u007fb",
+    "https://a.example/a\u00a0b", // non-breaking space (\s)
+    "https://a.example/\ud800", // lone surrogate
+  ])("rejects %j", (url) => {
     expect(httpUrlSchema.safeParse(url).success).toBe(false);
+  });
+
+  it("stores the canonical href, not the raw input", () => {
+    expect(httpUrlSchema.parse("  HTTPS://BIP.Example.GOV.pl/Zamowienia?id=1#top ")).toBe(
+      "https://bip.example.gov.pl/Zamowienia?id=1#top",
+    );
+    expect(httpUrlSchema.parse("http://bip.example.gov.pl")).toBe("http://bip.example.gov.pl/");
+    expect(httpUrlSchema.parse("https://bip.example.gov.pl/a/../b")).toBe(
+      "https://bip.example.gov.pl/b",
+    );
+  });
+
+  it("percent-encodes characters such as < so they are never stored raw", () => {
+    const href = httpUrlSchema.parse("https://a.example/<x>?q=<y>#<z>");
+    expect(href).toBe("https://a.example/%3Cx%3E?q=%3Cy%3E#%3Cz%3E");
+    expect(href).not.toMatch(/[<>]/);
+  });
+
+  it("applies the length limit to the canonical form too", () => {
+    // 1000 × "ż" is < 2048 characters as input but 6000+ once percent-encoded.
+    const input = `https://a.example/${"ż".repeat(1000)}`;
+    expect(input.length).toBeLessThanOrEqual(2048);
+    expect(httpUrlSchema.safeParse(input).success).toBe(false);
+    // Just under the limit after encoding is still accepted.
+    const fits = `https://a.example/${"a".repeat(2048 - "https://a.example/".length)}`;
+    expect(httpUrlSchema.parse(fits)).toHaveLength(2048);
+  });
+
+  it("canonicalizes both source.baseUrl and opportunity.sourceUrl", () => {
+    expect(
+      sourceInputSchema.parse({
+        id: "bip",
+        name: "BIP",
+        baseUrl: "HTTPS://BIP.Example.pl",
+        enabled: true,
+      }).baseUrl,
+    ).toBe("https://bip.example.pl/");
+    expect(
+      parseDomain(opportunityDraftSchema, { ...validDraft, sourceUrl: "https://A.Example/x" })
+        .sourceUrl,
+    ).toBe("https://a.example/x");
+    expect(
+      invalidFields(opportunityDraftSchema, { ...validDraft, sourceUrl: "https://a.example/a b" }),
+    ).toEqual(["sourceUrl"]);
   });
 });
 
