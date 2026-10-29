@@ -21,6 +21,7 @@ describe("loadConfig", () => {
       environment: "development",
       logLevel: "info",
       databaseUrl: DATABASE_URL,
+      crawlerContact: null,
     });
   });
 
@@ -29,6 +30,7 @@ describe("loadConfig", () => {
       environment: "production",
       logLevel: "warn",
       databaseUrl: DATABASE_URL,
+      crawlerContact: null,
     });
   });
 
@@ -37,6 +39,7 @@ describe("loadConfig", () => {
       environment: "development",
       logLevel: "info",
       databaseUrl: DATABASE_URL,
+      crawlerContact: null,
     });
   });
 
@@ -82,6 +85,34 @@ describe("loadConfig", () => {
     ])("rejects %s naming the variable without echoing the value", (value) => {
       const message = configErrorMessage({ DATABASE_URL: value });
       expect(message).toContain("DATABASE_URL");
+      expect(message).not.toContain("s3cr3t-value-should-not-leak");
+    });
+  });
+
+  describe("CRAWLER_CONTACT", () => {
+    it("is optional, so commands that do not fetch sources work without it", () => {
+      expect(loadConfig({ DATABASE_URL }).crawlerContact).toBeNull();
+      expect(loadConfig({ DATABASE_URL, CRAWLER_CONTACT: "" }).crawlerContact).toBeNull();
+    });
+
+    it.each(["ops@radar.example.com", "https://radar.example.com/bot", "https://example.com"])(
+      "accepts %s",
+      (contact) => {
+        expect(loadConfig({ DATABASE_URL, CRAWLER_CONTACT: contact }).crawlerContact).toBe(contact);
+      },
+    );
+
+    it.each([
+      "http://radar.example.com/s3cr3t-value-should-not-leak",
+      "https://user:s3cr3t-value-should-not-leak@radar.example.com/",
+      "mailto:s3cr3t-value-should-not-leak@example.com",
+      "s3cr3t-value-should-not-leak",
+      "ops@example.com (s3cr3t-value-should-not-leak)",
+      "https://radar.example.com/s3cr3t-value-should-not-leak\r\nX-Injected: 1",
+      `https://radar.example.com/${"s3cr3t-value-should-not-leak".repeat(10)}`,
+    ])("rejects %j naming the variable without echoing the value", (value) => {
+      const message = configErrorMessage({ DATABASE_URL, CRAWLER_CONTACT: value });
+      expect(message).toContain("CRAWLER_CONTACT");
       expect(message).not.toContain("s3cr3t-value-should-not-leak");
     });
   });
