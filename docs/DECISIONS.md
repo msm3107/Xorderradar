@@ -65,14 +65,30 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
   zapada w PR-06.
 - **Konsekwencje:** brak nieużywanych zależności i otwartych portów do PR-06.
 
-## D-007 — ORM / migracje
+## D-007 — Dostęp do bazy i migracje: Kysely + pg
 
-- **Status:** Proposed → decyzja na początku PR-01
-- **Kandydaci:** Drizzle ORM + drizzle-kit (schemat w TS, generowane migracje SQL
-  przeglądane w git) lub Kysely + jego migrator (query builder, migracje w TS). Oba
-  parametryzują zapytania i mają dobre typowanie.
+- **Status:** Accepted (PR-01)
 - **Kryteria:** jawny SQL w migracjach, obsługa częściowych indeksów unikalnych, CHECK,
   `jsonb`, `text[]`, brak magii runtime, aktywne utrzymanie, brak znanych podatności.
+- **Decyzja:** Kysely `0.29.6` (query builder) + sterownik `pg` `8.23.1` (+ dev
+  `@types/pg` `8.23.1`), wersje przypięte dokładnie. PostgreSQL 16.
+  - Kysely nie ma zależności runtime; typowany query builder parametryzuje wartości z
+    konstrukcji (SQL injection wymagałby jawnego `sql.raw`, którego nie używamy).
+  - Wbudowany `Migrator`: blokada (advisory lock) przeciw równoległym uruchomieniom i
+    transakcyjny DDL na PostgreSQL. Migracje to jawny SQL w szablonie `sql` (indeks
+    częściowy, CHECK, `jsonb`, `text[]` zapisane wprost), podawane statycznym providerem
+    (bez skanowania katalogu, więc działa z `dist/`). Brak kroku codegen — typy tabel
+    (`src/infrastructure/db/schema.ts`) utrzymywane ręcznie, rozjazd łapią testy integracyjne.
+- **Odrzucone:** Drizzle ORM + drizzle-kit — na razie: przejście 0.45 → 1.0-rc (zmiany API),
+  a drizzle-kit to osobne narzędzie generujące migracje. Sam `pg` + własny migrator — typowane
+  zapytania zmniejszają ryzyko błędów w repozytoriach rozwijanych w kolejnych PR-ach, kosztem
+  jednej biblioteki bez zależności. Kysely `0.29.7` pominięta: opublikowana 2026-10-17, < 2
+  tygodnie przed decyzją (`docs/SECURITY.md` §13).
+- **Konsekwencje:** zależności tranzytywne tylko od `pg` (`pg-pool`, `pg-protocol`,
+  `pg-types`, `pg-connection-string`, `pgpass` …); `pnpm audit` czysty w chwili decyzji.
+  Migrator przy starcie listuje tabele we wszystkich widocznych schematach, zanim weźmie
+  blokadę — dlatego testy usuwają swoje schematy dopiero po całym przebiegu
+  (`tests/integration/global-setup.ts`).
 
 ## D-008 — RawDocument tylko w pamięci w MVP
 
@@ -85,7 +101,7 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
 
 ## D-009 — Profil firmy = subskrypcja (jedna tabela)
 
-- **Status:** Proposed (PR-01)
+- **Status:** Accepted (PR-01)
 - **Decyzja:** `company_profiles` łączy odbiorcę (e-mail) i preferencje dopasowania. Bez
   osobnych tabel użytkowników, organizacji, filtrów.
 - **Konsekwencje:** prosty model dla MVP; wiele osób na firmę / wiele profili na konto —
@@ -109,7 +125,7 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
 - **Kontekst:** Claude Code 2.1.312 obsługuje definicje subagentów w `.claude/agents/*.md`
   (frontmatter: `name`, `description`, `tools`, `model`).
 - **Decyzja:** dokładnie trzy pliki: `coder.md`, `code-and-safety-reviewer.md`,
-  `quality-reviewer.md`. Reviewerzy bez narzędzi edycji (Read, Grep, Glob, Bash).
+  `quality-reviewer.md`. Reviewerzy bez Edit/Write (Read, Grep, Glob, Bash).
 - **Konsekwencje:** definicje ładują się przy starcie sesji. W sesji PR-00, w której pliki
   powstały, reviewerzy zostali uruchomieni jako osobne subagenty z treścią tych definicji
   (patrz `docs/STATE.md`).
@@ -125,5 +141,6 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
 
 - **Status:** Accepted (PR-00)
 - **Decyzja:** dokumentacja produktowa i procesowa po polsku; kod, identyfikatory,
-  komunikaty CLI, `CLAUDE.md` i definicje agentów po angielsku (stabilne dla narzędzi).
+  komunikaty CLI, `CLAUDE.md`, `docs/STATE.md` i definicje agentów po angielsku (stabilne
+  dla narzędzi).
   Treści dla użytkownika końcowego (e-mail, UI) po polsku.

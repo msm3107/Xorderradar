@@ -5,5 +5,7 @@ export default defineConfig({
     include: ["tests/**/*.test.ts"],
     environment: "node",
     restoreMocks: true,
+    // Drops the PostgreSQL schemas created by integration tests after the run.
+    globalSetup: ["tests/integration/global-setup.ts"],
   },
 });
