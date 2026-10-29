@@ -5,6 +5,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterAll, describe, expect, it } from "vitest";
+import {
+  requireTestDatabaseUrl,
+  skipWithoutDatabase,
+  unreachableDatabaseUrl,
+} from "./integration/test-database.js";
 
 const execFileAsync = promisify(execFile);
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -46,11 +51,34 @@ async function expectFailure(run: ReturnType<typeof runEntryPoint>) {
 /**
  * End-to-end smoke test: starts the real entry point in a separate Node process,
  * exactly as cron/operators will, and checks the health command's contract.
+ * Runs that need a reachable database use TEST_DATABASE_URL and are skipped
+ * (with a notice) without it.
  */
 describe("smoke: application entry point", { timeout: TEST_TIMEOUT_MS }, () => {
-  it("`health` exits 0 and prints status ok", async () => {
-    const { stdout } = await runEntryPoint({ args: ["health"], env: { NODE_ENV: "test" } });
+  it.skipIf(skipWithoutDatabase)("`health` exits 0 and prints status ok", async () => {
+    const { stdout } = await runEntryPoint({
+      args: ["health"],
+      env: { NODE_ENV: "test", DATABASE_URL: requireTestDatabaseUrl() },
+    });
     expect(JSON.parse(stdout)).toMatchObject({ status: "ok", service: "radar-zamowien" });
+  });
+
+  it("`health` exits 1 when the database is unreachable, without revealing the password", async () => {
+    const password = "Sm0ke-Passw0rd-must-not-leak";
+    const failure = await expectFailure(
+      runEntryPoint({
+        args: ["health"],
+        env: { NODE_ENV: "test", DATABASE_URL: unreachableDatabaseUrl(password) },
+      }),
+    );
+    expect(failure.code).toBe(1);
+    expect(JSON.parse(failure.stdout)).toMatchObject({
+      status: "error",
+      database: { status: "error", reason: "unreachable" },
+    });
+    expect(failure.stderr).toContain("Database check failed: unreachable");
+    expect(failure.stdout).not.toContain(password);
+    expect(failure.stderr).not.toContain(password);
   });
 
   it("an unknown command exits with code 2", async () => {
@@ -91,22 +119,42 @@ describe("smoke: env file loading", { timeout: TEST_TIMEOUT_MS }, () => {
     expect(failure.stderr).toContain("LOG_LEVEL");
   });
 
+  /*
+   * The next two runs need no database: an unreachable DATABASE_URL makes
+   * `health` exit 1, but only after the configuration (env file + environment)
+   * loaded successfully, which is what they check. A configuration error
+   * would print no JSON report at all.
+   */
   it("lets real environment variables take precedence over the env file", async () => {
-    const { stdout } = await runEntryPoint({
-      nodeFlags,
-      args: ["health"],
-      env: { LOG_LEVEL: "warn" },
-    });
+    const failure = await expectFailure(
+      runEntryPoint({
+        nodeFlags,
+        args: ["health"],
+        env: { LOG_LEVEL: "warn", DATABASE_URL: unreachableDatabaseUrl("pw") },
+      }),
+    );
+    expect(failure.code).toBe(1);
     // NODE_ENV still comes from the file; LOG_LEVEL=bogus was overridden.
-    expect(JSON.parse(stdout)).toMatchObject({ status: "ok", environment: "test" });
+    expect(JSON.parse(failure.stdout)).toMatchObject({
+      environment: "test",
+      database: { status: "error", reason: "unreachable" },
+    });
+    expect(failure.stderr).not.toContain("Invalid environment configuration");
   });
 
   it("starts normally when the env file does not exist", async () => {
-    const { stdout } = await runEntryPoint({
-      nodeFlags: [`--env-file-if-exists=${join(dir, "missing.env")}`],
-      args: ["health"],
-      env: {},
+    const failure = await expectFailure(
+      runEntryPoint({
+        nodeFlags: [`--env-file-if-exists=${join(dir, "missing.env")}`],
+        args: ["health"],
+        env: { DATABASE_URL: unreachableDatabaseUrl("pw") },
+      }),
+    );
+    expect(failure.code).toBe(1);
+    expect(JSON.parse(failure.stdout)).toMatchObject({
+      environment: "development",
+      database: { status: "error", reason: "unreachable" },
     });
-    expect(JSON.parse(stdout)).toMatchObject({ status: "ok", environment: "development" });
+    expect(failure.stderr).not.toContain("Invalid environment configuration");
   });
 });

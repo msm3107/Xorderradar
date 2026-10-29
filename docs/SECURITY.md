@@ -38,6 +38,9 @@ Cały ruch wychodzący adapterów idzie przez `SafeHttpClient`:
   konkretnego źródła, z wpisem w DECISIONS).
 - Odrzucane: dane uwierzytelniające w URL (`user:pass@`), niestandardowe porty (chyba że
   źródło ich wymaga — wpis w adapterze), hosty IP literalne.
+- Zapisywane linki (od PR-01, `httpUrlSchema`): białe znaki, znaki sterujące i samotne
+  surogaty wewnątrz URL-a są odrzucane, a do bazy trafia kanoniczny `url.href` (zwalidowana
+  postać, nie surowy tekst wejściowy), z limitem długości także po normalizacji.
 - Linki do źródła pokazywane użytkownikowi (e-mail, UI) muszą mieć schemat `https:`/`http:`;
   inne (`javascript:`, `data:`) są odrzucane przy normalizacji.
 
@@ -118,6 +121,9 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
 - Nie logujemy: sekretów, pełnych `DATABASE_URL`/`SMTP_URL`, treści e-maili, adresów e-mail
   użytkowników (najwyżej identyfikator profilu), pełnych odpowiedzi źródeł.
 - Komunikaty błędów dla użytkownika są bezpieczne; szczegóły tylko w logu.
+- Błędy bazy danych (od PR-01): CLI pokazuje tylko stały powód + kod SQLSTATE/errno, nigdy
+  komunikatu sterownika/serwera; repozytoria zamieniają naruszenia ograniczeń na
+  `DomainError` bez `detail` serwera (zawiera wartości, np. adres e-mail).
 
 ## 13. Dependency policy
 
