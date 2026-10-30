@@ -7,6 +7,15 @@ import {
   pingDatabase,
 } from "./infrastructure/db/database.js";
 import { describeDatabaseFailure, formatDatabaseFailure } from "./infrastructure/db/errors.js";
+import { HttpClientError } from "./infrastructure/http/errors.js";
+import {
+  SafeHttpClient,
+  type SafeHttpClientOptions,
+} from "./infrastructure/http/safe-http-client.js";
+import { createLogger } from "./infrastructure/logger.js";
+import { previewSource, type SourcePreview } from "./sources/preview.js";
+import { sourceAdapters } from "./sources/registry.js";
+import { SourceFormatError, type SourceAdapter, type SourceHttpClient } from "./sources/types.js";
 
 export interface CliIo {
   readonly env: Readonly<Record<string, string | undefined>>;
@@ -22,14 +31,45 @@ export interface CliDatabase {
   close(): Promise<void>;
 }
 
+/** What commands that read sources need; injected so tests run without the network. */
+export interface CliSourceDeps {
+  readonly adapters: ReadonlyMap<string, SourceAdapter>;
+  /** One client per source run (its error budget and rate limit are per instance). */
+  readonly createHttpClient: (options: SafeHttpClientOptions) => SourceHttpClient;
+  readonly now: () => Date;
+  /** Run-level timeout of one source run (docs/SECURITY.md §4). */
+  readonly runTimeoutMs: number;
+}
+
 /** External dependencies, injected so the CLI can be unit-tested without PostgreSQL. */
 export interface CliDeps {
   /** Must not connect yet; connecting happens on the first operation. */
   readonly openDatabase: (databaseUrl: string) => CliDatabase;
+  /** Defaults to defaultSourceDeps (the real network); tests inject fakes. */
+  readonly sources?: CliSourceDeps;
 }
+
+/**
+ * Bounds a whole `source:preview` run. Its default limit needs one request per
+ * notice type; the 500-record maximum (per notice type) about 40 requests at
+ * >= 2 s each.
+ */
+export const SOURCE_RUN_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * Production source wiring. SafeHttpClient is constructed with options only:
+ * its test-only deps could bypass the SSRF protection and rate limiting (D-014).
+ */
+export const defaultSourceDeps: CliSourceDeps = {
+  adapters: sourceAdapters,
+  createHttpClient: (options) => new SafeHttpClient(options),
+  now: () => new Date(),
+  runTimeoutMs: SOURCE_RUN_TIMEOUT_MS,
+};
 
 /** Production wiring: a real connection pool (src/infrastructure/db). */
 export const defaultCliDeps: CliDeps = {
+  sources: defaultSourceDeps,
   openDatabase(databaseUrl) {
     const db = createDatabase(databaseUrl);
     return {
@@ -44,18 +84,103 @@ export const defaultCliDeps: CliDeps = {
 export const ExitCode = { Ok: 0, Failure: 1, Usage: 2 } as const;
 export type ExitCode = (typeof ExitCode)[keyof typeof ExitCode];
 
-const usage = `Usage: radar-zamowien <command>
+export const PREVIEW_DEFAULT_LIMIT = 20;
+export const PREVIEW_MAX_LIMIT = 500;
+
+const usage = `Usage: radar-zamowien <command> [arguments]
 
 Commands:
   health    Print a JSON health report (incl. database connectivity); exit 0 when operational.
   migrate   Apply pending database migrations; prints the applied names (none when up to date).
+  source:preview <sourceId> [--date YYYY-MM-DD] [--limit N]
+            Fetch the notices a source published on one day and print them normalized as
+            JSON; nothing is stored. Requires CRAWLER_CONTACT.
+            Sources: ${[...sourceAdapters.keys()].join(", ")}.
+            --date   publication day, default yesterday (UTC)
+            --limit  max records per notice type, 1-${String(PREVIEW_MAX_LIMIT)}, default ${String(PREVIEW_DEFAULT_LIMIT)}
 `;
 
-type Command = "health" | "migrate";
-const commands: readonly Command[] = ["health", "migrate"];
+type Command = "health" | "migrate" | "source:preview";
+const commands: readonly Command[] = ["health", "migrate", "source:preview"];
 
 function isCommand(value: string): value is Command {
   return (commands as readonly string[]).includes(value);
+}
+
+interface PreviewArgs {
+  readonly adapter: SourceAdapter;
+  readonly publicationDate: string;
+  readonly limit: number;
+}
+
+type Invocation =
+  | { readonly command: "health" | "migrate" }
+  | { readonly command: "source:preview"; readonly preview: PreviewArgs };
+
+/** A real calendar day as `YYYY-MM-DD` (2026-02-30 is rejected, not rolled over). */
+function isCalendarDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (match === null) return false;
+  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+  );
+}
+
+/** The previous calendar day in UTC. */
+function yesterdayUtc(now: Date): string {
+  return new Date(now.getTime() - 86_400_000).toISOString().slice(0, 10);
+}
+
+/** Returns the parsed arguments or a usage error message. */
+function parsePreviewArgs(args: readonly string[], sources: CliSourceDeps): PreviewArgs | string {
+  const [sourceId, ...options] = args;
+  if (sourceId === undefined || sourceId.startsWith("-")) {
+    return 'Command "source:preview" needs a source id.';
+  }
+  const adapter = sources.adapters.get(sourceId);
+  if (adapter === undefined) return `Unknown source: ${JSON.stringify(sourceId)}`;
+  let publicationDate: string | null = null;
+  let limit: number | null = null;
+  for (let index = 0; index < options.length; index += 2) {
+    const name = options[index] ?? "";
+    const value = options[index + 1];
+    if (name !== "--date" && name !== "--limit") {
+      return `Unexpected argument: ${JSON.stringify(name)}`;
+    }
+    if (value === undefined) return `Option ${name} needs a value.`;
+    if (name === "--date") {
+      if (publicationDate !== null) return "Option --date given twice.";
+      if (!isCalendarDate(value)) return "--date must be a calendar date YYYY-MM-DD.";
+      publicationDate = value;
+    } else {
+      if (limit !== null) return "Option --limit given twice.";
+      if (!/^[1-9]\d{0,2}$/.test(value) || Number(value) > PREVIEW_MAX_LIMIT) {
+        return `--limit must be an integer from 1 to ${String(PREVIEW_MAX_LIMIT)}.`;
+      }
+      limit = Number(value);
+    }
+  }
+  return {
+    adapter,
+    publicationDate: publicationDate ?? yesterdayUtc(sources.now()),
+    limit: limit ?? PREVIEW_DEFAULT_LIMIT,
+  };
+}
+
+/** Returns the invocation or a usage error message. */
+function parseInvocation(
+  command: Command,
+  rest: readonly string[],
+  sources: CliSourceDeps,
+): Invocation | string {
+  if (command === "source:preview") {
+    const preview = parsePreviewArgs(rest, sources);
+    return typeof preview === "string" ? preview : { command, preview };
+  }
+  if (rest.length > 0) return `Command "${command}" takes no arguments.`;
+  return { command };
 }
 
 /** Printed instead of an unexpected error, whose message or stack could carry configuration. */
@@ -95,8 +220,10 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
     io.stderr(`Unknown command: ${JSON.stringify(command)}\n\n${usage}`);
     return ExitCode.Usage;
   }
-  if (rest.length > 0) {
-    io.stderr(`Command "${command}" takes no arguments.\n\n${usage}`);
+  const sources = deps.sources ?? defaultSourceDeps;
+  const invocation = parseInvocation(command, rest, sources);
+  if (typeof invocation === "string") {
+    io.stderr(`${invocation}\n\n${usage}`);
     return ExitCode.Usage;
   }
 
@@ -111,9 +238,15 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
     throw error;
   }
 
+  // Reads a source only: no database is opened (DATABASE_URL is still
+  // validated by loadConfig, like for every command).
+  if (invocation.command === "source:preview") {
+    return runSourcePreview(config, invocation.preview, io, sources);
+  }
+
   const database = deps.openDatabase(config.databaseUrl);
   try {
-    switch (command) {
+    switch (invocation.command) {
       case "health":
         return await runHealth(config, database, io);
       case "migrate":
@@ -150,4 +283,109 @@ async function runMigrate(database: CliDatabase, io: CliIo): Promise<ExitCode> {
     io.stderr(`Migration failed${where}: ${formatDatabaseFailure(failure)}\n`);
     return ExitCode.Failure;
   }
+}
+
+/** Groups rejections by their fixed reason text (field names only, no source values). */
+function countReasons(preview: SourcePreview): Record<string, number> {
+  const counts = new Map<string, number>();
+  for (const { reason } of preview.rejections) counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  return Object.fromEntries(counts);
+}
+
+/**
+ * `source:preview`: one bounded source run (record limit, page limits in the
+ * adapter, run timeout) through a fresh SafeHttpClient, printed as JSON on
+ * stdout. Nothing is stored. Log lines (JSON on stderr) carry the sourceId,
+ * duration, status and counts — never URLs or response content.
+ */
+async function runSourcePreview(
+  config: AppConfig,
+  args: PreviewArgs,
+  io: CliIo,
+  sources: CliSourceDeps,
+): Promise<ExitCode> {
+  const { adapter } = args;
+  // Checked here as well as in SafeHttpClient, so the rule does not depend on
+  // which client factory is wired in.
+  if (config.crawlerContact === null) {
+    io.stderr(
+      "CRAWLER_CONTACT is required for fetching sources (an e-mail address or https URL).\n",
+    );
+    return ExitCode.Failure;
+  }
+  const logger = createLogger(config.logLevel, io.stderr);
+  let http: SourceHttpClient;
+  try {
+    http = sources.createHttpClient({
+      sourceId: adapter.sourceId,
+      allowedHosts: adapter.allowedHosts,
+      contact: config.crawlerContact,
+      logger,
+    });
+  } catch (error: unknown) {
+    // SafeHttpClient refuses to start without CRAWLER_CONTACT.
+    if (error instanceof ConfigError) {
+      io.stderr(`${error.message}\n`);
+      return ExitCode.Failure;
+    }
+    throw error;
+  }
+
+  const signal = AbortSignal.timeout(sources.runTimeoutMs);
+  const started = performance.now();
+  const elapsed = () => Math.round(performance.now() - started);
+  let preview: SourcePreview;
+  try {
+    preview = await previewSource(adapter, {
+      http,
+      signal,
+      publicationDate: args.publicationDate,
+      maxRecords: args.limit,
+      now: sources.now,
+      logger,
+    });
+  } catch (error: unknown) {
+    if (!(error instanceof HttpClientError) && !(error instanceof SourceFormatError)) throw error;
+    const timedOut = signal.aborted;
+    logger.error("source preview failed", {
+      sourceId: adapter.sourceId,
+      status: "error",
+      durationMs: elapsed(),
+      errorCode: error instanceof HttpClientError ? error.code : "invalid_document",
+      httpStatus: error instanceof HttpClientError ? error.status : null,
+      timedOut,
+    });
+    const why = timedOut ? "run timeout exceeded" : error.message;
+    io.stderr(`Source preview failed: ${why}\n`);
+    return ExitCode.Failure;
+  }
+
+  const durationMs = elapsed();
+  const counts = {
+    documents: preview.documents,
+    extracted: preview.extracted,
+    normalized: preview.candidates.length,
+    rejected: preview.rejections.length,
+  };
+  logger.info("source preview finished", {
+    sourceId: adapter.sourceId,
+    status: "ok",
+    durationMs,
+    ...counts,
+    incomplete: preview.incomplete,
+  });
+  const report = {
+    status: "ok",
+    sourceId: adapter.sourceId,
+    publicationDate: args.publicationDate,
+    limit: args.limit,
+    durationMs,
+    ...counts,
+    rejectionReasons: countReasons(preview),
+    incomplete: preview.incomplete,
+    rejections: preview.rejections,
+    records: preview.candidates,
+  };
+  io.stdout(`${JSON.stringify(report)}\n`);
+  return ExitCode.Ok;
 }

@@ -49,7 +49,9 @@ Rezultat: wersja pilotażowa działająca u pierwszych firm: deployment, backup,
 błędów, dokumentacja operacyjna.
 
 Źródła dodajemy **tylko wtedy, gdy zwiększają pokrycie potrzebne realnym klientom**
-(jeden adapter = jeden PR). Nie dodajemy źródeł „bo możemy”.
+(jeden adapter = jeden PR). Nie dodajemy źródeł „bo możemy”. Wyjątek z definicji: **drugie
+źródło** (Baza Konkurencyjności albo platformy zakupowe/BIP) jest warunkiem wartości produktu
+dla małych firm, a nie opcją — BZP zawiera niewiele małych zamówień (D-015).
 
 ## PHASE 5 — VALIDATION
 

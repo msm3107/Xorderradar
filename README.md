@@ -8,10 +8,12 @@ i informuje firmę tylko o tych, które faktycznie do niej pasują.
 źródła → pobranie → normalizacja → deduplikacja → dopasowanie → alert
 ```
 
-> Status: **PR-01 (Core Domain & Database)**. Repozytorium zawiera szkielet projektu, model
-> domenowy (`Source`, `Opportunity`, `CompanyProfile`), schemat PostgreSQL z migracjami,
-> repozytoria oraz komendy CLI `health` i `migrate`. Pozostałe funkcje produktu (źródła,
-> ingestion, matching, e-mail) powstają w kolejnych PR-ach — patrz
+> Status: **PR-02 (HTTP Client & First Source Adapter)**. Repozytorium zawiera szkielet
+> projektu, model domenowy (`Source`, `Opportunity`, `CompanyProfile`), schemat PostgreSQL z
+> migracjami, repozytoria, bezpieczny klient HTTP, pierwszy adapter źródła (BZP przez oficjalne
+> API platformy e-Zamówienia) oraz komendy CLI `health`, `migrate` i `source:preview`.
+> Pozostałe funkcje produktu (zapis ogłoszeń/ingestion, matching, e-mail) powstają w kolejnych
+> PR-ach — patrz
 > [`docs/PR_PLAN.md`](docs/PR_PLAN.md) i [`docs/STATE.md`](docs/STATE.md).
 
 ## Wymagania
@@ -39,14 +41,20 @@ Wersja produkcyjna (zmienne eksportuje środowisko — `node dist/main.js` nie c
 pnpm build
 DATABASE_URL=postgres://… node dist/main.js migrate
 DATABASE_URL=postgres://… node dist/main.js health
+DATABASE_URL=postgres://… CRAWLER_CONTACT=<twój-monitorowany-kontakt> node dist/main.js source:preview bzp --date 2026-10-29 --limit 25 | jq .
 ```
+
+Sprawdzenie `source:preview` (AC1): kod wyjścia 0, `normalized` > 0, a w logach
+`source listing fetched` oba typy ogłoszeń (`part`) mają `records` > 0; pełna lista kontrolna w
+[`docs/STATE.md`](docs/STATE.md) → „Blockers”.
 
 ### Komendy CLI
 
-| Komenda   | Co robi                                                                                                                                        |
-| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `health`  | Raport JSON na stdout: konfiguracja + połączenie z bazą (`select 1`, ograniczone timeoutem). Baza niedostępna → `"status":"error"`, kod `1`.   |
-| `migrate` | Stosuje oczekujące migracje i wypisuje ich nazwy (`{"status":"ok","applied":[...]}`). Ponowne uruchomienie jest bezpieczne: `"applied":[]`, 0. |
+| Komenda                                                     | Co robi                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `health`                                                    | Raport JSON na stdout: konfiguracja + połączenie z bazą (`select 1`, ograniczone timeoutem). Baza niedostępna → `"status":"error"`, kod `1`.                                                                                                                                                                                                                                                                                                                               |
+| `migrate`                                                   | Stosuje oczekujące migracje i wypisuje ich nazwy (`{"status":"ok","applied":[...]}`). Ponowne uruchomienie jest bezpieczne: `"applied":[]`, 0.                                                                                                                                                                                                                                                                                                                             |
+| `source:preview <sourceId> [--date YYYY-MM-DD] [--limit N]` | Pobiera ogłoszenia źródła opublikowane jednego dnia (domyślnie wczoraj według UTC) i wypisuje je znormalizowane jako JSON (liczniki, odrzucenia z powodami, `incomplete` przy osiągniętym limicie). Nic nie zapisuje i nie łączy się z bazą (`DATABASE_URL` musi jednak być ustawiony — wspólna walidacja konfiguracji). `--limit`: maks. rekordów na typ ogłoszenia (BZP: zwykłe i małe zamówienia osobno), 1–500, domyślnie 20. Wymaga `CRAWLER_CONTACT`. Źródła: `bzp`. |
 
 Kody wyjścia: `0` — OK, `1` — błąd konfiguracji/wykonania (np. baza niedostępna), `2` — błędne
 użycie (komenda i argumenty są sprawdzane przed konfiguracją, więc błędne użycie zawsze daje `2`).

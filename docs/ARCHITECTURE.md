@@ -3,9 +3,10 @@
 > **Stan:** po PR-01 istnieją: szkielet CLI (`src/cli.ts`, `src/main.ts`, `src/health.ts`,
 > `src/infrastructure/config.ts`, `src/infrastructure/logger.ts`), model domenowy
 > (`src/domain/`) oraz warstwa bazy danych (`src/infrastructure/db/`: pula, migracje,
-> repozytoria; komendy `health` z kontrolą bazy i `migrate`). PR-02 (część A) dodał
-> `SafeHttpClient` (`src/infrastructure/http/`) — bez adapterów i wywołań produkcyjnych do
-> czasu wyboru źródła (część B). Wszystko poniżej oznaczone
+> repozytoria; komendy `health` z kontrolą bazy i `migrate`). PR-02 dodał `SafeHttpClient`
+> (`src/infrastructure/http/`, część A) oraz kontrakt adaptera, pierwszy adapter — BZP przez
+> oficjalne API (`src/sources/`, D-015) — i komendę `source:preview` (część B), bez zapisu do
+> bazy (zapis: PR-03). Wszystko poniżej oznaczone
 > _(plan, PR-xx)_ to projekt docelowy — kontrakty mogą zostać doprecyzowane w danym PR, a
 > zmiana musi trafić do tego dokumentu i do `docs/DECISIONS.md`.
 
@@ -47,16 +48,23 @@ src/
 │   ├── db/                 # pula pg + Kysely, migracje, repozytoria, mapowanie błędów [PR-01]
 │   └── http/               # SafeHttpClient: polityka URL/IP, retry, limity      [PR-02]
 ├── domain/                 # typy + schematy zod: Source, Opportunity, CompanyProfile [PR-01]
-├── sources/                # adaptery źródeł, po jednym pliku/katalogu na źródło(plan, PR-02)
+├── sources/                # kontrakt adaptera, rejestr, podgląd; bzp/ = BZP    [PR-02]
 ├── ingestion/              # normalizacja wspólna, fingerprint, dedup, job     (plan, PR-03)
 ├── matching/               # scoring + wyjaśnienie                             (plan, PR-04)
 ├── notifications/          # digest, szablon, wysyłka, idempotencja            (plan, PR-05)
 └── web/                    # minimalny UI renderowany po stronie serwera       (plan, PR-06)
 tests/
 ├── *.test.ts               # unit / smoke                                           [PR-00]
-├── fixtures/<source>/      # zapisane, zanonimizowane odpowiedzi źródeł        (plan, PR-02)
+├── fixtures/<source>/      # prawdziwe odpowiedzi źródeł + README (pseudonimizacja) [PR-02]
 └── integration/            # testy z prawdziwym PostgreSQL (TEST_DATABASE_URL)      [PR-01]
 ```
+
+Fixture'y źródeł to prawdziwe odpowiedzi, zapisane bajt w bajt **z wyjątkiem** danych
+kontaktowych osób w wartościach `htmlBody`, pseudonimizowanych zamianą tekstu na surowym pliku
+(bez ponownej serializacji JSON): każdy e-mail → `kontakt@example.invalid`, każdy numer
+telefonu/faksu → `000 000 000`, imię i nazwisko osoby fizycznej → `Jan Kowalski` (nazwy i
+adresy instytucji zostają). Ta sama zasada obowiązuje przyszłe fixture'y (m.in. HTML w PR-03);
+lista zamian — w `tests/fixtures/<source>/README.md`.
 
 Zasada zależności: `domain` nie importuje niczego z innych modułów. `sources` zależy od
 `domain` i `infrastructure/http`. `matching` zależy tylko od `domain` (czyste funkcje).
@@ -88,33 +96,71 @@ PUBLIC SOURCE → SOURCE ADAPTER → RAW DOCUMENT → NORMALIZER → OPPORTUNITY
   → DEDUPLICATION → MATCHING → USER SUBSCRIPTION (profil) → EMAIL DIGEST / ALERT
 ```
 
-| Krok         | Moduł                                                  | Wejście → wyjście                                          | PR    |
-| ------------ | ------------------------------------------------------ | ---------------------------------------------------------- | ----- |
-| Pobranie     | `sources/<id>` + `infrastructure/http`                 | konfiguracja źródła → `RawDocument[]`                      | 02    |
-| Ekstrakcja   | `sources/<id>`                                         | `RawDocument` → `ExtractedNotice[]` (pola surowe, stringi) | 02    |
-| Normalizacja | `sources/<id>` + wspólne helpery `ingestion/normalize` | `ExtractedNotice` → `OpportunityDraft`                     | 02/03 |
-| Deduplikacja | `ingestion`                                            | `OpportunityDraft` → insert / update / skip                | 03    |
-| Dopasowanie  | `matching`                                             | `Opportunity` × `CompanyProfile` → `MatchResult`           | 04    |
-| Alert        | `notifications`                                        | dopasowania profilu → jeden digest, idempotentnie          | 05    |
+| Krok         | Moduł                                  | Wejście → wyjście                                          | PR  |
+| ------------ | -------------------------------------- | ---------------------------------------------------------- | --- |
+| Pobranie     | `sources/<id>` + `infrastructure/http` | dzień publikacji + limit → `FetchResult` (`RawDocument[]`) | 02  |
+| Ekstrakcja   | `sources/<id>`                         | `RawDocument` → rekordy źródła (walidowane każdy osobno)   | 02  |
+| Normalizacja | `sources/<id>`                         | rekord → `OpportunityCandidate` albo odrzucenie z powodem  | 02  |
+| Fingerprint  | `ingestion`                            | `OpportunityCandidate` → `OpportunityDraft`                | 03  |
+| Deduplikacja | `ingestion`                            | `OpportunityDraft` → insert / update / skip                | 03  |
+| Dopasowanie  | `matching`                             | `Opportunity` × `CompanyProfile` → `MatchResult`           | 04  |
+| Alert        | `notifications`                        | dopasowania profilu → jeden digest, idempotentnie          | 05  |
 
 ## 4. Kontrakty modułów _(plan — doprecyzowanie w odpowiednich PR)_
 
-### 4.1 Adapter źródła (PR-02)
+### 4.1 Adapter źródła (PR-02, zaimplementowany)
+
+`src/sources/types.ts`:
 
 ```ts
-interface SourceAdapter {
-  readonly sourceId: string; // stabilny identyfikator, np. "baza-konkurencyjnosci"
-  readonly allowedHosts: readonly string[]; // jedyne hosty, z którymi adapter może się łączyć
-  fetch(ctx: FetchContext): Promise<RawDocument[]>; // tylko przez ctx.http (SafeHttpClient)
-  extract(doc: RawDocument): ExtractedNotice[]; // czyste, deterministyczne; bez I/O
-  normalize(notice: ExtractedNotice): NormalizeResult; // czyste; OpportunityDraft | odrzucenie z powodem
+interface SourceAdapter<TNotice = unknown> {
+  readonly sourceId: string; // stabilny identyfikator (sourceIdSchema), np. "bzp"
+  readonly allowedHosts: readonly string[]; // jedyne hosty klienta HTTP tego źródła
+  fetch(ctx: FetchContext): Promise<FetchResult>; // tylko przez ctx.http (SafeHttpClient)
+  extract(doc: RawDocument): TNotice[]; // czyste, deterministyczne; bez I/O
+  normalize(notice: TNotice): NormalizeResult; // czyste; kandydat albo odrzucenie z powodem
 }
 ```
 
+- `FetchContext` = `{ http, signal, publicationDate, maxRecords, now, logger }` — `http` to
+  wąski interfejs `get` (`SourceHttpClient`); w produkcji zawsze `SafeHttpClient`, w testach
+  skryptowany fake. `signal` ogranicza cały przebieg (timeout przebiegu), `maxRecords` —
+  liczbę rekordów.
+- `FetchResult` = `{ documents: RawDocument[], incomplete: { part, reason }[] }`. Osiągnięcie
+  limitu (`max_records`, `max_pages`) albo niemożność bezpiecznej kontynuacji paginacji
+  (`invalid_cursor`, `repeated_cursor`) nigdy nie jest ciche: trafia do `incomplete` i do
+  logu (warn).
+- `RawDocument` = `{ sourceId, url, fetchedAt, contentType, body }` — tylko w pamięci (D-008).
+- Model błędów: błąd HTTP → `HttpClientError` z klienta (propagowany bez zmian); dokument
+  bezużyteczny jako całość (nie UTF-8, nie JSON, nie ta struktura, za dużo rekordów) →
+  `SourceFormatError` (stały powód, nigdy treść dokumentu); oba przerywają przebieg. Problem z
+  jednym rekordem nie jest wyjątkiem: `normalize` zwraca
+  `{ ok: false, externalId, reason }`, gdzie `reason` to stały tekst z nazwami pól (bez
+  wartości ze źródła), więc można go logować i grupować.
+- `normalize` zwraca `OpportunityCandidate` (`src/domain/opportunity.ts`) = `OpportunityDraft`
+  bez `fingerprint` i `contentHash`: te liczy ingestion (PR-03) według reguł z §5, więc
+  adapter nie zna ich definicji. Wspólny kształt pól, ta sama reguła waluty.
+- `src/sources/registry.ts` — statyczna mapa `sourceId → adapter`; `src/sources/preview.ts` —
+  `previewSource` (fetch → extract → normalize, bez zapisu; odrzucenia liczone i logowane).
+
 Adapter **nie zawiera**: logiki dopasowania, wysyłki e-maili, UI, billingu, dostępu do bazy.
-`extract`/`normalize` są czyste, więc testujemy je na fixture'ach bez sieci.
-`RawDocument` = `{ sourceId, url, fetchedAt, contentType, body }` — w MVP tylko w pamięci
-(D-008).
+
+**BZP (`src/sources/bzp/`, D-015):** `GET /mo-board/api/v1/notice` na `ezamowienia.gov.pl`,
+typy `ContractNotice` i `SmallContractNotice` po kolei, każdy z własnym limitem rekordów i
+stron (jeden typ nie wypiera drugiego). Paginacja keyset: `PageSize` = min(25, pozostały
+limit typu), `SearchAfter` = `objectId` ostatniego rekordu
+(tylko poprawny GUID). Koniec typu: pusta lub krótsza strona; przerwanie: limit rekordów,
+40 stron na typ, brak/niepoprawny kursor, powtórzony kursor (strona kończąca się już użytym
+kursorem powtarza zebrane rekordy, więc jest odrzucana), przerwany `signal`. Strona
+dłuższa niż żądany `PageSize` → `SourceFormatError`. Ekstrakcja waliduje tylko używane pola
+(każde ≤ 20 000 znaków), resztę — w tym `htmlBody` — odrzuca. Mapowanie: `sourceUrl` = strona
+ogłoszenia (`/mo-client-board/bzp/notice-details/id/{objectId}`), `externalId` =
+`noticeNumber`, daty tylko w ścisłym formacie UTC (niepoprawna data publikacji lub terminu →
+odrzucenie), lokalizacja = siedziba zamawiającego (miasto + województwo ze statycznej mapy
+kodów `PLxx`, nieznany kod → brak województwa), kategorie = kody CPV w kolejności publikacji
+bez duplikatów, `status` = `open`/`closed` względem `fetchedAt` albo `unknown` bez terminu;
+opis, kontakt i wartość — `null` (brak pól strukturalnych; kontakt, a czasem wartość, bywają
+tylko w odrzucanym `htmlBody` — kandydat na „HTML → tekst” w PR-03).
 
 ### 4.2 SafeHttpClient (PR-02, zaimplementowany)
 
@@ -330,7 +376,14 @@ migracji w dół. Zmieniamy schemat wyłącznie nową migracją.
 - `node dist/main.js <command>` — jedna komenda = jeden krótki proces. CLI najpierw sprawdza
   komendę i argumenty (błąd → kod 2), dopiero potem ładuje konfigurację (błąd → kod 1), a na
   końcu otwiera bazę; pula jest zamykana przed zakończeniem komendy na każdej ścieżce.
-- Komendy: `health` (konfiguracja + `select 1`), `migrate` (oczekujące migracje). Pula `pg`:
+- `source:preview <sourceId> [--date YYYY-MM-DD] [--limit N]` (PR-02) — jeden ograniczony
+  przebieg źródła (domyślnie wczoraj według UTC i 20 rekordów na typ ogłoszenia, maks. 500;
+  timeout przebiegu 5 min) przez nowy `SafeHttpClient`, wynik jako JSON na stdout (rekordy znormalizowane,
+  liczniki, odrzucenia, `incomplete`), bez zapisu. Wymaga `CRAWLER_CONTACT` (brak → kod 1,
+  zanim padnie jakiekolwiek żądanie). Nie otwiera bazy, ale `DATABASE_URL` jest walidowany jak
+  przy każdej komendzie (wspólna konfiguracja). Adaptery i fabryka klienta HTTP są
+  wstrzykiwane (`CliDeps.sources`), więc testy CLI działają bez sieci.
+- Komendy bazodanowe: `health` (konfiguracja + `select 1`), `migrate` (oczekujące migracje). Pula `pg`:
   max 5 połączeń, 5 s na połączenie, `statement_timeout` 30 s (+ timeout po stronie klienta
   35 s), bezczynne połączenia zamykane po 10 s — stałe w `src/infrastructure/db/database.ts`.
 - Konfiguracja wyłącznie ze zmiennych środowiskowych; pusta wartość = wartość domyślna.
@@ -348,5 +401,7 @@ Serializacja pól nie rzuca (`Error` → `{name, message}`, `bigint` → string,
 `"[Circular]"`); logger nie redaguje pól (`docs/SECURITY.md` §12).
 Błędy bazy w CLI (`health`, `migrate`) są raportowane jako stały powód + kod SQLSTATE/errno,
 nigdy jako komunikat sterownika/serwera.
-Każdy wpis `SafeHttpClient` zawiera `sourceId` i host (PR-02); _(plan, PR-03)_ podsumowanie
+Każdy wpis `SafeHttpClient` zawiera `sourceId` i host (PR-02); `source:preview` loguje
+koniec przebiegu (`sourceId`, `status`, `durationMs`, liczniki, `incomplete`), każde
+odrzucenie (`sourceId`, `externalId`, powód) i przerwane listingi; _(plan, PR-03)_ podsumowanie
 przebiegu w `ingestion_runs`. Alerting/deployment: PR-07.

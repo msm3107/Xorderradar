@@ -87,6 +87,18 @@ describe("smoke: application entry point", { timeout: TEST_TIMEOUT_MS }, () => {
     ).rejects.toMatchObject({ code: 2 });
   });
 
+  it("`source:preview` exits 1 without CRAWLER_CONTACT, before any request", async () => {
+    const failure = await expectFailure(
+      runEntryPoint({
+        args: ["source:preview", "bzp", "--date", "2026-10-29", "--limit", "1"],
+        env: { NODE_ENV: "test", DATABASE_URL: unreachableDatabaseUrl("pw") },
+      }),
+    );
+    expect(failure.code).toBe(1);
+    expect(failure.stdout).toBe("");
+    expect(failure.stderr).toContain("CRAWLER_CONTACT is required");
+  });
+
   it("invalid configuration exits with code 1 without echoing the value", async () => {
     const secretLookingValue = "s3cr3t-value-should-not-leak";
     const failure = await expectFailure(

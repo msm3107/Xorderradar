@@ -2,3 +2,6 @@ dist/
 coverage/
 node_modules/
 pnpm-lock.yaml
+# Real source responses stay byte-identical apart from the pseudonymised contact data
+# documented in tests/fixtures/*/README.md.
+tests/fixtures/**/*.json
