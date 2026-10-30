@@ -45,7 +45,12 @@ describe.skipIf(skipWithoutDatabase)("CLI with a real database (PostgreSQL)", ()
       schema: {
         status: "error",
         reason: "not_migrated",
-        pending: ["0001_core_schema", "0002_ingestion_runs", "0003_opportunities_tender_id"],
+        pending: [
+          "0001_core_schema",
+          "0002_ingestion_runs",
+          "0003_opportunities_tender_id",
+          "0004_notice_updates",
+        ],
       },
     });
     expect(result.stderr).toBe("Schema check failed: not migrated; run `migrate`\n");
@@ -62,7 +67,12 @@ describe.skipIf(skipWithoutDatabase)("CLI with a real database (PostgreSQL)", ()
     expect(first.code).toBe(ExitCode.Ok);
     expect(JSON.parse(first.stdout)).toEqual({
       status: "ok",
-      applied: ["0001_core_schema", "0002_ingestion_runs", "0003_opportunities_tender_id"],
+      applied: [
+        "0001_core_schema",
+        "0002_ingestion_runs",
+        "0003_opportunities_tender_id",
+        "0004_notice_updates",
+      ],
     });
 
     const second = await run(["migrate"], schema.url);

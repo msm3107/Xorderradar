@@ -1,3 +1,4 @@
+import type { NoticeUpdate } from "../domain/notice-update.js";
 import type { OpportunityCandidate } from "../domain/opportunity.js";
 import type { FetchContext, IncompleteFetch, SourceAdapter } from "./types.js";
 
@@ -10,6 +11,8 @@ export interface SourcePreview {
   readonly documents: number;
   readonly extracted: number;
   readonly candidates: readonly OpportunityCandidate[];
+  /** Changes to earlier notices; listed only, never applied (nothing is stored). */
+  readonly updates: readonly NoticeUpdate[];
   readonly rejections: readonly SourceRejection[];
   readonly incomplete: readonly IncompleteFetch[];
 }
@@ -25,6 +28,7 @@ export async function previewSource(
 ): Promise<SourcePreview> {
   const { documents, incomplete } = await adapter.fetch(ctx);
   const candidates: OpportunityCandidate[] = [];
+  const updates: NoticeUpdate[] = [];
   const rejections: SourceRejection[] = [];
   let extracted = 0;
   for (const document of documents) {
@@ -32,7 +36,8 @@ export async function previewSource(
       extracted++;
       const result = adapter.normalize(notice);
       if (result.ok) {
-        candidates.push(result.candidate);
+        if (result.kind === "opportunity") candidates.push(result.candidate);
+        else updates.push(result.update);
       } else {
         rejections.push({ externalId: result.externalId, reason: result.reason });
         ctx.logger.warn("source record rejected", {
@@ -43,5 +48,5 @@ export async function previewSource(
       }
     }
   }
-  return { documents: documents.length, extracted, candidates, rejections, incomplete };
+  return { documents: documents.length, extracted, candidates, updates, rejections, incomplete };
 }

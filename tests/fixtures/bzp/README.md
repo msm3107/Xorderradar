@@ -17,13 +17,14 @@ Publicznych. **Rule for future fixtures** (including the PR-03 HTML fixtures): p
 same way before committing, keep no unredacted copy in the repository, and record the
 substitutions here.
 
-| File                                    | Request                                                                                                                                                                                          |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `contract-notice-2026-10-29-page1.json` | `GET https://ezamowienia.gov.pl/mo-board/api/v1/notice?NoticeType=ContractNotice&PublicationDateFrom=2026-10-29&PublicationDateTo=2026-10-29&PageSize=3`                                         |
-| `contract-notice-2026-10-29-page2.json` | same as page 1 plus `&SearchAfter=08df3579-8fb4-7d97-cfcf-e60001c05bd7` (the `objectId` of the last record of page 1)                                                                            |
-| `small-contract-notice-2026-10-29.json` | `GET https://ezamowienia.gov.pl/mo-board/api/v1/notice?NoticeType=SmallContractNotice&PublicationDateFrom=2026-10-29&PublicationDateTo=2026-10-29&PageSize=2`                                    |
-| `empty-2026-11-20.json`                 | `GET https://ezamowienia.gov.pl/mo-board/api/v1/notice?…&PublicationDateFrom=2026-11-20&PublicationDateTo=2026-11-20&…` — a future publication day, no notices published yet; real `[]` response |
-| `province-glossary.json`                | `GET https://ezamowienia.gov.pl/mo-board/api/v1/glossary?glossaryType=province`                                                                                                                  |
+| File                                    | Request                                                                                                                                                                                                                |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `contract-notice-2026-10-29-page1.json` | `GET https://ezamowienia.gov.pl/mo-board/api/v1/notice?NoticeType=ContractNotice&PublicationDateFrom=2026-10-29&PublicationDateTo=2026-10-29&PageSize=3`                                                               |
+| `contract-notice-2026-10-29-page2.json` | same as page 1 plus `&SearchAfter=08df3579-8fb4-7d97-cfcf-e60001c05bd7` (the `objectId` of the last record of page 1)                                                                                                  |
+| `small-contract-notice-2026-10-29.json` | `GET https://ezamowienia.gov.pl/mo-board/api/v1/notice?NoticeType=SmallContractNotice&PublicationDateFrom=2026-10-29&PublicationDateTo=2026-10-29&PageSize=2`                                                          |
+| `empty-2026-11-20.json`                 | `GET https://ezamowienia.gov.pl/mo-board/api/v1/notice?…&PublicationDateFrom=2026-11-20&PublicationDateTo=2026-11-20&…` — a future publication day, no notices published yet; real `[]` response                       |
+| `notice-update-notice-2026-10-29.json`  | `GET https://ezamowienia.gov.pl/mo-board/api/v1/notice?NoticeType=NoticeUpdateNotice&PublicationDateFrom=2026-10-29&PublicationDateTo=2026-10-29&PageSize=5&SearchAfter=08df357b-038d-a049-cfcf-e60001c05bdc` (PR-03B) |
+| `province-glossary.json`                | `GET https://ezamowienia.gov.pl/mo-board/api/v1/glossary?glossaryType=province`                                                                                                                                        |
 
 Contents:
 
@@ -31,6 +32,14 @@ Contents:
 - page 2: notices `2026/BZP 00507113/01`, `00507114/01`, `00507115/01`;
 - small contracts: `2026/BZP 00507754/01`, `00507787/01` (`cpvCode` `""`, `tenderType` and
   `tenderId` `null`, one `submittingOffersDate` `null`).
+- notice updates (`NoticeUpdateNotice`, all with a `tenderId`, `submittingOffersDate` `null`;
+  substitutions: 5 e-mail addresses, 3 phone/fax numbers, no names of natural persons):
+  - `2026/BZP 00507126/01` — changes a contract notice ("Ogłoszenie o zamówieniu"): 8.1 offer
+    deadline (`2026-11-03 10:00` Warsaw → `2026-11-03T09:00:00Z`), plus 8.3 and 8.4;
+  - `00507129/01` — changes a contract notice, only section 4.2.2 (no deadline change → skipped);
+  - `00507130/01` — 8.1 → `2026-11-04T09:00:00Z`;
+  - `00507136/01` — changes an "Ogłoszenie o wykonaniu umowy" (section 5.5) → skipped;
+  - `00507141/01` — 8.1 → `2026-11-05T09:00:00Z`.
 
 Edge cases (missing fields, wrong types, corrupted JSON, …) are built in the tests by mutating a
 parsed copy of a real record — never by hand-crafting whole notices.

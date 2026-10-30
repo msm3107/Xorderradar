@@ -68,7 +68,7 @@ Cały ruch wychodzący adapterów idzie przez `SafeHttpClient`:
   nagłówki, cała treść) 30 s, przerwanie przez `AbortSignal` (PR-02). Wywołujący może podać
   własny `AbortSignal`, który przerywa też czekanie na rate limit i backoff.
 - Timeout całego przebiegu źródła, aby jedno źródło nie blokowało crona: `source:preview`
-  5 min, `ingest` 10 min na źródło (D-018); po nim przebieg źródła jest `failed`
+  5 min, `ingest` 10 min na źródło i dzień (D-018, D-021); po nim przebieg jest `failed`
   (`source_timeout`), a następne źródło startuje.
 - `ingest` nie nakłada się sam na siebie (advisory lock w PostgreSQL, D-019): drugie
   uruchomienie nic nie pobiera, więc nakładające się crony nie podwajają ruchu do źródeł.
@@ -125,6 +125,16 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
 - XML: wyłączone encje zewnętrzne i DTD (ochrona przed XXE / billion laughs).
 - Unikamy wyrażeń regularnych podatnych na ReDoS na danych zewnętrznych; ograniczamy długość
   wejścia przed dopasowaniem.
+- `htmlBody` ogłoszeń o zmianie BZP (od PR-03B, D-015): długość ograniczona przed parsowaniem
+  (1 000 000 znaków, dłuższy → odrzucenie rekordu; zaobserwowane do 255 562), jeden liniowy przegląd tekstu między
+  znacznikami bez parsera DOM (wyrażenia regularne tylko literalne albo bez zagnieżdżonych
+  kwantyfikatorów; komentarze, `<script>`, `<style>` i atrybuty pomijane; niedomknięty
+  znacznik, komentarz, `<script>` lub `<style>` → odrzucenie rekordu); normalizacja Unicode
+  NFC (kwadratowa w ciągu znaków łączących o różnych klasach) tylko dla segmentów
+  ≤ 256 znaków — dłuższy segment nie może być równy żadnej etykiecie ani dacie i zostaje
+  nieznormalizowany, więc koszt jest liniowy w długości treści; z treści wychodzi wyłącznie jedna data; HTML nie jest zapisywany ani logowany, powody
+  odrzuceń/pominięć są stałe. Testy: wrogie treści i przypadki 1 000 000 znaków (w tym długie
+  ciągi znaków łączących U+0316/U+0301).
 
 ## 9. SQL injection protection _(od PR-01)_
 
@@ -165,6 +175,8 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
   `^[a-z][a-z0-9_]{0,63}$`), status HTTP i nazwę naruszonego constraintu. Nigdy treści
   dokumentów, tytułów, danych kontaktowych z ogłoszeń, komunikatów błędów ani adresu bazy.
   Powody odrzuceń z `normalize` to stałe teksty z nazwami pól (bez wartości).
+  Pominięte ogłoszenia o zmianie (od PR-03B) — tylko `sourceId`, `externalId`, `tenderId`
+  (publiczne identyfikatory) i stały powód; nigdy treść `htmlBody`.
 - Komunikaty błędów dla użytkownika są bezpieczne; szczegóły tylko w logu.
 - Błędy bazy danych (od PR-01): CLI pokazuje tylko stały powód + kod SQLSTATE/errno, nigdy
   komunikatu sterownika/serwera; repozytoria zamieniają naruszenia ograniczeń na

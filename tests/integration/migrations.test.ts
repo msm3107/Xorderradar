@@ -30,6 +30,7 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
       "0001_core_schema",
       "0002_ingestion_runs",
       "0003_opportunities_tender_id",
+      "0004_notice_updates",
     ]);
     expect(await tablesInSchema()).toEqual([
       "company_profiles",
@@ -51,6 +52,7 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
       "0001_core_schema",
       "0002_ingestion_runs",
       "0003_opportunities_tender_id",
+      "0004_notice_updates",
     ]);
   });
 
@@ -113,6 +115,7 @@ describe.skipIf(skipWithoutDatabase)("migrations: concurrent runs (PostgreSQL)",
       "0001_core_schema",
       "0002_ingestion_runs",
       "0003_opportunities_tender_id",
+      "0004_notice_updates",
     ]);
   });
 });

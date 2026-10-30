@@ -46,6 +46,12 @@ export interface OpportunitiesTable {
   fingerprint: string;
   content_hash: string;
   status: OpportunityStatus;
+  /**
+   * The update notice that set `deadline` and its publication time (D-015);
+   * both null until one is applied. Written only by applyDeadlineUpdate.
+   */
+  deadline_update_notice: Generated<string | null>;
+  deadline_update_published_at: Generated<Date | null>;
 }
 
 export interface CompanyProfilesTable {
@@ -80,6 +86,7 @@ export interface IngestionRunsTable {
   updated: number;
   unchanged: number;
   rejected: number;
+  skipped: number;
   incomplete: Jsonb;
   error_code: string | null;
 }

@@ -44,6 +44,11 @@ export const ingestionRunCountersSchema = z.strictObject({
   unchanged: counter,
   /** Refused by normalize or by a domain rule on write. */
   rejected: counter,
+  /**
+   * Read and valid but deliberately not applied, e.g. a notice update with
+   * nothing to apply or without a stored original (logged with a reason code).
+   */
+  skipped: counter,
 });
 
 export type IngestionRunCounters = z.output<typeof ingestionRunCountersSchema>;

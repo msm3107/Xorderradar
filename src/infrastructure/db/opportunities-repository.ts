@@ -2,12 +2,14 @@ import { sql, type Kysely, type Selectable } from "kysely";
 import type { z } from "zod";
 import { entityIdSchema, parseDomain } from "../../domain/common.js";
 import { DomainError } from "../../domain/errors.js";
+import { deadlineUpdateSchema, type DeadlineUpdate } from "../../domain/notice-update.js";
 import {
   contactSchema,
   locationSchema,
   opportunityDraftSchema,
   type Opportunity,
   type OpportunityDraft,
+  type OpportunityStatus,
 } from "../../domain/opportunity.js";
 import { withDomainErrors } from "./errors.js";
 import type { Database, OpportunitiesTable } from "./schema.js";
@@ -92,6 +94,13 @@ type ParsedDraft = z.output<typeof opportunityDraftSchema>;
  * source (a fingerprint is per source; never move a row to another source).
  * With `onlyIfChanged` the update also requires a different `content_hash`, so
  * an unchanged notice is not written at all and no row is returned.
+ *
+ * Once an update notice has set the deadline (`deadline_update_published_at`
+ * not null, D-015), a later write of the original keeps that deadline — the
+ * original's own deadline is the one the update replaced — and derives the
+ * status from it and the new `fetched_at`; every other field is taken from the
+ * draft as usual. `content_hash` stays the hash of the notice as published,
+ * so an unchanged original is still `unchanged`.
  */
 function upsertQuery(db: Kysely<Database>, draft: ParsedDraft, onlyIfChanged: boolean) {
   return db
@@ -128,14 +137,19 @@ function upsertQuery(db: Kysely<Database>, draft: ParsedDraft, onlyIfChanged: bo
           description: eb.ref("excluded.description"),
           location: eb.ref("excluded.location"),
           published_at: eb.ref("excluded.published_at"),
-          deadline: eb.ref("excluded.deadline"),
+          deadline: sql<Date | null>`CASE
+            WHEN opportunities.deadline_update_published_at IS NULL THEN excluded.deadline
+            ELSE opportunities.deadline END`,
           estimated_value: eb.ref("excluded.estimated_value"),
           currency: eb.ref("excluded.currency"),
           categories: eb.ref("excluded.categories"),
           contact: eb.ref("excluded.contact"),
           fetched_at: eb.ref("excluded.fetched_at"),
           content_hash: eb.ref("excluded.content_hash"),
-          status: eb.ref("excluded.status"),
+          status: sql<OpportunityStatus>`CASE
+            WHEN opportunities.deadline_update_published_at IS NULL THEN excluded.status
+            WHEN opportunities.deadline > excluded.fetched_at THEN 'open'
+            ELSE 'closed' END`,
           updated_at: sql<Date>`now()`,
         }))
         .where("opportunities.source_id", "=", (eb) => eb.ref("excluded.source_id"));
@@ -249,6 +263,75 @@ export async function ingestOpportunity(
   }
   if (stored.source_id !== draft.sourceId) throw fingerprintOfOtherSource();
   return { outcome: "unchanged", id: stored.id };
+}
+
+/**
+ * The original notice of a procedure: of the rows of one source sharing a
+ * tenderId, the oldest — first published (unknown last), then first stored,
+ * then lowest id, so the choice is total and stable (owner decision, D-015).
+ */
+const ORIGINAL_FIRST = sql`published_at ASC NULLS LAST, first_seen_at ASC, id ASC`;
+
+export type DeadlineUpdateResult =
+  | { readonly outcome: "updated" | "unchanged"; readonly id: string }
+  | { readonly outcome: "skipped"; readonly reason: "no_original" | "superseded" };
+
+/**
+ * Applies a new offer deadline from an update notice to the original notice
+ * of `(sourceId, tenderId)` in one atomic statement: sets `deadline`,
+ * `status`, the provenance columns and `updated_at`, and nothing else
+ * (`fetched_at`, `content_hash`, `fingerprint` stay as they were). Only when
+ * the row has no update yet or an older one: updates are ordered by
+ * `(publication time, notice number)`, so the latest published wins whatever
+ * the order they are read in.
+ *
+ * When nothing was written, one read tells why: no original stored
+ * (`skipped`/`no_original`), this very update already applied (`unchanged`)
+ * or a later one applied (`skipped`/`superseded`). DomainError `invalid_input`
+ * for an invalid update; database integrity errors as DomainErrors.
+ */
+export async function applyDeadlineUpdate(
+  db: Kysely<Database>,
+  input: DeadlineUpdate,
+): Promise<DeadlineUpdateResult> {
+  const update = parseDomain(deadlineUpdateSchema, input);
+  const written = await withDomainErrors(() =>
+    sql<{ id: string }>`
+      UPDATE opportunities
+      SET deadline = ${update.deadline},
+          status = ${update.status},
+          deadline_update_notice = ${update.updateNotice},
+          deadline_update_published_at = ${update.updatePublishedAt},
+          updated_at = now()
+      WHERE id = (
+          SELECT id FROM opportunities
+          WHERE source_id = ${update.sourceId} AND tender_id = ${update.tenderId}
+          ORDER BY ${ORIGINAL_FIRST}
+          LIMIT 1
+        )
+        AND (deadline_update_published_at IS NULL
+             OR (deadline_update_published_at, deadline_update_notice)
+                < (${update.updatePublishedAt}::timestamptz, ${update.updateNotice}::text))
+      RETURNING id
+    `.execute(db),
+  );
+  const [row] = written.rows;
+  if (row !== undefined) return { outcome: "updated", id: row.id };
+  const original = await db
+    .selectFrom("opportunities")
+    .select(["id", "deadline_update_notice", "deadline_update_published_at"])
+    .where("source_id", "=", update.sourceId)
+    .where("tender_id", "=", update.tenderId)
+    .orderBy(ORIGINAL_FIRST)
+    .limit(1)
+    .executeTakeFirst();
+  if (original === undefined) return { outcome: "skipped", reason: "no_original" };
+  const sameUpdate =
+    original.deadline_update_notice === update.updateNotice &&
+    original.deadline_update_published_at?.getTime() === update.updatePublishedAt.getTime();
+  return sameUpdate
+    ? { outcome: "unchanged", id: original.id }
+    : { outcome: "skipped", reason: "superseded" };
 }
 
 export async function getOpportunity(

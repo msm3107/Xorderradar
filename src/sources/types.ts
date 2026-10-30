@@ -1,4 +1,5 @@
 import type { IncompleteReason } from "../domain/ingestion-run.js";
+import type { NoticeUpdate } from "../domain/notice-update.js";
 import type { OpportunityCandidate } from "../domain/opportunity.js";
 import type { GetOptions, HttpResponse } from "../infrastructure/http/safe-http-client.js";
 import type { Logger } from "../infrastructure/logger.js";
@@ -65,8 +66,14 @@ export interface FetchResult {
   readonly incomplete: readonly IncompleteFetch[];
 }
 
+/**
+ * What `normalize` made of one record: a notice to store as an opportunity, a
+ * change to an earlier notice (applied to it by ingestion, never stored as an
+ * opportunity of its own), or a rejection.
+ */
 export type NormalizeResult =
-  | { readonly ok: true; readonly candidate: OpportunityCandidate }
+  | { readonly ok: true; readonly kind: "opportunity"; readonly candidate: OpportunityCandidate }
+  | { readonly ok: true; readonly kind: "notice_update"; readonly update: NoticeUpdate }
   | {
       readonly ok: false;
       /** Identifier from the source when it could be read, for the log. */

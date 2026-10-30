@@ -59,6 +59,7 @@ function normalizeAll(doc: RawDocument): NormalizeResult[] {
 function candidatesOf(doc: RawDocument): OpportunityCandidate[] {
   return normalizeAll(doc).map((result) => {
     if (!result.ok) throw new Error(`unexpected rejection: ${result.reason}`);
+    if (result.kind !== "opportunity") throw new Error("unexpected notice update");
     return result.candidate;
   });
 }
@@ -83,6 +84,7 @@ function normalizeMutated(changes: JsonRecord, fetchedAt = FETCHED_AT): Normaliz
 
 function expectCandidate(result: NormalizeResult): OpportunityCandidate {
   if (!result.ok) throw new Error(`unexpected rejection: ${result.reason}`);
+  if (result.kind !== "opportunity") throw new Error("unexpected notice update");
   return result.candidate;
 }
 
@@ -573,6 +575,7 @@ describe("bzpAdapter.fetch", () => {
       if (url.searchParams.get("NoticeType") === "SmallContractNotice") {
         return fixtureBytes(SMALL);
       }
+      if (url.searchParams.get("NoticeType") === "NoticeUpdateNotice") return fixtureBytes(EMPTY);
       return url.searchParams.has("SearchAfter") ? fixtureBytes(PAGE2) : pageBytes(25, 1);
     });
     const ctx = fetchContext(http);
@@ -581,10 +584,11 @@ describe("bzpAdapter.fetch", () => {
       listUrl("ContractNotice", BZP_PAGE_SIZE),
       listUrl("ContractNotice", BZP_PAGE_SIZE, objectIdFor(25)),
       listUrl("SmallContractNotice", BZP_PAGE_SIZE),
+      listUrl("NoticeUpdateNotice", BZP_PAGE_SIZE),
     ]);
     expect(http.signals.every((signal) => signal === ctx.signal)).toBe(true);
     expect(result.incomplete).toEqual([]);
-    expect(result.documents).toHaveLength(3);
+    expect(result.documents).toHaveLength(4);
     expect(result.documents[1]).toEqual({
       sourceId: "bzp",
       url: listUrl("ContractNotice", BZP_PAGE_SIZE, objectIdFor(25)),
@@ -602,9 +606,14 @@ describe("bzpAdapter.fetch", () => {
     expect(http.urls).toEqual([
       listUrl("ContractNotice", BZP_PAGE_SIZE),
       listUrl("SmallContractNotice", BZP_PAGE_SIZE),
+      listUrl("NoticeUpdateNotice", BZP_PAGE_SIZE),
     ]);
     expect(result).toEqual({
-      documents: [expect.objectContaining({ body: "[]" }), expect.objectContaining({ body: "[]" })],
+      documents: [
+        expect.objectContaining({ body: "[]" }),
+        expect.objectContaining({ body: "[]" }),
+        expect.objectContaining({ body: "[]" }),
+      ],
       incomplete: [],
     });
   });
@@ -617,8 +626,9 @@ describe("bzpAdapter.fetch", () => {
         : fixtureBytes(EMPTY),
     );
     const result = await bzpAdapter.fetch(fetchContext(http, { maxRecords: 5000 }, logLines));
-    expect(http.urls).toHaveLength(BZP_MAX_PAGES_PER_TYPE + 1);
-    expect(http.urls.at(-1)).toBe(listUrl("SmallContractNotice", BZP_PAGE_SIZE));
+    expect(http.urls).toHaveLength(BZP_MAX_PAGES_PER_TYPE + 2);
+    expect(http.urls.at(-2)).toBe(listUrl("SmallContractNotice", BZP_PAGE_SIZE));
+    expect(http.urls.at(-1)).toBe(listUrl("NoticeUpdateNotice", BZP_PAGE_SIZE));
     expect(result.incomplete).toEqual([{ part: "ContractNotice", reason: "max_pages" }]);
     const entries = logLines.map((line) => logEntrySchema.parse(JSON.parse(line)));
     expect(entries.find((entry) => entry.level === "warn")).toMatchObject({
@@ -632,17 +642,21 @@ describe("bzpAdapter.fetch", () => {
   });
 
   it("applies the record limit per notice type and never requests past it", async () => {
-    const http = new FakeHttpClient((url) =>
-      url.searchParams.has("SearchAfter") ? pageBytes(5, 100) : pageBytes(25, 1),
-    );
+    const http = new FakeHttpClient((url) => {
+      if (url.searchParams.get("NoticeType") === "NoticeUpdateNotice") return fixtureBytes(EMPTY);
+      return url.searchParams.has("SearchAfter") ? pageBytes(5, 100) : pageBytes(25, 1);
+    });
     const result = await bzpAdapter.fetch(fetchContext(http, { maxRecords: 30 }));
     expect(http.urls).toEqual([
       listUrl("ContractNotice", 25),
       listUrl("ContractNotice", 5, objectIdFor(25)),
       listUrl("SmallContractNotice", 25),
       listUrl("SmallContractNotice", 5, objectIdFor(25)),
+      listUrl("NoticeUpdateNotice", 25),
     ]);
-    expect(result.documents.map((doc) => bzpAdapter.extract(doc).length)).toEqual([25, 5, 25, 5]);
+    expect(result.documents.map((doc) => bzpAdapter.extract(doc).length)).toEqual([
+      25, 5, 25, 5, 0,
+    ]);
     expect(result.incomplete).toEqual([
       { part: "ContractNotice", reason: "max_records" },
       { part: "SmallContractNotice", reason: "max_records" },
@@ -650,14 +664,19 @@ describe("bzpAdapter.fetch", () => {
   });
 
   it("fetches small contracts even when contract notices use up their limit", async () => {
-    const http = new FakeHttpClient((url) =>
-      url.searchParams.get("NoticeType") === "ContractNotice"
+    const http = new FakeHttpClient((url) => {
+      if (url.searchParams.get("NoticeType") === "NoticeUpdateNotice") return fixtureBytes(EMPTY);
+      return url.searchParams.get("NoticeType") === "ContractNotice"
         ? pageBytes(5, 1)
-        : fixtureBytes(SMALL),
-    );
+        : fixtureBytes(SMALL);
+    });
     const ctx = fetchContext(http, { maxRecords: 5 });
     const result = await bzpAdapter.fetch(ctx);
-    expect(http.urls).toEqual([listUrl("ContractNotice", 5), listUrl("SmallContractNotice", 5)]);
+    expect(http.urls).toEqual([
+      listUrl("ContractNotice", 5),
+      listUrl("SmallContractNotice", 5),
+      listUrl("NoticeUpdateNotice", 5),
+    ]);
     expect(result.incomplete).toEqual([{ part: "ContractNotice", reason: "max_records" }]);
     const preview = await previewSource(bzpAdapter, fetchContext(http, { maxRecords: 5 }));
     expect(preview.candidates).toHaveLength(5 + 2);
@@ -679,9 +698,9 @@ describe("bzpAdapter.fetch", () => {
         : fixtureBytes(EMPTY),
     );
     const result = await bzpAdapter.fetch(fetchContext(http));
-    expect(http.urls).toHaveLength(2);
+    expect(http.urls).toHaveLength(3);
     expect(result.incomplete).toEqual([{ part: "ContractNotice", reason: "invalid_cursor" }]);
-    expect(result.documents.map((doc) => bzpAdapter.extract(doc).length)).toEqual([25, 0]);
+    expect(result.documents.map((doc) => bzpAdapter.extract(doc).length)).toEqual([25, 0, 0]);
     // The page is kept: its valid records are still normalized, the bad one rejected.
     const preview = await previewSource(bzpAdapter, fetchContext(http));
     expect(preview.candidates).toHaveLength(24);
@@ -701,10 +720,11 @@ describe("bzpAdapter.fetch", () => {
       listUrl("ContractNotice", 25),
       listUrl("ContractNotice", 25, objectIdFor(25)),
       listUrl("SmallContractNotice", 25),
+      listUrl("NoticeUpdateNotice", 25),
     ]);
     expect(result.incomplete).toEqual([{ part: "ContractNotice", reason: "repeated_cursor" }]);
     // The repeated page duplicates page 1 and is dropped: every record appears once.
-    expect(result.documents.map((doc) => bzpAdapter.extract(doc).length)).toEqual([25, 0]);
+    expect(result.documents.map((doc) => bzpAdapter.extract(doc).length)).toEqual([25, 0, 0]);
     const preview = await previewSource(bzpAdapter, fetchContext(http));
     expect(preview.candidates).toHaveLength(25);
   });
@@ -722,8 +742,9 @@ describe("bzpAdapter.fetch", () => {
       listUrl("ContractNotice", 25),
       listUrl("ContractNotice", 3, objectIdFor(25)),
       listUrl("SmallContractNotice", 25),
+      listUrl("NoticeUpdateNotice", 25),
     ]);
-    expect(result.documents.map((doc) => bzpAdapter.extract(doc).length)).toEqual([25, 0]);
+    expect(result.documents.map((doc) => bzpAdapter.extract(doc).length)).toEqual([25, 0, 0]);
     expect(result.incomplete).toEqual([{ part: "ContractNotice", reason: "repeated_cursor" }]);
     const entries = logLines.map((line) => logEntrySchema.parse(JSON.parse(line)));
     expect(entries.find((entry) => entry.level === "warn")).toMatchObject({
@@ -799,6 +820,7 @@ describe("bzpAdapter.fetch", () => {
 describe("bzpAdapter.fetch with onDocument (streaming, used by ingest)", () => {
   const serve = (url: URL) => {
     if (url.searchParams.get("NoticeType") === "SmallContractNotice") return fixtureBytes(SMALL);
+    if (url.searchParams.get("NoticeType") === "NoticeUpdateNotice") return fixtureBytes(EMPTY);
     return url.searchParams.has("SearchAfter") ? fixtureBytes(PAGE2) : pageBytes(25, 1);
   };
 
@@ -818,7 +840,16 @@ describe("bzpAdapter.fetch with onDocument (streaming, used by ingest)", () => {
         },
       }),
     );
-    expect(events).toEqual(["get 1", "doc 1", "get 2", "doc 2", "get 3", "doc 3"]);
+    expect(events).toEqual([
+      "get 1",
+      "doc 1",
+      "get 2",
+      "doc 2",
+      "get 3",
+      "doc 3",
+      "get 4",
+      "doc 4",
+    ]);
     expect(result).toEqual({ documents: [], incomplete: [] });
 
     // Same documents, in the same order, as the collecting (preview) mode.
@@ -852,7 +883,7 @@ describe("bzpAdapter.fetch with onDocument (streaming, used by ingest)", () => {
         },
       }),
     );
-    expect(documents).toBe(3);
+    expect(documents).toBe(4);
     expect(result).toEqual({
       documents: [],
       incomplete: [{ part: "ContractNotice", reason: "max_records" }],

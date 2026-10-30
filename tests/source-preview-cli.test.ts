@@ -22,13 +22,19 @@ function fixture(name: string): Buffer {
 
 type Respond = (url: URL, options: GetOptions | undefined) => Promise<Buffer>;
 
-/** Serves captured BZP responses: page 1 of contract notices, then the small contracts. */
+const FIXTURE_BY_NOTICE_TYPE: Readonly<Record<string, string>> = {
+  ContractNotice: "contract-notice-2026-10-29-page1.json",
+  SmallContractNotice: "small-contract-notice-2026-10-29.json",
+};
+
+/**
+ * Serves captured BZP responses: page 1 of contract notices, then the small
+ * contracts, then no notice updates (an empty day).
+ */
 const servesFixtures: Respond = (url) =>
   Promise.resolve(
     fixture(
-      url.searchParams.get("NoticeType") === "ContractNotice"
-        ? "contract-notice-2026-10-29-page1.json"
-        : "small-contract-notice-2026-10-29.json",
+      FIXTURE_BY_NOTICE_TYPE[url.searchParams.get("NoticeType") ?? ""] ?? "empty-2026-11-20.json",
     ),
   );
 
@@ -126,10 +132,11 @@ describe("source:preview", () => {
         contact: CONTACT,
       }),
     ]);
-    // The limit applies per notice type: both are asked for up to 10 records.
+    // The limit applies per notice type: each is asked for up to 10 records.
     expect(result.urls).toEqual([
       listUrl("ContractNotice", "2026-10-29", 10),
       listUrl("SmallContractNotice", "2026-10-29", 10),
+      listUrl("NoticeUpdateNotice", "2026-10-29", 10),
     ]);
     const report: unknown = JSON.parse(result.stdout);
     expect(report).toMatchObject({
@@ -137,9 +144,10 @@ describe("source:preview", () => {
       sourceId: "bzp",
       publicationDate: "2026-10-29",
       limit: 10,
-      documents: 2,
+      documents: 3,
       extracted: 5,
       normalized: 5,
+      noticeUpdates: 0,
       rejected: 0,
       rejectionReasons: {},
       incomplete: [],
@@ -176,6 +184,71 @@ describe("source:preview", () => {
     expect(result.stdout).not.toContain("<");
   });
 
+  it("lists notice updates with their new deadline or skip reason, never their body", async () => {
+    const respond: Respond = (url) =>
+      Promise.resolve(
+        fixture(
+          url.searchParams.get("NoticeType") === "NoticeUpdateNotice"
+            ? "notice-update-notice-2026-10-29.json"
+            : "empty-2026-11-20.json",
+        ),
+      );
+    const result = await run(["source:preview", "bzp", "--date", "2026-10-29"], { respond });
+    expect(result.code).toBe(ExitCode.Ok);
+    const report: unknown = JSON.parse(result.stdout);
+    expect(report).toMatchObject({
+      documents: 3,
+      extracted: 5,
+      normalized: 0,
+      noticeUpdates: 5,
+      rejected: 0,
+      records: [],
+    });
+    expect(report).toHaveProperty("updates", [
+      {
+        externalId: "2026/BZP 00507126/01",
+        tenderId: "ocds-148610-7679f479-52e9-4912-8b9c-3c435343fc20",
+        publishedAt: expect.stringMatching(/^2026-10-29T/) as string,
+        deadline: "2026-11-03T09:00:00.000Z",
+        skipReason: null,
+      },
+      {
+        externalId: "2026/BZP 00507129/01",
+        tenderId: "ocds-148610-37dbc6dd-004a-400b-99ae-d297d097507a",
+        publishedAt: expect.stringMatching(/^2026-10-29T/) as string,
+        deadline: null,
+        skipReason: "no_deadline_change",
+      },
+      {
+        externalId: "2026/BZP 00507130/01",
+        tenderId: "ocds-148610-a6197287-8e1e-47ca-a60b-0fa2549c3d3a",
+        publishedAt: expect.stringMatching(/^2026-10-29T/) as string,
+        deadline: "2026-11-04T09:00:00.000Z",
+        skipReason: null,
+      },
+      {
+        externalId: "2026/BZP 00507136/01",
+        tenderId: "ocds-148610-404b6813-d918-4bc6-b851-5b7da77ceabb",
+        publishedAt: expect.stringMatching(/^2026-10-29T/) as string,
+        deadline: null,
+        skipReason: "not_contract_notice_change",
+      },
+      {
+        externalId: "2026/BZP 00507141/01",
+        tenderId: "ocds-148610-d20bb599-c9fa-4634-afe2-3eec1ad2d843",
+        publishedAt: expect.stringMatching(/^2026-10-29T/) as string,
+        deadline: "2026-11-05T09:00:00.000Z",
+        skipReason: null,
+      },
+    ]);
+    expect(result.stdout).not.toContain("<");
+    expect(result.stdout).not.toContain("htmlBody");
+    expect(result.stderr).not.toContain("<");
+    expect(
+      logLines(result.stderr).find((line) => line.message === "source preview finished"),
+    ).toMatchObject({ noticeUpdates: 5, normalized: 0 });
+  });
+
   it("logs the run with sourceId, status, duration and counts, but no URLs or content", async () => {
     const result = await run(["source:preview", "bzp", "--date", "2026-10-29", "--limit", "10"]);
     const finished = logLines(result.stderr).find(
@@ -185,7 +258,7 @@ describe("source:preview", () => {
       level: "info",
       sourceId: "bzp",
       status: "ok",
-      documents: 2,
+      documents: 3,
       extracted: 5,
       normalized: 5,
       rejected: 0,
