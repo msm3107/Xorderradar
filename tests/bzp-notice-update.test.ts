@@ -2,7 +2,11 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { bzpAdapter } from "../src/sources/bzp/adapter.js";
-import { extractDeadlineChange, textSegments } from "../src/sources/bzp/notice-update.js";
+import {
+  extractDeadlineChange,
+  MAX_NORMALIZED_SEGMENT_LENGTH,
+  textSegments,
+} from "../src/sources/bzp/notice-update.js";
 import type { NormalizeResult, RawDocument } from "../src/sources/types.js";
 
 const FETCHED_AT = new Date("2026-10-30T10:00:00.000Z");
@@ -90,6 +94,24 @@ describe("textSegments", () => {
 
   it("decodes invalid numeric entities to the replacement character, never to a control", () => {
     expect(textSegments("a&#0;b&#xD800;c&#1114112;d").segments).toEqual(["a�b�c�d"]);
+  });
+
+  it("NFC-normalizes segments up to MAX_NORMALIZED_SEGMENT_LENGTH, keeps longer ones as they are", () => {
+    const decomposed = "Ogłoszenie o zamówieniu".normalize("NFD");
+    expect(decomposed).not.toBe("Ogłoszenie o zamówieniu");
+    expect(textSegments(`<p>${decomposed}</p>`).segments).toEqual(["Ogłoszenie o zamówieniu"]);
+
+    // "o" + combining acute: NFC composes each pair into one "ó".
+    const atBound = "o\u0301".repeat(MAX_NORMALIZED_SEGMENT_LENGTH / 2);
+    expect(atBound).toHaveLength(MAX_NORMALIZED_SEGMENT_LENGTH);
+    expect(textSegments(`<p>${atBound}</p>`).segments).toEqual([
+      "ó".repeat(MAX_NORMALIZED_SEGMENT_LENGTH / 2),
+    ]);
+    const overBound = `${atBound}o`;
+    expect(textSegments(`<p>${overBound}</p><p>x</p>`)).toEqual({
+      segments: [overBound, "x"],
+      complete: true,
+    });
   });
 });
 
@@ -276,20 +298,90 @@ describe("extractDeadlineChange on hostile or unexpected bodies", () => {
     });
   });
 
-  it.each([
-    ["'<' repeated", "<".repeat(200_000)],
-    ["unclosed comments", "<!--".repeat(50_000)],
-    ["empty tags", "<a>".repeat(66_666)],
-    ["unclosed scripts", "<script>".repeat(25_000)],
-    ["entity starts", "&#1".repeat(66_666)],
-    ["labels", `<h3>${KIND_LABEL}</h3>`.repeat(4_000)],
-    ["change headings", `<h3>${HEADING}</h3>8.1. Termin składania ofert`.repeat(2_000)],
-  ])("handles 200 000 characters of %s in linear time", (_case, html) => {
-    const started = performance.now();
-    const result = extractDeadlineChange(html.slice(0, 200_000));
-    expect(performance.now() - started).toBeLessThan(1_000);
-    expect(!result.ok || result.change.kind === "none").toBe(true);
-  });
+  /** Hostile bodies of exactly `length` characters (the pattern repeated, then cut). */
+  function hostileBodies(length: number): [string, string][] {
+    const patterns: [string, string][] = [
+      ["'<' repeated", "<"],
+      ["unclosed comments", "<!--"],
+      ["empty tags", "<a>"],
+      ["unclosed scripts", "<script>"],
+      ["entity starts", "&#1"],
+      ["labels", `<h3>${KIND_LABEL}</h3>`],
+      ["change headings", `<h3>${HEADING}</h3>8.1. Termin składania ofert`],
+    ];
+    return patterns.map(([name, pattern]) => [
+      name,
+      pattern.repeat(Math.ceil(length / pattern.length)).slice(0, length),
+    ]);
+  }
+
+  it.each(hostileBodies(200_000))(
+    "handles 200 000 characters of %s in linear time",
+    (_case, html) => {
+      expect(html).toHaveLength(200_000);
+      const started = performance.now();
+      const result = extractDeadlineChange(html);
+      expect(performance.now() - started).toBeLessThan(1_000);
+      expect(!result.ok || result.change.kind === "none").toBe(true);
+    },
+  );
+
+  // The adapter's bound (MAX_HTML_BODY_LENGTH). Each case takes well under
+  // 100 ms here; a quadratic scan of a million characters would take minutes.
+  it.each(hostileBodies(1_000_000))(
+    "handles 1 000 000 characters of %s in linear time",
+    (_case, html) => {
+      expect(html).toHaveLength(1_000_000);
+      const started = performance.now();
+      const result = extractDeadlineChange(html);
+      expect(performance.now() - started).toBeLessThan(2_000);
+      expect(!result.ok || result.change.kind === "none").toBe(true);
+    },
+  );
+
+  /**
+   * Combining marks of differing classes (220, 230): canonical reordering in
+   * NFC is quadratic in such a run (80 000 characters took ~2 s before the
+   * normalization bound). Each body is well-formed, so the scan reads all of it.
+   */
+  function combiningMarkBodies(length: number): [string, string, number][] {
+    const runOf = (marks: string, runLength: number) =>
+      marks.repeat(Math.ceil(runLength / marks.length)).slice(0, runLength);
+    const bodies: [string, string, number][] = [];
+    const markRuns: [string, string][] = [
+      ["U+0316 U+0301 repeated", "\u0316\u0301"],
+      ["U+0316 U+0301 in alternating order", "\u0316\u0301\u0301\u0316"],
+    ];
+    for (const [name, marks] of markRuns) {
+      bodies.push([`${name}, one bare text run`, runOf(marks, length), 1]);
+      bodies.push([`${name}, inside one element`, `<p>${runOf(marks, length - 7)}</p>`, 1]);
+      // As many segments as possible at the normalization bound.
+      const piece = `<b>${runOf(marks, MAX_NORMALIZED_SEGMENT_LENGTH)}`;
+      const count = Math.floor(length / piece.length);
+      bodies.push([
+        `${name}, segments at the normalization bound`,
+        // The padding joins the last segment.
+        piece.repeat(count) + "x".repeat(length - count * piece.length),
+        count,
+      ]);
+    }
+    return bodies;
+  }
+
+  it.each(combiningMarkBodies(1_000_000))(
+    "handles 1 000 000 characters of %s in linear time",
+    (_case, html, segmentCount) => {
+      expect(html).toHaveLength(1_000_000);
+      const started = performance.now();
+      const result = extractDeadlineChange(html);
+      expect(performance.now() - started).toBeLessThan(2_000);
+      // The whole body was scanned: nothing unclosed, every segment read.
+      const { segments, complete } = textSegments(html);
+      expect(complete).toBe(true);
+      expect(segments).toHaveLength(segmentCount);
+      expect(result).toEqual({ ok: false, reason: "invalid source fields: htmlBody" });
+    },
+  );
 });
 
 describe("bzpAdapter with NoticeUpdateNotice records", () => {
@@ -343,7 +435,9 @@ describe("bzpAdapter with NoticeUpdateNotice records", () => {
   it("rejects an update whose htmlBody is missing, not a string or too long", () => {
     const [record] = fixtureRecords();
     const html = htmlBodyOf(record);
-    for (const htmlBody of [undefined, null, 1, html + "<!--" + "x".repeat(200_000) + "-->"]) {
+    const tooLong = `${html}<!--${"x".repeat(1_000_001 - html.length - 7)}-->`;
+    expect(tooLong).toHaveLength(1_000_001);
+    for (const htmlBody of [undefined, null, 1, tooLong]) {
       expect(normalizeOne({ ...record, htmlBody })).toEqual({
         ok: false,
         externalId: "2026/BZP 00507126/01",
@@ -352,11 +446,11 @@ describe("bzpAdapter with NoticeUpdateNotice records", () => {
     }
   });
 
-  it("accepts an htmlBody of exactly 200 000 characters (above the other fields' bound)", () => {
+  it("accepts an htmlBody of exactly 1 000 000 characters (above the other fields' bound)", () => {
     const [record] = fixtureRecords();
     const html = htmlBodyOf(record);
-    const padded = `${html}<!--${"x".repeat(200_000 - html.length - 7)}-->`;
-    expect(padded).toHaveLength(200_000);
+    const padded = `${html}<!--${"x".repeat(1_000_000 - html.length - 7)}-->`;
+    expect(padded).toHaveLength(1_000_000);
     const result = normalizeOne({ ...record, htmlBody: padded });
     expect(result.ok && result.kind === "notice_update" ? result.update.change : null).toEqual({
       kind: "deadline",

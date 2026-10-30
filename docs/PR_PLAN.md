@@ -155,20 +155,34 @@ z RSS. Preferencja: API → feed → dane strukturalne → HTML.
     6. `NoticeUpdateNotice` nie tworzy własnego wiersza w `opportunities` (test: liczba ofert
        po ingeście dnia z samymi zmianami się nie zmienia).
   - **nadrabianie pominiętych dni (decyzja właściciela, D-021):**
-    `ingest --from YYYY-MM-DD --to YYYY-MM-DD`; bez opcji dnia — automatycznie dni od
-    ostatniego pokrytego dnia źródła w `ingestion_runs` do wczoraj (cron, który nie ruszył przez
+    `ingest --from YYYY-MM-DD --to YYYY-MM-DD`; bez opcji dnia — automatycznie niepokryte dni
+    źródła w `ingestion_runs` z ostatnich 31 dni do wczoraj (cron, który nie ruszył przez
     kilka dni, dziś gubi te dni; to samo dotyczy zmian ogłoszeń z tych dni).
   - **Kryteria akceptacji PR-03B (nadrabianie):**
 
     7. `ingest --from A --to B` pobiera każdy dzień zakresu (jeden przebieg na źródło i dzień);
        niepoprawny zakres (`A > B`, ponad 31 dni, tylko jedna z opcji, razem z `--date`) →
        błąd użycia bez pobierania.
-    8. Bez opcji dnia `ingest` pobiera dni od dnia po ostatnim pokrytym (przebieg `succeeded`
-       albo `incomplete` rozpoczęty po końcu dnia) do wczoraj; świeże źródło — tylko wczoraj;
-       nic do nadrobienia — nic nie jest pobierane; ponad 31 dni → 31 najnowszych, reszta
-       raportowana jako przycięta.
-    9. Nieudany dzień zatrzymuje kolejne dni tego źródła (raportowane jako niewykonane), a
-       następne nadrabianie zaczyna od niego — z testami integracyjnymi.
+    8. Bez opcji dnia `ingest` pobiera niepokryte dni (pokryty = przebieg `succeeded` albo
+       `incomplete` rozpoczęty po końcu dnia) z 31 dni kończących się wczoraj, od
+       najwcześniejszego dnia dowolnego przebiegu źródła; źródło bez przebiegów — tylko
+       wczoraj; nic do nadrobienia — nic nie jest pobierane; brakujące dni starsze niż okno nie
+       są pobierane, te po najnowszym pokrytym dniu (albo od pierwszego przebiegu, gdy nic nie
+       jest pokryte) są raportowane jako przycięte.
+    9. Nieudany dzień nie zatrzymuje kolejnych dni tego źródła i jest ponawiany przez
+       następne nadrabianie, dopóki jest w oknie; po 2 kolejnych nieudanych pierwszych próbach
+       w tym przebiegu (pierwsza próba = dzień bez żadnego wcześniejszego przebiegu źródła;
+       nieudane ponowienie nie zwiększa ani nie zeruje licznika, udany dzień go zeruje)
+       pozostałe dni źródła są raportowane jako niewykonane (`consecutive_failures`), we
+       wszystkich trybach — z testami integracyjnymi.
+
+    _Zmiana AC8–AC9 w przeglądzie właściciela PR #6:_ wcześniej nadrabianie liczyło od dnia po
+    najnowszym pokrytym dniu, a nieudany dzień zatrzymywał kolejne dni źródła; różnica zbiorów
+    sprawia, że ręczne `--date` późniejszego dnia nie przeskakuje nieudanego dnia, a dzień,
+    który zawsze się nie udaje, nie blokuje nowszych (D-021). W tej samej rundzie: limit
+    `htmlBody` podniesiony do 1 000 000 znaków (zaobserwowano 255 562) i
+    `runs[].skippedReasons` w raporcie `ingest`. W przeglądzie C&S tej rundy limit AC9
+    zawężony do pierwszych prób: dwa dni, które stale się nie udają, nie blokują nowszych.
 
 - **PR-03C — helpery normalizacji** (przeniesione bez zmian z PR-03B):
   - **helpery normalizacji:** białe znaki, HTML → tekst (`htmlBody`: opis, kontakt, wartość),

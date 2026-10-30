@@ -49,9 +49,13 @@ const OPPORTUNITY_NOTICE_TYPES: ReadonlySet<string> = new Set([
 const NOTICE_UPDATE_TYPE = "NoticeUpdateNotice";
 
 /**
- * Records per request: a record is typically ~31 KB (median) and up to ~100 KB (max 95.6 KB
- * measured on 2026-10-28), so a typical page is < 1 MB and the worst case ~2.4 MB — about 2x
- * under the 5 MB response limit. Re-check this margin before raising the page size.
+ * Records per request. A contract notice record is typically ~31 KB (median) and up to ~100 KB
+ * (max 95.6 KB measured on 2026-10-28), so such a page is < 1 MB and at worst ~2.4 MB.
+ * Update notices are usually smaller (htmlBody 4 379–32 895 characters on 2026-10-29) but one
+ * of 255 562 was seen on 2026-10-27 and the per-record bound is 1 000 000: 25 large bodies can
+ * exceed the 5 MB response limit. That page then fails as `too_large` and the day fails each
+ * time it is retried; catch-up does not let such a retried day block newer days (D-021). Do
+ * not raise the page size without re-checking this.
  */
 export const BZP_PAGE_SIZE = 25;
 /** Per notice type and run; ~1000 records, above the few hundred published per day. */
@@ -62,10 +66,14 @@ const MAX_RECORDS_PER_DOCUMENT = 500;
 const MAX_FIELD_LENGTH = 20_000;
 /**
  * Bound on an update notice's `htmlBody`, the one field parsed as markup
- * (src/sources/bzp/notice-update.ts). Observed on 2026-10-29: 4 379–32 895
- * characters; a longer body rejects the record instead of being cut.
+ * (src/sources/bzp/notice-update.ts). Observed: 4 379–32 895 characters on
+ * 2026-10-29, up to 255 562 on 2026-10-27 (owner's live check). A page is
+ * already capped at 5 MB by the HTTP client and the parse is linear (one
+ * forward scan; Unicode normalization only of segments short enough to ever
+ * match a label — MAX_NORMALIZED_SEGMENT_LENGTH), so the bound leaves room; a
+ * longer body rejects the record instead of being cut.
  */
-const MAX_HTML_BODY_LENGTH = 200_000;
+const MAX_HTML_BODY_LENGTH = 1_000_000;
 /** Same bound as the domain's `tenderId` (and `externalId`). */
 const MAX_TENDER_ID_LENGTH = 200;
 /** C0 controls and DEL: never part of an identifier (NUL is also rejected by PostgreSQL text). */

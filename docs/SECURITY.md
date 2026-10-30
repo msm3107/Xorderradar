@@ -126,11 +126,15 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
 - Unikamy wyrażeń regularnych podatnych na ReDoS na danych zewnętrznych; ograniczamy długość
   wejścia przed dopasowaniem.
 - `htmlBody` ogłoszeń o zmianie BZP (od PR-03B, D-015): długość ograniczona przed parsowaniem
-  (200 000 znaków, dłuższy → odrzucenie rekordu), jeden liniowy przegląd tekstu między
+  (1 000 000 znaków, dłuższy → odrzucenie rekordu; zaobserwowane do 255 562), jeden liniowy przegląd tekstu między
   znacznikami bez parsera DOM (wyrażenia regularne tylko literalne albo bez zagnieżdżonych
   kwantyfikatorów; komentarze, `<script>`, `<style>` i atrybuty pomijane; niedomknięty
-  znacznik, komentarz, `<script>` lub `<style>` → odrzucenie rekordu); z treści wychodzi wyłącznie jedna data; HTML nie jest zapisywany ani logowany, powody
-  odrzuceń/pominięć są stałe. Testy: wrogie treści i przypadki 200 000 znaków.
+  znacznik, komentarz, `<script>` lub `<style>` → odrzucenie rekordu); normalizacja Unicode
+  NFC (kwadratowa w ciągu znaków łączących o różnych klasach) tylko dla segmentów
+  ≤ 256 znaków — dłuższy segment nie może być równy żadnej etykiecie ani dacie i zostaje
+  nieznormalizowany, więc koszt jest liniowy w długości treści; z treści wychodzi wyłącznie jedna data; HTML nie jest zapisywany ani logowany, powody
+  odrzuceń/pominięć są stałe. Testy: wrogie treści i przypadki 1 000 000 znaków (w tym długie
+  ciągi znaków łączących U+0316/U+0301).
 
 ## 9. SQL injection protection _(od PR-01)_
 

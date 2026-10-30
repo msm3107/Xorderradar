@@ -227,6 +227,56 @@ describe("ingest command (stub database)", () => {
     );
   });
 
+  it("reports the skipped counter of every run by reason, next to the counters", async () => {
+    const counters = {
+      documents: 3,
+      extracted: 9,
+      inserted: 2,
+      updated: 1,
+      unchanged: 1,
+      rejected: 1,
+      skipped: 4,
+    };
+    const outcome: IngestionOutcome = {
+      runs: [
+        runResult({
+          publicationDate: "2026-10-28",
+          counters,
+          skippedReasons: { no_original: 3, superseded: 1 },
+        }),
+        runResult(),
+      ],
+      notRun: [],
+      clipped: [],
+      from: "2026-10-28",
+      to: "2026-10-29",
+    };
+    const result = await run(["ingest"], {
+      database: {
+        withIngestLock: () =>
+          Promise.resolve({ acquired: true, value: outcome as never, lockLost: false }),
+      },
+    });
+    expect(result.code).toBe(ExitCode.Ok);
+    const report = JSON.parse(result.stdout) as { runs: Record<string, unknown>[] };
+    expect(report.runs).toEqual([
+      {
+        sourceId: "bzp",
+        publicationDate: "2026-10-28",
+        runId: "00000000-0000-4000-8000-000000000001",
+        status: "succeeded",
+        startedAt: NOW.toISOString(),
+        finishedAt: NOW.toISOString(),
+        durationMs: 0,
+        ...counters,
+        skippedReasons: { no_original: 3, superseded: 1 },
+        incomplete: [],
+        errorCode: null,
+      },
+      expect.objectContaining({ skipped: 0, skippedReasons: {} }),
+    ]);
+  });
+
   it("treats a database without ingest support as an internal error", async () => {
     const result = await run(["ingest"], { withoutIngestSupport: true });
     expect(result.code).toBe(ExitCode.Failure);
@@ -266,6 +316,7 @@ function runResult(overrides: Partial<IngestionRunResult> = {}): IngestionRunRes
     incomplete: [],
     errorCode: null,
     runId: "00000000-0000-4000-8000-000000000001",
+    skippedReasons: {},
     ...overrides,
   };
 }

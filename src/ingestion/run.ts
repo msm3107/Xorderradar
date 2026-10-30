@@ -5,12 +5,16 @@ import {
   type IngestionRunStatus,
   type IngestionRunSummary,
 } from "../domain/ingestion-run.js";
-import { noticeUpdateSchema, type NoticeUpdate } from "../domain/notice-update.js";
+import {
+  noticeUpdateSchema,
+  type NoticeUpdate,
+  type NoticeUpdateNoneReason,
+} from "../domain/notice-update.js";
 import { opportunityCandidateSchema } from "../domain/opportunity.js";
 import { pendingMigrations } from "../infrastructure/db/database.js";
 import { describeDatabaseFailure } from "../infrastructure/db/errors.js";
 import {
-  lastCoveredDay,
+  catchUpHistory,
   recordIngestionRun,
 } from "../infrastructure/db/ingestion-runs-repository.js";
 import {
@@ -29,13 +33,16 @@ import {
   type SourceHttpClient,
 } from "../sources/types.js";
 import {
-  catchUpDays,
+  catchUpWindow,
   daySpan,
   daysBetween,
+  failureStreak,
+  INGEST_MAX_CONSECUTIVE_FAILED_DAYS,
   INGEST_MAX_DAY,
   INGEST_MAX_DAYS,
   INGEST_MIN_DAY,
   isIngestDay,
+  planCatchUp,
   yesterdayUtc,
 } from "./catch-up.js";
 import { contentHash, fingerprint } from "./fingerprint.js";
@@ -63,8 +70,9 @@ export interface IngestionDeps {
 /**
  * The publication days to fetch (D-021): an explicit range (`YYYY-MM-DD`,
  * both included, at most INGEST_MAX_DAYS days; one day is from = to), or
- * catch-up — per source, the days since the last day it covered up to
- * yesterday (UTC), computed from `ingestion_runs` once the run holds the lock.
+ * catch-up — per source, the uncovered days of the INGEST_MAX_DAYS days
+ * ending yesterday (UTC), computed from `ingestion_runs` once the run holds
+ * the lock (planCatchUp).
  */
 export type IngestionDays =
   | { readonly mode: "range"; readonly from: string; readonly to: string }
@@ -78,26 +86,35 @@ export interface IngestionRequest {
   readonly maxRecords: number;
 }
 
+/** Why a notice update was counted as `skipped` (fixed codes, D-015). */
+export type SkipReason = "no_tender_id" | NoticeUpdateNoneReason | "no_original" | "superseded";
+
 /** One source's run for one day; `runId` is null when it could not be recorded. */
 export interface IngestionRunResult extends IngestionRunSummary {
   readonly runId: string | null;
+  /**
+   * The `skipped` counter by reason, only reasons that occurred; the counts
+   * sum to `counters.skipped`. Reported, not stored.
+   */
+  readonly skippedReasons: Readonly<Partial<Record<SkipReason, number>>>;
 }
 
 /**
  * A planned day of a source that did not run (nothing fetched, no
- * `ingestion_runs` row): an earlier day of the same source failed (days run
- * in order, so catch-up resumes from the failed day next time), or the run
- * was aborted (lost lock).
+ * `ingestion_runs` row): INGEST_MAX_CONSECUTIVE_FAILED_DAYS consecutive
+ * failed first attempts of the same source came before it (failureStreak;
+ * the day stays uncovered, so a later catch-up plans it again while it is in
+ * the window), or the run was aborted (lost lock).
  */
 export interface NotRunDay {
   readonly sourceId: string;
   readonly publicationDate: string;
-  readonly reason: "previous_day_failed" | "aborted";
+  readonly reason: "consecutive_failures" | "aborted";
 }
 
 /**
- * Missing days catch-up left out for a source (more than INGEST_MAX_DAYS):
- * `from`…`to`, both included.
+ * Missing days of a source older than the catch-up window (D-021), never run
+ * automatically: `from`…`to`, both included.
  */
 export interface ClippedDays {
   readonly sourceId: string;
@@ -159,6 +176,7 @@ class StoreError extends Error {
 }
 
 type MutableCounters = { -readonly [K in keyof IngestionRunCounters]: number };
+type SkipCounts = Partial<Record<SkipReason, number>>;
 
 function emptyCounters(): MutableCounters {
   return {
@@ -229,6 +247,7 @@ async function storeNoticeUpdate(
   sourceId: string,
   input: NoticeUpdate,
   counters: MutableCounters,
+  skippedReasons: SkipCounts,
   signal: AbortSignal,
 ): Promise<void> {
   const { logger } = deps;
@@ -245,8 +264,9 @@ async function storeNoticeUpdate(
     return;
   }
   const update = parsed.data;
-  const skip = (reason: string) => {
+  const skip = (reason: SkipReason) => {
     counters.skipped++;
+    skippedReasons[reason] = (skippedReasons[reason] ?? 0) + 1;
     logger.info("notice update skipped", {
       sourceId,
       externalId: update.externalId,
@@ -306,6 +326,7 @@ async function storeDocument(
   adapter: SourceAdapter,
   doc: RawDocument,
   counters: MutableCounters,
+  skippedReasons: SkipCounts,
   signal: AbortSignal,
 ): Promise<void> {
   const { logger } = deps;
@@ -325,7 +346,14 @@ async function storeDocument(
     }
     switch (normalized.kind) {
       case "notice_update":
-        await storeNoticeUpdate(deps, sourceId, normalized.update, counters, signal);
+        await storeNoticeUpdate(
+          deps,
+          sourceId,
+          normalized.update,
+          counters,
+          skippedReasons,
+          signal,
+        );
         break;
       case "opportunity":
         await storeOpportunity(deps, sourceId, normalized.candidate, counters, signal);
@@ -381,12 +409,14 @@ async function storeOpportunity(
  * fingerprint/hash → store, one document at a time (FetchContext.onDocument),
  * so memory holds one page (D-008). Never rejects: every failure becomes a
  * `failed` summary with a code; records stored before the failure stay stored.
+ * `skippedReasons` is filled in as updates are skipped.
  */
 async function ingestSource(
   deps: IngestionDeps,
   sourceId: string,
   publicationDate: string,
   maxRecords: number,
+  skippedReasons: SkipCounts,
 ): Promise<IngestionRunSummary> {
   const startedAt = deps.now();
   const counters = emptyCounters();
@@ -413,11 +443,11 @@ async function ingestSource(
         maxRecords,
         now: deps.now,
         logger: deps.logger,
-        onDocument: (doc) => storeDocument(deps, adapter, doc, counters, signal),
+        onDocument: (doc) => storeDocument(deps, adapter, doc, counters, skippedReasons, signal),
       });
       // A streaming adapter returns no documents; any returned are stored too.
       for (const doc of result.documents) {
-        await storeDocument(deps, adapter, doc, counters, signal);
+        await storeDocument(deps, adapter, doc, counters, skippedReasons, signal);
       }
       incomplete = result.incomplete;
     } catch (error: unknown) {
@@ -449,6 +479,8 @@ async function ingestSource(
 interface SourcePlan {
   readonly sourceId: string;
   readonly days: readonly string[];
+  /** The planned days that already had a run of the source (any status) before this one. */
+  readonly attempted: ReadonlySet<string>;
 }
 
 /** Checks an explicit range; IngestionRequestError when it is not a valid one. */
@@ -467,9 +499,11 @@ function validateDays(days: IngestionDays): void {
 }
 
 /**
- * The days each source runs. Catch-up reads `ingestion_runs`, so it must run
- * under the ingest lock (no other run can record a day meanwhile); clipped
- * days are logged and returned.
+ * The days each source runs and which of them were attempted before. Reads
+ * `ingestion_runs` in every mode (one query per source, result bounded to the
+ * window: the catch-up window, or the requested range), so it must run under
+ * the ingest lock (no other run can record a day meanwhile); clipped days are
+ * logged and returned.
  */
 async function planDays(
   deps: IngestionDeps,
@@ -478,19 +512,27 @@ async function planDays(
 ): Promise<{ plans: SourcePlan[]; clipped: ClippedDays[] }> {
   if (days.mode === "range") {
     const range = daysBetween(days.from, days.to);
-    return { plans: sourceIds.map((sourceId) => ({ sourceId, days: range })), clipped: [] };
+    const plans: SourcePlan[] = [];
+    for (const sourceId of sourceIds) {
+      const history = await catchUpHistory(deps.db, sourceId, days);
+      plans.push({ sourceId, days: range, attempted: new Set(history.attempted) });
+    }
+    return { plans, clipped: [] };
   }
   const yesterday = yesterdayUtc(deps.now());
+  const window = catchUpWindow(yesterday, INGEST_MAX_DAYS);
   const plans: SourcePlan[] = [];
   const clipped: ClippedDays[] = [];
   for (const sourceId of sourceIds) {
-    const lastCovered = await lastCoveredDay(deps.db, sourceId);
-    const plan = catchUpDays(lastCovered, yesterday, INGEST_MAX_DAYS);
+    const history = await catchUpHistory(deps.db, sourceId, window);
+    const plan = planCatchUp(history, yesterday, INGEST_MAX_DAYS);
+    const lastCovered = history.latestCovered;
     if (plan.clipped !== null) {
       clipped.push({ sourceId, ...plan.clipped });
       deps.logger.warn("catch-up clipped, older missing days not run", {
         sourceId,
         lastCovered,
+        earliestAttempted: history.earliestAttempted,
         ...plan.clipped,
         maxDays: INGEST_MAX_DAYS,
       });
@@ -498,7 +540,7 @@ async function planDays(
     if (plan.days.length === 0) {
       deps.logger.info("nothing to catch up", { sourceId, lastCovered });
     }
-    plans.push({ sourceId, days: plan.days });
+    plans.push({ sourceId, days: plan.days, attempted: new Set(history.attempted) });
   }
   return { plans, clipped };
 }
@@ -507,9 +549,12 @@ async function planDays(
  * `ingest` (docs/ARCHITECTURE.md §6): runs the selected sources one after the
  * other, each over its publication days in ascending order, stores their
  * records with change detection and records one `ingestion_runs` row per
- * source and day. A failing source never stops the others; a failing day
- * stops the later days of its source (they are returned as `notRun`, so
- * catch-up retries from the failed day).
+ * source and day. A failing source never stops the others, and a failing day
+ * does not stop the later days of its source; only after
+ * INGEST_MAX_CONSECUTIVE_FAILED_DAYS consecutive failed first attempts (days
+ * with no earlier run of the source; failureStreak) are its remaining days
+ * returned as `notRun` (`consecutive_failures`). Failed and not-run days stay
+ * uncovered, so catch-up retries them while they are in its window.
  *
  * Rejects only before anything is fetched: IngestionRequestError (bad
  * request), SchemaNotReadyError, or a database error while selecting sources
@@ -535,8 +580,9 @@ export async function runIngestion(
 
   const runs: IngestionRunResult[] = [];
   const notRun: NotRunDay[] = [];
-  for (const { sourceId, days } of plans) {
+  for (const { sourceId, days, attempted } of plans) {
     let blocked: NotRunDay["reason"] | null = null;
+    let streak = 0;
     for (const publicationDate of days) {
       if (blocked === null && deps.signal?.aborted === true) blocked = "aborted";
       if (blocked !== null) {
@@ -545,7 +591,12 @@ export async function runIngestion(
       }
       const run = await runDay(deps, sourceId, publicationDate, request.maxRecords);
       runs.push(run);
-      if (run.status === "failed" || run.runId === null) blocked = "previous_day_failed";
+      streak = failureStreak(streak, {
+        // A run that could not be recorded did not cover its day either.
+        failed: run.status === "failed" || run.runId === null,
+        firstAttempt: !attempted.has(publicationDate),
+      });
+      if (streak >= INGEST_MAX_CONSECUTIVE_FAILED_DAYS) blocked = "consecutive_failures";
     }
   }
 
@@ -557,11 +608,12 @@ export async function runIngestion(
       days: aborted.length,
     });
   }
-  const afterFailure = notRun.filter((day) => day.reason === "previous_day_failed");
-  if (afterFailure.length > 0) {
-    deps.logger.warn("days not run after a failed day", {
-      sourceIds: [...new Set(afterFailure.map((day) => day.sourceId))],
-      days: afterFailure.length,
+  const afterFailures = notRun.filter((day) => day.reason === "consecutive_failures");
+  if (afterFailures.length > 0) {
+    deps.logger.warn("days not run after consecutive failed days", {
+      sourceIds: [...new Set(afterFailures.map((day) => day.sourceId))],
+      days: afterFailures.length,
+      maxConsecutiveFailedDays: INGEST_MAX_CONSECUTIVE_FAILED_DAYS,
     });
   }
   return {
@@ -580,7 +632,8 @@ async function runDay(
   publicationDate: string,
   maxRecords: number,
 ): Promise<IngestionRunResult> {
-  const summary = await ingestSource(deps, sourceId, publicationDate, maxRecords);
+  const skippedReasons: SkipCounts = {};
+  const summary = await ingestSource(deps, sourceId, publicationDate, maxRecords, skippedReasons);
   let runId: string | null = null;
   try {
     runId = await recordIngestionRun(deps.db, summary);
@@ -604,7 +657,7 @@ async function runDay(
     incomplete: summary.incomplete,
     errorCode: summary.errorCode,
   });
-  return { ...summary, runId };
+  return { ...summary, runId, skippedReasons };
 }
 
 /**

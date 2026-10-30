@@ -19,6 +19,7 @@ import {
 import { createLogger, type Logger } from "./infrastructure/logger.js";
 import {
   daySpan,
+  INGEST_MAX_CONSECUTIVE_FAILED_DAYS,
   INGEST_MAX_DAY,
   INGEST_MAX_DAYS,
   INGEST_MIN_DAY,
@@ -173,11 +174,13 @@ Commands:
             change detection, and apply published notice updates (new offer deadlines), from
             the given sources or all enabled ones; prints a JSON summary and records each
             source's run per day. Without --date/--from/--to: catch-up, i.e. per source every
-            day after the last day it covered (a succeeded or incomplete run started after
-            that day ended) up to yesterday (UTC); yesterday only for a source that covered
-            none; at most the ${String(INGEST_MAX_DAYS)} days ending yesterday (older missing days are
-            reported as clipped, from-to). Days run in order; a failed day stops that source's later
-            days (reported as notRun). One run at a time (lock): while another run holds it,
+            day of the ${String(INGEST_MAX_DAYS)} days ending yesterday (UTC) that is not covered (a succeeded or
+            incomplete run started after that day ended), from the source's earliest run on;
+            yesterday only for a source that never ran. Missing days older than that are not
+            run (reported as clipped, from-to). Days run in order; after ${String(INGEST_MAX_CONSECUTIVE_FAILED_DAYS)} consecutive failed
+            first attempts (days with no earlier run of the source; a failed retry neither
+            counts nor resets) a source's remaining days are not run (notRun,
+            consecutive_failures). Each run lists skippedReasons. One run at a time (lock): while another run holds it,
             prints status "skipped" and exits 0 without fetching. Requires CRAWLER_CONTACT
             and an up-to-date schema (migrate). Exit 1 when any source failed.
             --date   one publication day (days from ${INGEST_MIN_DAY} to ${INGEST_MAX_DAY})
@@ -718,6 +721,7 @@ async function runIngest(
       finishedAt: run.finishedAt,
       durationMs: run.finishedAt.getTime() - run.startedAt.getTime(),
       ...run.counters,
+      skippedReasons: run.skippedReasons,
       incomplete: run.incomplete,
       errorCode: run.errorCode,
     })),

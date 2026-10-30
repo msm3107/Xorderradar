@@ -185,10 +185,12 @@ tylko w odrzucanym `htmlBody` — kandydat na „HTML → tekst” w PR-03).
 **Zmiany ogłoszeń BZP (PR-03B, D-015):** BZP publikuje je jako osobne `NoticeUpdateNotice`
 (własny `noticeNumber`, powiązanie z pierwotnym ogłoszeniem tylko przez `tenderId`, nowy
 termin tylko w `htmlBody`). Rekord jest rozpoznawany po własnym `noticeType`; dla zmiany
-ekstrakcja czyta `noticeNumber`, `publicationDate`, `tenderId` i `htmlBody` (≤ 200 000
+ekstrakcja czyta `noticeNumber`, `publicationDate`, `tenderId` i `htmlBody` (≤ 1 000 000
 znaków, dłuższy → odrzucenie). `src/sources/bzp/notice-update.ts` (`extractDeadlineChange`)
 czyta `htmlBody` liniowo jako tekst między znacznikami (bez komentarzy, `<script>`, `<style>`
-i atrybutów; niedomknięty znacznik, komentarz, `<script>` lub `<style>` → odrzucenie) i zwraca tylko nowy termin z bloku „3.4.1.)” / „8.1. Termin składania ofert” /
+i atrybutów; niedomknięty znacznik, komentarz, `<script>` lub `<style>` → odrzucenie;
+normalizacja NFC tylko segmentów ≤ 256 znaków, bo jest kwadratowa w ciągu znaków łączących, a
+dłuższy segment i tak nie może być etykietą ani datą) i zwraca tylko nowy termin z bloku „3.4.1.)” / „8.1. Termin składania ofert” /
 „Po zmianie:” (`YYYY-MM-DD HH:MM` Europe/Warsaw → UTC, `src/sources/warsaw-time.ts`; godzina
 pominięta lub powtórzona przy zmianie czasu → odrzucenie), gdy zmieniane ogłoszenie to
 „Ogłoszenie o zamówieniu” (sekcja 3.1). Inna zmiana → `change.kind = "none"` ze stałym
@@ -285,11 +287,12 @@ interface IngestionRequest { sourceIds?: string[]; days: IngestionDays; maxRecor
 type IngestionDays = { mode: "range"; from: string; to: string } | { mode: "catch_up" };
 interface IngestionOutcome {
   runs: IngestionRunResult[]; // źródło po źródle, w każdym dni rosnąco
-  notRun: { sourceId; publicationDate; reason: "previous_day_failed" | "aborted" }[];
-  clipped: { sourceId; from; to }[]; // nadrabianie ponad 31 dni
+  notRun: { sourceId; publicationDate; reason: "consecutive_failures" | "aborted" }[];
+  clipped: { sourceId; from; to }[]; // brakujące dni starsze niż okno nadrabiania
   from: string | null; to: string | null; // zaplanowane dni (null: nic do zrobienia)
 }
 // IngestionRunResult = IngestionRunSummary (src/domain/ingestion-run.ts) + runId (null = nie zapisano)
+//   + skippedReasons (licznik `skipped` wg powodu, tylko w raporcie, bez kolumny w bazie)
 ```
 
 - **Wybór źródeł:** bez `sourceIds` — wszystkie źródła włączone w bazie (`sources.enabled`);
@@ -301,14 +304,21 @@ interface IngestionOutcome {
   sam; CLI: kod 1; D-020).
 - **Dni (PR-03B, D-021):** `range` — każdy dzień od `from` do `to` (dni z lat 2000–2999,
   najwyżej 31, `INGEST_MAX_DAYS` — liczone arytmetycznie przed zbudowaniem listy; inaczej
-  `IngestionRequestError`). `catch_up` — per źródło, pod blokadą:
-  `lastCoveredDay` (`src/infrastructure/db/ingestion-runs-repository.ts`: najnowszy dzień z
-  przebiegiem `succeeded`/`incomplete` rozpoczętym po końcu tego dnia, UTC) → `catchUpDays`
-  (`src/ingestion/catch-up.ts`): dni od następnego do wczoraj, bez pokrytego dnia — tylko
-  wczoraj, ponad 31 → 31 najnowszych + `clipped` (log warn); nic do zrobienia → log info
+  `IngestionRequestError`). `catch_up` — per źródło, pod blokadą: `catchUpHistory`
+  (`src/infrastructure/db/ingestion-runs-repository.ts`, jedno zapytanie: pokryte i próbowane
+  dni w oknie 31 dni kończącym się wczoraj — pokryty = przebieg `succeeded`/`incomplete`
+  rozpoczęty po końcu dnia, UTC — najnowszy pokryty dzień i najwcześniejszy dzień dowolnego
+  przebiegu; daty przez `to_char`) → `planCatchUp`
+  (`src/ingestion/catch-up.ts`): niepokryte dni okna od najwcześniejszego dnia przebiegu
+  źródła, rosnąco; źródło bez przebiegów — tylko wczoraj; brakujące dni starsze niż okno →
+  `clipped` (log warn), nigdy nie pobierane automatycznie; nic do zrobienia → log info
   `nothing to catch up`. Źródła po kolei, w każdym dni rosnąco, jeden przebieg na dzień;
-  `failed` dnia → kolejne dni źródła w `notRun` (`previous_day_failed`, log warn), inne
-  źródła działają dalej; przerwany sygnał → reszta w `notRun` (`aborted`).
+  `failed` dnia nie zatrzymuje kolejnych dni; po 2 kolejnych nieudanych pierwszych próbach
+  (`INGEST_MAX_CONSECUTIVE_FAILED_DAYS`, `failureStreak`; pierwsza próba = dzień bez
+  wcześniejszego przebiegu źródła, z `catchUpHistory.attempted` — w trybie `range` to samo
+  zapytanie ograniczone do zakresu; nieudane ponowienie nie zwiększa ani nie zeruje
+  licznika) reszta dni źródła w `notRun` (`consecutive_failures`, log warn), inne źródła
+  działają dalej; przerwany sygnał → reszta w `notRun` (`aborted`).
 - **Przebieg źródła** (sekwencyjnie, każde izolowane): nowy klient HTTP, `signal` =
   timeout przebiegu źródła i dnia (`AbortSignal.timeout`, CLI: 10 min, D-018) połączony z sygnałem całego
   przebiegu (CLI: sygnał blokady ingest, przerywany przy jej utracie, D-019); `adapter.fetch`
@@ -552,12 +562,13 @@ DO NOTHING` — istniejący wiersz, np. wyłączony przez operatora, zostaje bez
 - `ingest [sourceId...] [--date YYYY-MM-DD | --from YYYY-MM-DD --to YYYY-MM-DD] [--limit N]`
   (PR-03A, zakresy i nadrabianie PR-03B, D-021) — pobiera i zapisuje ogłoszenia z dnia
   publikacji (`--date`), z każdego dnia zakresu (`--from/--to`, najwyżej 31 dni) albo —
-  domyślnie — z dni od ostatniego pokrytego do wczoraj według UTC (nadrabianie; świeże źródło:
-  wczoraj) wybranych źródeł (domyślnie wszystkich włączonych w bazie), do N rekordów na typ ogłoszenia i dzień (domyślnie i maks. 1000),
+  domyślnie — z niepokrytych dni z 31 kończących się wczoraj według UTC (nadrabianie; źródło
+  bez przebiegów: wczoraj) wybranych źródeł (domyślnie wszystkich włączonych w bazie), do N rekordów na typ ogłoszenia i dzień (domyślnie i maks. 1000),
   timeout 10 min na źródło i dzień (D-018, D-021). Kolejność kontroli: argumenty (kod 2) → konfiguracja (w
   tym `CRAWLER_CONTACT`, kod 1) → baza. Nie migruje sama (oczekujące migracje → kod 1). Wynik:
   JSON na stdout (`status`, `mode` = `date`/`range`/`catch_up`, `from`, `to`, `limit`,
-  przebiegi z `publicationDate`, licznikami, `runId`, `errorCode`, `notRun`, `clipped`) +
+  przebiegi z `publicationDate`, licznikami, `skippedReasons`, `runId`, `errorCode`, `notRun`,
+  `clipped`) +
   linia logu na przebieg. Kod 0, gdy każde źródło `succeeded` lub `incomplete`, a także gdy blokada jest
   zajęta (`status: "skipped"`, nic nie uruchomiono); 1, gdy któreś `failed`, podsumowania nie
   zapisano, blokada została utracona w trakcie (`lock_lost`) albo baza niedostępna; 2 — błąd
@@ -593,7 +604,7 @@ odrzucenie (`sourceId`, `externalId`, powód) i przerwane listingi. `ingest` (PR
 (`sourceId`, `externalId`, powód albo `errorCode` + `constraint`), pominięte zmiany ogłoszeń
 (`notice update skipped`: `sourceId`, `externalId`, `tenderId`, stały powód), plan dni
 (`nothing to catch up`, `catch-up clipped, older missing days not run`, `days not run after
-a failed day`), niezapisane podsumowanie
+consecutive failed days`), niezapisane podsumowanie
 (`sourceId`, `errorCode` = SQLSTATE), zajętą, utraconą i niezwolnioną blokadę (`lockKey`,
 `errorCode`) oraz pominięte po przerwaniu źródła (`sourceIds`) — bez treści
 dokumentów, tytułów, danych kontaktowych i adresu bazy. Podsumowanie każdego przebiegu jest w

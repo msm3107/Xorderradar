@@ -7,8 +7,10 @@ round (docs, `tender_id`, lock busy → skipped, `health` schema check) merged i
 (e71decc). Part B (BZP notice updates + catch-up of missed days; owner split: normalization
 helpers moved unchanged to Part C) implemented. Code & Safety Review PASS with findings → fix
 round (M1, M2, L3–L5) → C&S re-review PASS; Quality Review REJECT (documentation only, AC1–AC9
-met) → documentation fix round → C&S check PASS → Quality re-review ACCEPT. PR ready for the
-owner's review.
+met) → documentation fix round → C&S check PASS → Quality re-review ACCEPT. Owner review of
+PR #6 (head f356815): owner review round (PR #6) implemented → C&S review FAIL (H1 High,
+M1, L1–L2, N1–N3) → fix round → C&S re-review PASS → Quality Review ACCEPT (doc nits applied)
+→ pushed to PR #6 for the owner's re-review (not merged).
 
 ## Completed
 
@@ -108,14 +110,17 @@ owner's review.
 **PR-03 — Part B (BZP notice updates + catch-up)** — implemented; Code & Safety Review PASS
 with findings → fix round → C&S re-review PASS; Quality Review REJECT (documentation only,
 AC1–AC9 met) → documentation fix round → C&S check PASS → Quality re-review ACCEPT; PR
-opened for the owner's review (not merged). Owner
+opened for the owner's review (not merged). **Owner review round (PR #6) implemented; C&S
+review FAIL → fix round → C&S re-review PASS → Quality Review ACCEPT; pushed to PR #6 for the
+owner's re-review** (details at the end of this list). Owner
 decisions: the update goes to the older row of `(source_id, tender_id)`; catch-up via
 `--from/--to` and automatically without a day option; PR-03 split (B = updates + catch-up,
 C = normalization helpers; only the Warsaw-local → UTC helper is in B).
 
 - BZP adapter fetches a third type, `NoticeUpdateNotice` (last, same per-type limits),
   dispatching every record on its own `noticeType`; update records read only `noticeNumber`,
-  `publicationDate`, `tenderId`, `htmlBody` (≤ 200 000 chars, longer → rejected).
+  `publicationDate`, `tenderId`, `htmlBody` (≤ 1 000 000 chars, longer → rejected; raised
+  from 200 000 in the owner review of PR #6).
   `NormalizeResult` gains `kind` (`opportunity` | `notice_update`); `NoticeUpdate` domain
   schema (`src/domain/notice-update.ts`).
 - `src/sources/bzp/notice-update.ts`: linear text scan of `htmlBody` (comments, script, style,
@@ -132,11 +137,15 @@ C = normalization helpers; only the Warsaw-local → UTC helper is in B).
   `skipped` (`no_original`, `superseded`). Upserts keep a deadline set by an update (AC4).
   Skips (`no_tender_id`, `not_contract_notice_change`, `no_deadline_change`, `no_original`,
   `superseded`) counted in `skipped` and logged at info without HTML.
-- Catch-up (D-021, `src/ingestion/catch-up.ts`, `lastCoveredDay`): `ingest --from/--to`
-  (≤ 31 days, counted before any list is built; days in 2000–2999 only) and, without a day option, per source the days after the last covered day up to
-  yesterday UTC (covered = `succeeded`/`incomplete` run started after the day ended); fresh
-  source → yesterday only; > 31 days → newest 31 + `clipped`; a failed day stops the source's
-  later days (`notRun`). Report: `mode`, `from`, `to`, `runs[].publicationDate`, `notRun`,
+- Catch-up (D-021, `src/ingestion/catch-up.ts`): `ingest --from/--to` (≤ 31 days, counted
+  before any list is built; days in 2000–2999 only) and, without a day option, per source the
+  uncovered days of the 31 ending yesterday UTC from the source's earliest run on (covered =
+  `succeeded`/`incomplete` run started after the day ended; owner review of PR #6 — was "days
+  after the last covered day"); fresh source → yesterday only; older missing days →
+  `clipped`, never run automatically; after 2 consecutive failed first attempts (a retry of an
+  already attempted day does not count) the source's remaining
+  days are `notRun` (`consecutive_failures`; was: a failed day stops the later days). Report:
+  `mode`, `from`, `to`, `runs[].publicationDate`, `runs[].skippedReasons`, `notRun`,
   `clipped`.
 - `source:preview` lists updates (`noticeUpdates` count, `updates` list), never applies them.
 - Docs: DECISIONS D-015 (amended), D-019 (busy report shape), D-021 (new); PR_PLAN (split,
@@ -166,6 +175,32 @@ C = normalization helpers; only the Warsaw-local → UTC helper is in B).
   - `clipped[].firstSkipped/lastSkipped` renamed to `from`/`to` (code, tests, D-021, README,
     ARCHITECTURE); the `ingest` usage text defines a covered day; D-015 wording ("do PR-03B
     nie pobierał").
+- Owner review of PR #6 (f356815) — round implemented, C&S review FAIL, fix round below:
+  1. `htmlBody` bound 200 000 → 1 000 000 chars (a live body of 255 562 was rejected);
+     linear-time tests at 1 000 000 for the hostile inputs.
+  2. Gap-based catch-up (`planCatchUp`, `catchUpHistory`: one query per source, no
+     migration) and `consecutive_failures` after 2 failed days in a row
+     (`INGEST_MAX_CONSECUTIVE_FAILED_DAYS`, all modes); D-021 notes on `--date` and an
+     always-failing day resolved; PR_PLAN AC8–AC9 amended.
+  3. README: first deployment = one-off `ingest --from <wczoraj−30> --to <wczoraj>` before
+     the first cron.
+  4. `runs[].skippedReasons` in the `ingest` report (in memory only; sums to `skipped`).
+- C&S review of that round: FAIL; fix round (C&S re-review PASS; Quality Review ACCEPT,
+  doc nits applied by the coordinator: README legend of skip reasons, oldest backfill day
+  leaves the window, out-of-order retry → `no_original` note in README/D-021, D-021 "at most
+  2 (usually 1)"):
+  - H1: `.normalize("NFC")` is quadratic in a run of combining marks (80 000 chars ~2 s);
+    now only segments ≤ `MAX_NORMALIZED_SEGMENT_LENGTH` (256) are normalized — longer ones
+    can never equal a label (≤ 65 chars) or the date and are kept as they are. Tests at
+    1 000 000 chars of U+0316/U+0301 (bare, in one element, segments at the bound).
+  - M1: the 2-in-a-row limit counts only failed **first attempts** (no earlier run of the
+    source for that day, from `catchUpHistory.attempted`, also queried in `--date`/`--from/--to`
+    mode); a failed retry neither counts nor resets (`failureStreak`). Two days that keep
+    failing no longer block newer days.
+  - L1: `BZP_PAGE_SIZE` comment (update bodies up to 1 000 000 → a page can exceed 5 MB →
+    `too_large`, a day that keeps failing, now non-blocking). L2: an unrecorded run counts as a
+    failed first attempt (test). N1–N2: comment wording; dates via `to_char`. N3: any run of
+    an old day (also `--date`, even failed) moves the catch-up lower bound (README, D-021).
 
 **PR-03 — Part A (ingestion core)** — merged in PR #4; the owner-review follow-up round
 merged in PR #5 (e71decc) (scope split
@@ -307,9 +342,11 @@ D-021 (ingest day ranges and automatic catch-up).
 
 ## Next action
 
-1. Owner reviews and merges the PR-03 Part B PR (BZP notice updates + catch-up). Quality
-   re-review nits left for later: D-018 body amended by the coordinator; the `ingest` usage
-   line "reported as clipped, from-to)…" could be rewrapped (cosmetic).
+1. Owner re-reviews PR #6 (PR-03 Part B, with the owner-review round: `htmlBody` ≤ 1 000 000,
+   gap-based catch-up, first-deployment backfill, `skippedReasons`) and merges it. Cosmetic
+   nits left: over-wide `ingest` help lines in `src/cli.ts`; two test titles still say
+   "200 000" (1 000 000 cases exist). Watch live runs for `too_large` on update pages
+   (`BZP_PAGE_SIZE` 25 kept; lower it if it happens).
 2. Owner verifies PR-02 AC1 outside the container (command and checklist under Blockers); a
    first live `ingest bzp --date <past weekday>` on the same machine is a useful follow-up
    check (exit 0, `inserted` > 0, a second run all `unchanged`; `skipped` > 0 and some
@@ -364,8 +401,9 @@ Notes from the Part A Code & Safety Review (for the Quality Review and later):
     a `ContractNotice` row being updated by `NoticeUpdateNotice` for the days that were
     ingested in order. It still may not rely on it for: small contracts (`SmallContractNotice`
     — originals without `tenderId`, see Next action item 6); days that were clipped
-    (`clipped`) or never recovered (`failed` days skipped by the operator, `notRun`);
-    `no_original` skips after an out-of-order backfill until the following days are
+    (`clipped`) or failed days not recovered within the 31-day window (`notRun` included);
+    `no_original` skips after an out-of-order backfill or an automatic retry of a failed day
+    (changes of its originals published before the retry) until the following days are
     re-ingested (D-021 operator notes). For those, "skip notices past their deadline" can still
     drop a tender whose deadline was extended.
 - **PR-04/05:** the stored `status` stays `open` after the deadline for rows that are never
@@ -375,9 +413,8 @@ Notes from the Part A Code & Safety Review (for the Quality Review and later):
 Notes from Part B (for later PRs):
 
 - PR-03B observability (Quality Review): deadline updates are counted in `updated` together
-  with changed notices, and skip reasons are visible only in info logs (`notice update
-skipped`). If operators need the rates, per-reason skip counts in the summary log line are
-  the simple next step — out of PR-03B scope.
+  with changed notices; skip reasons are counted per run in `runs[].skippedReasons` (owner
+  review of PR #6) and logged at info (`notice update skipped`).
 
 - `tests/fixtures/bzp/README.md`: the exact `NoticeType`/`PageSize` of the captured empty day are not
   recorded (written as `…`); the body `[]` is the real response.
@@ -456,6 +493,18 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-10-30, PR-03 Part B after the Quality Review of the owner-review round (coordinator doc
+nits only; README, DECISIONS D-021, STATE):
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 774/774 tests passed (26 files). No code changes after
+the Quality Review; no dependency changes, no live network calls.
+
+2026-10-30, PR-03 Part B fix round after the C&S review of the owner-review round (Node 22,
+pnpm 10.28.0, PostgreSQL 16):
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 774/774 tests passed (26 files; owner-review round: 760). No
+dependency changes, no live network calls.
 
 2026-10-30, PR-03 Part B Quality Review fix round (documentation; `clipped` `from`/`to`
 rename; `ingest` usage text; Node 22.22.0, pnpm 10.28.0, PostgreSQL 16):

@@ -8,11 +8,13 @@ import { warsawLocalToUtc } from "../warsaw-time.js";
  * contract notice. Nothing else in the body is read, and no text from it is
  * ever returned except that parsed instant.
  *
- * The body is untrusted markup of up to the adapter's bound (200 000
+ * The body is untrusted markup of up to the adapter's bound (1 000 000
  * characters). Every step is linear in its length: one forward scan with
  * `indexOf` and bounded patterns, no regular expression with nested
- * quantifiers runs over the body, and markup is never interpreted beyond
- * "a tag ends a text segment".
+ * quantifiers runs over the body, markup is never interpreted beyond
+ * "a tag ends a text segment", and Unicode normalization (quadratic in a run
+ * of combining marks) only ever runs on segments of at most
+ * MAX_NORMALIZED_SEGMENT_LENGTH characters.
  */
 
 /** Section 3.1: which kind of notice is being changed. */
@@ -26,6 +28,19 @@ const DEADLINE_LABEL = "8.1. Termin składania ofert";
 const NEW_VALUE_LABEL = "Po zmianie:";
 /** `YYYY-MM-DD HH:MM`, Europe/Warsaw local time; applied to one short segment only. */
 const LOCAL_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/;
+/**
+ * Longest segment that is NFC-normalized. `normalize` reorders combining marks
+ * by an insertion sort, so one long run of marks of differing classes is
+ * quadratic (80 000 characters: ~2 s; 1 000 000: minutes of blocked event
+ * loop). Segments are only ever compared for equality with the labels above
+ * (at most 65 characters, 69 code points decomposed) or matched as a
+ * 16-character date. Decomposition never shortens text, so a string
+ * canonically equivalent to one of them has at most 69 code points (138 UTF-16
+ * units). A longer segment can never match, so it is kept as it is,
+ * un-normalized: segment positions do not change, and normalization costs at
+ * most this length per segment (linear in the body).
+ */
+export const MAX_NORMALIZED_SEGMENT_LENGTH = 256;
 
 /** Fixed rejection reasons (field names only, never source text). */
 export const deadlineChangeRejections = [
@@ -91,7 +106,8 @@ function tagNameAt(html: string, start: number, end: number): string {
 /**
  * The visible text of `html` as segments: every tag ends a segment; comments
  * and the content of `<script>`/`<style>` are dropped; entities decoded,
- * whitespace collapsed, empty segments omitted. An unclosed tag, comment or
+ * whitespace collapsed, NFC-normalized when short enough to ever match
+ * (MAX_NORMALIZED_SEGMENT_LENGTH), empty segments omitted. An unclosed tag, comment or
  * raw-text element stops the scan: the rest of the body is never read as
  * text, and `complete` is false (the body is malformed, so nothing read from
  * it can be trusted to be the whole notice). Linear: each search starts where
@@ -105,7 +121,9 @@ export function textSegments(html: string): {
   let complete = true;
   let pending = "";
   const flush = () => {
-    const segment = decodeEntities(pending).replace(/\s+/gu, " ").trim().normalize("NFC");
+    const collapsed = decodeEntities(pending).replace(/\s+/gu, " ").trim();
+    const segment =
+      collapsed.length <= MAX_NORMALIZED_SEGMENT_LENGTH ? collapsed.normalize("NFC") : collapsed;
     if (segment !== "") segments.push(segment);
     pending = "";
   };

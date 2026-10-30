@@ -510,6 +510,31 @@ describe.skipIf(skipWithoutDatabase)("ingest command (PostgreSQL, fake network)"
       });
     }
   });
+
+  it("reports why notice updates were skipped, summing to the skipped counter", async () => {
+    // The captured updates; none of their procedures is stored in this schema.
+    const http: SourceHttpClient = {
+      get: async (url, options) => {
+        const response = await new FixtureHttpClient().get(url, options);
+        const noticeType = new URL(url.toString()).searchParams.get("NoticeType");
+        return noticeType === "NoticeUpdateNotice"
+          ? { ...response, body: fixture("notice-update-notice-2026-10-29.json") }
+          : response;
+      },
+    };
+    const result = await run(["ingest", "bzp", "--date", "2026-10-25"], schema, { http });
+    expect(result.code).toBe(ExitCode.Ok);
+    const [report] = reportSchema.parse(JSON.parse(result.stdout)).runs;
+    expect(report).toMatchObject({
+      extracted: 10,
+      skipped: 5,
+      skippedReasons: { no_original: 3, no_deadline_change: 1, not_contract_notice_change: 1 },
+    });
+    const { skippedReasons, skipped } = z
+      .object({ skippedReasons: z.record(z.string(), z.number()), skipped: z.number() })
+      .parse(report);
+    expect(Object.values(skippedReasons).reduce((total, n) => total + n, 0)).toBe(skipped);
+  });
 });
 
 describe.skipIf(skipWithoutDatabase)("ingest command without migrations (PostgreSQL)", () => {

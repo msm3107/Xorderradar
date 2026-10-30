@@ -240,14 +240,17 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
     `SmallContractNotice`, z tymi samymi limitami stron i rekordów na typ). Rekord jest
     rozpoznawany po własnym `noticeType`; inny nieznany typ jest odrzucany (`noticeType`).
     - **Co czytamy:** tylko numer (`noticeNumber`), `publicationDate`, `tenderId` i
-      `htmlBody` (do 200 000 znaków; dłuższy → odrzucenie `invalid source fields: htmlBody`,
+      `htmlBody` (do 1 000 000 znaków — zaobserwowane 4 379–32 895 dnia 2026-10-29 i do 255 562
+      dnia 2026-10-27, przegląd właściciela; dłuższy → odrzucenie `invalid source fields: htmlBody`,
       bez przycinania; limit 20 000 znaków dla pozostałych pól go nie dotyczy). Treść
       `htmlBody` nie jest zapisywana ani logowana — z niej wychodzi wyłącznie sparsowany
       termin. `submittingOffersDate` ogłoszenia o zmianie jest zawsze `null` i nie jest
       używane.
     - **Parsowanie `htmlBody`** (`src/sources/bzp/notice-update.ts`): liniowy przegląd tekstu
       między znacznikami (komentarze, `<script>`, `<style>` i atrybuty pomijane; kilka encji
-      dekodowanych). Niedomknięty znacznik, komentarz, `<script>` albo `<style>` w dowolnym
+      dekodowanych; normalizacja NFC tylko segmentów ≤ 256 znaków — jest kwadratowa w ciągu
+      znaków łączących, a dłuższy segment nie może być etykietą ani datą, więc zostaje
+      nieznormalizowany i przegląd pozostaje liniowy). Niedomknięty znacznik, komentarz, `<script>` albo `<style>` w dowolnym
       miejscu → odrzucenie `invalid source fields: htmlBody` (treść ucięta lub zepsuta — nie
       wiadomo, czy przeczytano całe ogłoszenie, więc nie ma też pominięcia „brak zmiany”).
       Rodzaj zmienianego
@@ -290,7 +293,10 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
       przeczytane, ale celowo niezastosowane; zawsze
       `extracted = inserted + updated + unchanged + rejected + skipped`. Pominięcie jest
       logowane (info `notice update skipped`: `sourceId`, `externalId`, `tenderId`, stały
-      powód).
+      powód). Raport `ingest` podaje też `runs[].skippedReasons` — `skipped` według powodu
+      (tylko powody, które wystąpiły, jak `rejectionReasons` w `source:preview`; suma =
+      `skipped`); tylko w pamięci i raporcie, bez kolumny w bazie (przegląd właściciela
+      PR #6).
     - **Nie obsługujemy (jeszcze):** zmian innych pól niż termin składania ofert; ogłoszeń o
       unieważnieniu postępowania (otwarte pytanie N6, `docs/STATE.md`); zmian małych zamówień
       (`SmallContractNotice`) — ich oryginały w zarejestrowanych danych nie mają `tenderId`
@@ -498,7 +504,9 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
 
 ## D-021 — `ingest`: zakresy dni i automatyczne nadrabianie pominiętych dni
 
-- **Status:** Accepted (PR-03B, decyzja właściciela)
+- **Status:** Accepted (PR-03B, decyzja właściciela); nadrabianie wg różnicy zbiorów i limit kolejnych
+  nieudanych dni — przegląd właściciela PR #6; limit liczy tylko nieudane pierwsze próby —
+  przegląd C&S tej rundy
 - **Kontekst:** cron pobiera „wczoraj”; nieudany albo pominięty przebieg (awaria, przerwa w
   działaniu hosta) zostawiał dziurę, którą trzeba było łatać ręcznie `--date` dzień po dniu.
   Ogłoszenia o zmianie (D-015) dają ten sam problem: pominięty dzień = pominięte zmiany
@@ -512,41 +520,78 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     `YYYY-MM-DD`. Długość zakresu jest liczona arytmetycznie, zanim powstanie lista dni, a
     lista nigdy nie przekracza 31 dni.
   - **Nadrabianie** (per źródło, pod blokadą `ingest`, D-019 — odczyt i przebieg nie mogą się
-    przeplatać z innym `ingest`): dni od dnia po ostatnim **pokrytym** dniu do wczoraj (UTC),
-    rosnąco. Dzień jest pokryty, gdy ma przebieg `succeeded` albo `incomplete` (limit nie jest
-    ponawiany przez nadrabianie — jest widoczny w raporcie), który wystartował **po końcu
-    tego dnia** (UTC): przebieg dnia jeszcze trwającego (np. ręczne `--date` dzisiaj) mógł nie
-    widzieć ogłoszeń opublikowanych później, więc nie ukrywa dnia. `failed` nigdy nie pokrywa.
-    Źródło bez pokrytego dnia (świeża instalacja) → tylko wczoraj (bez pobierania historii).
-  - **Przycięcie:** więcej niż 31 brakujących dni → 31 najnowszych (kończąc na wczoraj);
-    starsze są raportowane (`clipped[]`: `from` i `to` — pierwszy i ostatni pominięty dzień,
-    oba włącznie; log warn
-    `catch-up clipped, older missing days not run`) i nie są później nadrabiane automatycznie
-    (nadrabianie liczy od najnowszego pokrytego dnia) — można je pobrać ręcznie `--from/--to`.
+    przeplatać z innym `ingest`; zmienione w przeglądzie właściciela PR #6 z „od dnia po
+    najnowszym pokrytym dniu” na różnicę zbiorów): **okno** = 31 dni kończących się wczoraj
+    (UTC); pobierane są dni okna, które **nie są pokryte**, od najwcześniejszego dnia
+    dowolnego przebiegu źródła (każdy status) — rosnąco. Dzień jest pokryty, gdy ma przebieg
+    `succeeded` albo `incomplete` (limit nie jest ponawiany przez nadrabianie — jest widoczny
+    w raporcie), który wystartował **po końcu tego dnia** (UTC): przebieg dnia jeszcze
+    trwającego (np. ręczne `--date` dzisiaj) mógł nie widzieć ogłoszeń opublikowanych
+    później, więc nie ukrywa dnia. `failed` nigdy nie pokrywa. Źródło bez przebiegów (świeża
+    instalacja) → tylko wczoraj (bez pobierania historii); niepokryte wczoraj jest zawsze
+    pobierane. **Każdy** przebieg starszego dnia — backfill `--from/--to`, ale też ręczne
+    `--date` starego dnia, nawet nieudane — przesuwa dolną granicę wcześniej, nigdy jednak
+    przed okno: następne nadrabianie pobiera wtedy **każdy** niepokryty dzień okna od tego
+    dnia. Jedno zapytanie na źródło (`catchUpHistory`: pokryte i próbowane dni w oknie,
+    najnowszy pokryty dzień, najwcześniejszy dzień przebiegu; dni jako `to_char(…,
+'YYYY-MM-DD')`, niezależnie od `DateStyle` sesji; wynik ograniczony do okna, zapytanie
+    przegląda wiersze źródła dla min/max), bez nowej tabeli i migracji.
+  - **Dni starsze niż okno** nie są nigdy pobierane automatycznie. Raport `clipped[]`
+    (`from`/`to`, oba włącznie; log warn `catch-up clipped, older missing days not run`):
+    gdy najnowszy pokryty dzień jest przed `początek okna − 1` → od dnia po nim do dnia przed
+    oknem; gdy źródło nie ma pokrytego dnia, a jego najwcześniejszy przebieg jest przed oknem
+    → od tego dnia do dnia przed oknem. Starsze dziury przed pokrytym dniem nie są
+    raportowane. Takie dni można pobrać ręcznie `--from/--to`.
   - **Przebieg:** źródło po źródle, w każdym dni rosnąco; jeden wiersz `ingestion_runs` na
-    źródło i dzień. Nieudany dzień zatrzymuje kolejne dni tego źródła (`notRun` z powodem
-    `previous_day_failed`, log warn `days not run after a failed day`), żeby następne
-    nadrabianie zaczęło od niego i nie przeskoczyło dziury; inne źródła działają dalej.
-    Przerwanie (utracona blokada) → pozostałe dni `notRun` z powodem `aborted`.
+    źródło i dzień. Nieudany dzień **nie zatrzymuje** kolejnych dni tego źródła (wszystkie
+    tryby: `--date`, `--from/--to`, nadrabianie). Żeby ograniczyć czas przy awarii źródła,
+    po **2 kolejnych nieudanych pierwszych próbach w tym przebiegu**
+    (`INGEST_MAX_CONSECUTIVE_FAILED_DAYS`, `failureStreak`) pozostałe dni źródła są `notRun` z
+    powodem `consecutive_failures` (log warn `days not run after consecutive failed days`).
+    Pierwsza próba = dzień, który przed tym `ingest` nie miał żadnego przebiegu tego źródła
+    (dowolny status; to samo zapytanie `catchUpHistory` w każdym trybie, dla `--date`/
+    `--from/--to` ograniczone do zakresu). Nieudana pierwsza próba (także przebieg, którego nie
+    udało się zapisać) zwiększa licznik; **nieudane ponowienie** dnia, który miał już przebieg,
+    licznika ani nie zwiększa, ani nie zeruje; dzień udany (`succeeded`/`incomplete`,
+    zapisany) — pierwsza próba czy ponowienie — zeruje go. Dzięki
+    temu dzień, który zawsze kończy się `failed` (np. strona ponad limit odpowiedzi), nie
+    blokuje nowszych dni, a awaria i tak zatrzymuje źródło po 2 nowych dniach. Jeden nieudany
+    dzień bywa przejściowy, dwa z rzędu to najpewniej awaria — każdy kolejny dzień mógłby
+    kosztować pełny timeout. Nieudane i niewykonane dni zostają niepokryte, więc nadrabianie
+    ponawia je, dopóki są w oknie. Inne źródła działają dalej. Przerwanie (utracona
+    blokada) → pozostałe dni `notRun` z powodem `aborted`.
   - **Raport JSON:** `mode` (`date` / `range` / `catch_up`), `from`/`to` (zaplanowane dni;
-    `null`, gdy nie ma czego nadrabiać), `runs[]` z `publicationDate`, `notRun[]`,
-    `clipped[]`. Kod wyjścia jak dotąd (D-019, D-020).
+    `null`, gdy nie ma czego nadrabiać), `runs[]` z `publicationDate` i `skippedReasons`
+    (D-015), `notRun[]`, `clipped[]`. Kod wyjścia jak dotąd (D-019, D-020).
   - **Uwagi dla operatora** (bez dodatkowego mechanizmu):
+    - **Pierwsze wdrożenie:** przed pierwszym cronem jednorazowo
+      `ingest --from <wczoraj−30> --to <wczoraj>` (README, „Cron”): oryginały zmian są zwykle
+      sprzed tygodni, więc bez tego prawie wszystkie zmiany byłyby `no_original`. Ten
+      backfill wyznacza też dolną granicę nadrabiania.
+    - **Ręczny przebieg starego dnia przesuwa dolną granicę:** także jedno `--date` dnia
+      sprzed tygodni (nawet nieudane) sprawia, że następne nadrabianie pobierze każdy
+      niepokryty dzień okna od tego dnia (do 31 dni naraz).
     - **Backfill i zmiany ogłoszeń:** pobranie starszych dni (`--from/--to`) zapisuje
       oryginały z terminem z dnia publikacji. Zmiany tych ogłoszeń z późniejszych dni,
       pominięte wcześniej jako `no_original` (D-015), nie są ponawiane same — po backfillu
       trzeba ponownie pobrać dni **następujące po nim aż do ostatniego pokrytego dnia**,
       rosnąco, porcjami po najwyżej 31 dni (`--from/--to`). To samo, gdy dzień zmiany był
-      pobrany przed dniem oryginału.
-    - **Ręczne `--date` późniejszego dnia po nieudanym dniu** przesuwa start nadrabiania za
-      nieudany dzień (nadrabianie liczy od najnowszego pokrytego dnia), więc nieudany dzień
-      trzeba wtedy pobrać ręcznie (`--date D`).
-    - **Dzień, który zawsze kończy się `failed`,** blokuje wszystkie nowsze dni tego źródła
-      (`notRun`). Obejście: `--from D+1 --to <wczoraj>` (po tym nadrabianie rusza od wczoraj),
-      a dzień D zapisać jako utracony (np. w `docs/STATE.md`) i zgłosić problem ze źródłem.
+      pobrany przed dniem oryginału — także po automatycznym ponowieniu nieudanego dnia, gdy
+      nowsze dni pobrano już wcześniej.
+    - **Ręczne `--date` późniejszego dnia** nie przeskakuje już nieudanego dnia (nadrabianie
+      liczy każdy niepokryty dzień okna). **Dzień, który zawsze kończy się `failed`,** nie
+      blokuje nowszych dni (jego nieudane ponowienia nie liczą się do limitu 2) — jest
+      ponawiany, dopóki jest w oknie; potem przestaje być
+      pobierany (bez wpisu w `clipped`, jeśli nowsze dni są pokryte). Taki dzień zapisać
+      jako utracony (np. w `docs/STATE.md`) i zgłosić problem ze źródłem.
 - **Konsekwencje:** timeout 10 min (D-018) dotyczy jednego przebiegu, czyli źródła i dnia;
   najgorszy czas jednego `ingest` = 31 dni × 10 min
   × liczba źródeł — dla BZP ~5 h 10 min; w praktyce dzień trwa ~2–3 min (3 typy × kilka
-  stron, odstęp 2 s). Kolejny cron w trakcie długiego nadrabiania kończy się `skipped`
+  stron, odstęp 2 s). Przy całkowitej awarii źródła limit 2 kolejnych nieudanych pierwszych
+  prób ogranicza nowe dni do 2 na przebieg (~20 min), ale dni już próbowane i nieudane są
+  ponawiane wszystkie: przy awarii trwającej wiele dni każdy cron dokłada najwyżej 2 takie dni (przy codziennym
+  cronie zwykle 1), więc
+  najgorszy czas rośnie z czasem awarii (do 31 dni × timeout, jak wyżej). W praktyce awaria
+  zwykle kończy się szybkim błędem HTTP, nie pełnym timeoutem. Kolejny cron w trakcie długiego nadrabiania kończy się `skipped`
   (`lock_busy`, kod 0). Granica dnia to UTC, jak dotąd (D-015, otwarte pytanie o granicę dnia
   w API).

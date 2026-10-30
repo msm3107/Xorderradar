@@ -146,6 +146,11 @@ async function ingest(schema: TestSchema, http: SourceHttpClient, day: string, n
   };
 }
 
+/** The total of a run's `skippedReasons`. */
+function sumOf(counts: Readonly<Record<string, number | undefined>>): number {
+  return Object.values(counts).reduce<number>((total, n) => total + (n ?? 0), 0);
+}
+
 const rowSchema = z.object({
   id: z.string(),
   external_id: z.string().nullable(),
@@ -227,6 +232,8 @@ describe.skipIf(skipWithoutDatabase)("notice updates (PostgreSQL, BZP adapter)",
       rejected: 0,
       skipped: 2,
     });
+    expect(run.skippedReasons).toEqual({ no_deadline_change: 1, not_contract_notice_change: 1 });
+    expect(sumOf(run.skippedReasons)).toBe(run.counters.skipped);
 
     const after = await rows(schema);
     expect(after).toHaveLength(5);
@@ -292,6 +299,10 @@ describe.skipIf(skipWithoutDatabase)("notice updates (PostgreSQL, BZP adapter)",
     // The same updates again: already applied.
     const again = await ingest(schema, http, UPDATES_DAY);
     expect(again.run.counters).toMatchObject({ updated: 0, unchanged: 3, skipped: 2 });
+    expect(again.run.skippedReasons).toEqual({
+      no_deadline_change: 1,
+      not_contract_notice_change: 1,
+    });
     expect(await rows(schema)).toEqual(after);
   });
 
@@ -317,6 +328,8 @@ describe.skipIf(skipWithoutDatabase)("notice updates (PostgreSQL, BZP adapter)",
       skipped: 3,
     });
     expect(skipReasons(logs)).toEqual(["no_tender_id", "no_original", "no_original"]);
+    expect(run.skippedReasons).toEqual({ no_tender_id: 1, no_original: 2 });
+    expect(sumOf(run.skippedReasons)).toBe(run.counters.skipped);
     expect(logs.filter((line) => line.message === "source record rejected")).toEqual([
       expect.objectContaining({
         level: "warn",
@@ -410,6 +423,7 @@ describe.skipIf(skipWithoutDatabase)("notice updates (PostgreSQL, BZP adapter)",
     const late = await ingest(schema, http, "2026-10-28");
     expect(late.run.counters).toMatchObject({ updated: 0, unchanged: 0, skipped: 1 });
     expect(skipReasons(late.logs)).toEqual(["superseded"]);
+    expect(late.run.skippedReasons).toEqual({ superseded: 1 });
     expect(rowOf(await rows(schema), tenderId)).toMatchObject({
       deadline: new Date("2026-11-10T11:00:00.000Z"),
       deadline_update_notice: "2026/BZP 00500002/01",
