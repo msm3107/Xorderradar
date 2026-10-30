@@ -25,11 +25,29 @@ Cały ruch wychodzący adapterów idzie przez `SafeHttpClient`:
 
 - allowlista hostów zdefiniowana statycznie w adapterze; URL-e z treści dokumentów (linki do
   szczegółów) też muszą trafić na allowlistę;
-- po rozwiązaniu DNS blokowane są adresy: loopback, prywatne (RFC 1918, ULA `fc00::/7`),
-  link-local (w tym `169.254.169.254`), `0.0.0.0/8`, CGNAT `100.64.0.0/10`, multicast,
-  IPv4-mapped IPv6; połączenie jest nawiązywane z **zweryfikowanym** adresem (ochrona przed
-  DNS rebinding);
-- przekierowania obsługiwane ręcznie, każdy hop walidowany jak nowe żądanie, max 3;
+- po rozwiązaniu DNS sprawdzane są **wszystkie** adresy hosta; jeśli którykolwiek jest
+  zablokowany, żądanie jest odrzucane (`blocked_address`, bez retry). Zablokowane (PR-02,
+  `src/infrastructure/http/address-policy.ts`):
+  - IPv4: `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10` (CGNAT), `127.0.0.0/8`,
+    `169.254.0.0/16` (link-local, w tym `169.254.169.254`), `172.16.0.0/12`, `192.0.0.0/24`,
+    `192.0.2.0/24`, `192.88.99.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `198.51.100.0/24`,
+    `203.0.113.0/24`, `224.0.0.0/4` (multicast), `240.0.0.0/4` (w tym broadcast);
+  - IPv6: dozwolony jest wyłącznie global unicast `2000::/3`, bez `2001::/23`,
+    `2001:db8::/32`, `2002::/16` (6to4) i `3fff::/20` — czyli zablokowane są m.in. `::`,
+    `::1`, IPv4-mapped `::ffff:0:0/96` (każdy, także z publicznym IPv4), `64:ff9b::/96`,
+    `100::/64`, ULA `fc00::/7`, link-local `fe80::/10`, multicast `ff00::/8`;
+  - wszystko, co nie jest poprawnym adresem IP (w tym IPv6 z indeksem strefy `%`);
+- połączenie jest nawiązywane z **zweryfikowanym** adresem: `node:https` dostaje własny
+  `lookup`, który zwraca adres sprawdzony wcześniej, więc ponowne zapytanie DNS (rebinding)
+  nie może go podmienić; SNI, weryfikacja certyfikatu i `Host` używają nazwy hosta. Nowe
+  połączenie na każde żądanie (bez puli keep-alive), bez proxy ze zmiennych środowiskowych;
+- przekierowania (301/302/303/307/308) obsługiwane ręcznie, każdy hop walidowany jak nowe
+  żądanie (schemat, allowlista, port, DNS/IP), max 3;
+- allowlista: dokładne nazwy hostów (bez rozróżniania wielkości liter), bez wildcardów, portów
+  i adresów IP; nie ma flagi ani zmiennej środowiskowej dopuszczającej adresy prywatne;
+- seamy testowe klienta (`SafeHttpClientDeps`: transport, resolver, zegar, sleep) mogłyby
+  ominąć przypinanie adresu i rate limit, dlatego kod w `src/` nie może ich przekazać — reguła
+  ESLint (`no-restricted-syntax`) plus review;
 - brak możliwości przekazania dowolnego URL-a przez użytkownika do fetchera.
 
 ## 3. URL validation
@@ -46,25 +64,36 @@ Cały ruch wychodzący adapterów idzie przez `SafeHttpClient`:
 
 ## 4. HTTP timeouts _(od PR-02)_
 
-- Timeout połączenia i całkowity timeout żądania (wartości startowe: 10 s / 30 s), przerwanie
-  przez `AbortSignal`.
+- Timeout połączenia (TCP + TLS) 10 s i całkowity timeout jednej wymiany (DNS, połączenie,
+  nagłówki, cała treść) 30 s, przerwanie przez `AbortSignal` (PR-02). Wywołujący może podać
+  własny `AbortSignal`, który przerywa też czekanie na rate limit i backoff.
 - Timeout całego przebiegu źródła, aby jedno źródło nie blokowało crona.
 
 ## 5. Response size limits _(od PR-02)_
 
-- Limit odczytu strumieniowego (start: 5 MB na odpowiedź), przerwanie po przekroczeniu — nie
-  ufamy nagłówkowi `Content-Length`.
+- Limit odczytu strumieniowego (5 MB na odpowiedź), przerwanie po przekroczeniu — nie
+  ufamy nagłówkowi `Content-Length` (służy tylko do wcześniejszego odrzucenia).
 - Limit liczby stron/paginacji na przebieg i liczby rekordów na dokument.
-- Dekompresja z limitem rozmiaru po rozpakowaniu (ochrona przed zip bomb).
+- Dekompresja z limitem rozmiaru po rozpakowaniu (ochrona przed zip bomb): `gzip`, `deflate`,
+  `br` rozpakowywane z `maxOutputLength` = 5 MB (przerwanie bez rozpakowania całości; dla
+  `deflate` także surowy DEFLATE bez nagłówka zlib); inne lub łączone `Content-Encoding` są
+  odrzucane.
 
 ## 6. Rate limiting & retry _(od PR-02)_
 
 - Max 1 żądanie na ~2 s na host (konfigurowalne per adapter, nigdy szybciej niż pozwala
-  regulamin źródła); żądania do źródła sekwencyjne.
-- Retry tylko dla błędów przejściowych (timeout, 429, 502–504), max 2 ponowienia,
-  wykładniczy backoff z jitterem, respektowanie `Retry-After`. Brak retry dla 4xx.
-- Brak „retry storm”: przebieg ma budżet błędów, po którego przekroczeniu źródło jest
-  pomijane do następnego cyklu.
+  regulamin źródła, a w kodzie nigdy częściej niż raz na 1 s); żądania do źródła
+  sekwencyjne. Odstęp liczony od końca poprzedniego żądania do hosta.
+- Retry tylko dla błędów przejściowych (timeout, zerwane/odrzucone połączenie, 429,
+  502–504), max 2 ponowienia, wykładniczy backoff z jitterem, respektowanie `Retry-After`
+  (sekundy lub HTTP-date) do 60 s — dłuższy `Retry-After` kończy żądanie błędem bez czekania.
+  Każdy `Retry-After` staje się terminem dla hosta (także po wyczerpaniu ponowień): kolejne
+  żądania do hosta czekają do niego, a gdy zostało > 60 s — kończą się błędem bez ruchu
+  sieciowego. Odstępy i terminy liczone zegarem monotonicznym.
+  Brak retry dla pozostałych 4xx/5xx, błędów polityki (URL, allowlista, adres) i błędów TLS.
+- Brak „retry storm”: każdy klient (= przebieg źródła) ma budżet błędów (domyślnie 10
+  nieudanych prób, licząc też ponowienia); po jego wyczerpaniu odmawia kolejnych żądań
+  (`budget_exhausted`), więc źródło jest pomijane do następnego cyklu.
 
 ## 7. Responsible data collection (public data policy)
 
@@ -72,7 +101,9 @@ Cały ruch wychodzący adapterów idzie przez `SafeHttpClient`:
 limitów; rotacja IP/User-Agentów w celu ukrycia ruchu; pobieranie danych niepublicznych;
 masowe zbieranie danych osobowych.
 
-**Zawsze:** stały User-Agent identyfikujący projekt z kontaktem; respektowanie `robots.txt`
+**Zawsze:** stały User-Agent identyfikujący projekt z kontaktem
+(`RadarZamowien/0.1 (+<CRAWLER_CONTACT>)`; bez ustawionego `CRAWLER_CONTACT` klient HTTP się
+nie uruchamia — kontaktu nie wymyślamy); respektowanie `robots.txt`
 i regulaminu źródła; preferencja API → oficjalny feed → dane strukturalne → HTML; zapis w
 DECISIONS podstawy korzystania z każdego źródła.
 
@@ -119,7 +150,9 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
   `"[Circular]"`; gdy pola nie da się odczytać, wpis zawiera `logError` zamiast pól.
 - Logujemy: `sourceId`, host, status, czas, liczniki, klasy błędów.
 - Nie logujemy: sekretów, pełnych `DATABASE_URL`/`SMTP_URL`, treści e-maili, adresów e-mail
-  użytkowników (najwyżej identyfikator profilu), pełnych odpowiedzi źródeł.
+  użytkowników (najwyżej identyfikator profilu), pełnych odpowiedzi źródeł, URL-i pobieranych
+  dokumentów (ścieżka/zapytanie mogą zawierać tokeny — `SafeHttpClient` loguje tylko host) ani
+  nagłówków HTTP.
 - Komunikaty błędów dla użytkownika są bezpieczne; szczegóły tylko w logu.
 - Błędy bazy danych (od PR-01): CLI pokazuje tylko stały powód + kod SQLSTATE/errno, nigdy
   komunikatu sterownika/serwera; repozytoria zamieniają naruszenia ograniczeń na

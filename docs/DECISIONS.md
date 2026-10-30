@@ -144,3 +144,41 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
   komunikaty CLI, `CLAUDE.md`, `docs/STATE.md` i definicje agentów po angielsku (stabilne
   dla narzędzi).
   Treści dla użytkownika końcowego (e-mail, UI) po polsku.
+
+## D-014 — SafeHttpClient na `node:https` z przypiętym adresem, bez biblioteki HTTP
+
+- **Status:** Accepted (PR-02, część A)
+- **Kontekst:** ochrona SSRF wymaga, by połączenie trafiło dokładnie na adres sprawdzony po
+  rozwiązaniu DNS (bez okna na DNS rebinding), a redirecty, limit rozmiaru i dekompresja muszą
+  być pod naszą kontrolą. Wbudowany `fetch` (undici) nie pozwala podać zweryfikowanego adresu
+  bez dodatkowej zależności (`undici` `Agent` z `connect.lookup`) i sam dekompresuje treść.
+- **Decyzja:**
+  - transport: `node:https` z `agent: false` (nowe połączenie na żądanie) i własną funkcją
+    `lookup`, która zwraca wcześniej zweryfikowany adres; nazwa hosta zostaje dla SNI,
+    certyfikatu i `Host`. Brak nowej zależności;
+  - DNS: `dns.promises.lookup(host, { all: true, verbatim: true })` (resolver systemowy, ten
+    sam, którego użyłby system; `verbatim` zachowuje kolejność odpowiedzi resolvera zamiast
+    przestawiać IPv4 na początek — wybór adresu robimy sami); odrzucamy host, jeśli **którykolwiek** adres jest zablokowany; łączymy się
+    z pierwszym IPv4 (a bez IPv4 — z pierwszym IPv6). Zakresy przez `net.BlockList`; IPv6
+    jako allowlista `2000::/3` minus zakresy specjalne (ostrzej niż lista zakazów);
+  - dekompresja: wysyłamy `Accept-Encoding: gzip, deflate, br` (mniej transferu dla źródeł;
+    `deflate` rozpoznaje po nagłówku zlib, a bez niego rozpakowuje surowy DEFLATE, który
+    wysyłają niektóre serwery);
+    treść jest najpierw czytana strumieniowo z limitem 5 MB, potem rozpakowywana synchronicznie
+    `zlib.*Sync` z `maxOutputLength` = 5 MB. Prostsze niż strumień dekompresji, a tak samo
+    odporne na zip bomb (rozpakowanie przerywane po przekroczeniu limitu). Koszt: krótka
+    blokada pętli zdarzeń przy ≤ 5 MB — bez znaczenia dla krótkich komend CLI;
+  - seamy testowe (`SafeHttpClientDeps`) jako drugi argument konstruktora zamiast osobnej
+    fabryki: kod w `src/` nie może go przekazać (reguła ESLint `no-restricted-syntax` z
+    testem), reszta po stronie review;
+  - kontakt w User-Agent z nowej zmiennej `CRAWLER_CONTACT` (opcjonalnej w `loadConfig`, by
+    `health`/`migrate` działały bez niej; wymaganej przez konstruktor klienta).
+- **Konsekwencje:** brak obsługi proxy HTTP(S) ze zmiennych środowiskowych (połączenia
+  bezpośrednie); brak „happy eyeballs” — jeśli wybrany adres jest nieosiągalny, próba kończy się
+  błędem sieci (retry z tym samym adresem po ponownym DNS). Jeśli źródło będzie wymagało
+  któregoś z tych mechanizmów, decyzję trzeba zrewidować.
+- **Node `engines` ≥ 22.19:** minimum wynika wyłącznie z `tls.setDefaultCACertificates`
+  w `tests/http-transport.test.ts` (testy na prawdziwym TLS); kod produkcyjny w `src/` działałby
+  na 22.13. Zostawiamy, bo 22.19+ to bieżąca wersja w linii 22 LTS, a alternatywą byłby proces
+  potomny z `NODE_EXTRA_CA_CERTS`. Do rewizji, jeśli host produkcyjny zostanie przypięty do
+  wersji poniżej 22.19.

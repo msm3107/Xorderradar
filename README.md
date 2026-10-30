@@ -16,9 +16,11 @@ i informuje firmę tylko o tych, które faktycznie do niej pasują.
 
 ## Wymagania
 
-- Node.js **≥ 22.13** (`.nvmrc`)
+- Node.js **≥ 22.19** (`.nvmrc`; testy transportu HTTP używają `tls.setDefaultCACertificates`)
 - pnpm **10** (wersja przypięta w `package.json` → `packageManager`; najprościej `corepack enable`)
 - PostgreSQL **16** (lokalnie lub zarządzany; patrz „Baza danych”)
+- do testów: CLI `openssl` w `PATH` (testy transportu HTTP generują jednorazowy certyfikat
+  TLS w katalogu tymczasowym)
 
 ## Szybki start
 
@@ -80,6 +82,12 @@ Aplikacja czyta konfigurację **wyłącznie ze zmiennych środowiskowych** proce
   (`NODE_ENV=development`, `LOG_LEVEL=info`). `DATABASE_URL` nie ma wartości domyślnej — jest
   wymagany (`postgres://` lub `postgresql://`); jego wartość nie pojawia się w żadnym komunikacie.
   Dla zarządzanego PostgreSQL z TLS dodaj parametr, np. `?sslmode=verify-full`.
+- **`CRAWLER_CONTACT`** — publiczny kontakt operatora (adres e-mail albo URL `https://` bez
+  danych logowania, max 200 znaków, bez spacji i nawiasów), wysyłany w nagłówku User-Agent
+  pobierania źródeł: `RadarZamowien/0.1 (+mailto:…)` lub `RadarZamowien/0.1 (+https://…)`.
+  Opcjonalny dla `health`/`migrate`; komendy pobierające źródła (od PR-02) bez niego się nie
+  uruchomią. Musi to być prawdziwy, obsługiwany kontakt — nie wymyślamy go. Błędna wartość →
+  `Invalid environment configuration: CRAWLER_CONTACT` (bez wartości).
 - **Produkcja / cron:** bezpośrednie `node dist/main.js …` **nie czyta** `.env`. Zmienne
   eksportuje środowisko uruchomieniowe (crontab, unit systemd, panel hostingu). Kto chce
   użyć pliku, podaje go jawnie: `node --env-file=/ścieżka/do/pliku dist/main.js health`.

@@ -3,7 +3,9 @@
 > **Stan:** po PR-01 istnieją: szkielet CLI (`src/cli.ts`, `src/main.ts`, `src/health.ts`,
 > `src/infrastructure/config.ts`, `src/infrastructure/logger.ts`), model domenowy
 > (`src/domain/`) oraz warstwa bazy danych (`src/infrastructure/db/`: pula, migracje,
-> repozytoria; komendy `health` z kontrolą bazy i `migrate`). Wszystko poniżej oznaczone
+> repozytoria; komendy `health` z kontrolą bazy i `migrate`). PR-02 (część A) dodał
+> `SafeHttpClient` (`src/infrastructure/http/`) — bez adapterów i wywołań produkcyjnych do
+> czasu wyboru źródła (część B). Wszystko poniżej oznaczone
 > _(plan, PR-xx)_ to projekt docelowy — kontrakty mogą zostać doprecyzowane w danym PR, a
 > zmiana musi trafić do tego dokumentu i do `docs/DECISIONS.md`.
 
@@ -43,7 +45,7 @@ src/
 │   ├── config.ts           # walidacja env (zod)                                    [PR-00]
 │   ├── logger.ts           # JSON-lines logger na stderr                            [PR-00]
 │   ├── db/                 # pula pg + Kysely, migracje, repozytoria, mapowanie błędów [PR-01]
-│   └── http/               # SafeHttpClient                                    (plan, PR-02)
+│   └── http/               # SafeHttpClient: polityka URL/IP, retry, limity      [PR-02]
 ├── domain/                 # typy + schematy zod: Source, Opportunity, CompanyProfile [PR-01]
 ├── sources/                # adaptery źródeł, po jednym pliku/katalogu na źródło(plan, PR-02)
 ├── ingestion/              # normalizacja wspólna, fingerprint, dedup, job     (plan, PR-03)
@@ -114,14 +116,82 @@ Adapter **nie zawiera**: logiki dopasowania, wysyłki e-maili, UI, billingu, dos
 `RawDocument` = `{ sourceId, url, fetchedAt, contentType, body }` — w MVP tylko w pamięci
 (D-008).
 
-### 4.2 SafeHttpClient (PR-02)
+### 4.2 SafeHttpClient (PR-02, zaimplementowany)
 
-Jedyna droga do sieci dla adapterów. Wymusza: allowlistę hostów adaptera, tylko `https:`
-(i `http:` tylko jeśli źródło nie ma HTTPS — wpis w DECISIONS), blokadę adresów prywatnych/
-loopback/link-local po rozwiązaniu DNS, ręczną obsługę przekierowań z ponowną walidacją
-(max 3), timeout, limit rozmiaru odpowiedzi (strumieniowo), rate limit per host, retry tylko
-dla błędów przejściowych (max 2, backoff z jitterem, respektuje `Retry-After`), stały
-User-Agent z kontaktem, logowanie `sourceId`/host/status/czas. Szczegóły: `docs/SECURITY.md`.
+Jedyna droga do sieci dla adapterów (`src/infrastructure/http/`, D-014). `http:` nie jest
+obsługiwany — źródło bez HTTPS wymagałoby wpisu w DECISIONS i zmiany kodu.
+
+- `address-policy.ts` — `parseRequestUrl` (WHATWG `URL`, tylko `https:`, bez danych
+  logowania, tylko domyślny port, bez hostów IP, host z allowlisty — dokładne dopasowanie bez
+  rozróżniania wielkości liter, bez wildcardów; fragment usuwany), `normalizeAllowedHosts`,
+  `isBlockedAddress` (zakresy w `docs/SECURITY.md` §2);
+- `errors.ts` — `HttpClientError` z zamkniętym zbiorem `code`: `invalid_url`,
+  `host_not_allowed`, `blocked_address`, `dns_failed`, `timeout`, `too_large`,
+  `too_many_redirects`, `http_status` (+ `status`), `network`, `unsupported_encoding`,
+  `decompression_failed`, `budget_exhausted`, `aborted`; stały komunikat (bez URL-a, zapytania,
+  treści), pola `host`, `status`, `causeCode` (np. `ECONNRESET`), `retryable`;
+- `safe-http-client.ts` — klasa `SafeHttpClient`:
+
+```ts
+new SafeHttpClient({
+  sourceId, allowedHosts, logger,
+  contact, // AppConfig.crawlerContact (CRAWLER_CONTACT); brak/niepoprawny → ConfigError
+  minIntervalMs?, // domyślnie 2000, minimum 1000
+  errorBudget?, // domyślnie 10 nieudanych prób
+});
+client.get(url, { signal? }): Promise<HttpResponse>; // tylko GET
+interface HttpResponse { url: string; status: number; contentType: string | null; body: Buffer }
+```
+
+Przebieg `get`: walidacja URL-a → (na każdą próbę) odstęp per host → DNS (wszystkie adresy;
+jeśli którykolwiek jest zablokowany → `blocked_address`; łączymy się z pierwszym IPv4, a gdy
+go brak — z pierwszym IPv6) → `node:https` z własnym `lookup`, który zwraca **zweryfikowany**
+adres (SNI, weryfikacja certyfikatu i nagłówek `Host` zostają przy nazwie hosta; nowe
+połączenie na każde żądanie, bez puli keep-alive i bez proxy ze zmiennych środowiskowych) →
+odpowiedź:
+
+- 2xx: odczyt treści z limitem 5 MB w trakcie strumienia (`Content-Length` > limitu →
+  odrzucenie od razu, ale nagłówkowi nie ufamy), potem dekompresja `gzip`/`x-gzip`/`deflate`
+  (z nagłówkiem zlib albo surowy DEFLATE)/`br` z tym samym limitem na wyniku
+  (`maxOutputLength`); inne lub łączone `Content-Encoding` → `unsupported_encoding`;
+  dekodowanie tekstu należy do adaptera;
+- 301/302/303/307/308 z `Location`: następny hop (względny `Location` względem bieżącego
+  URL-a) walidowany jak nowe żądanie, max 3 przekierowania; treści przekierowań i błędów nie
+  czytamy;
+- pozostałe statusy → `http_status`.
+
+Timeouty: połączenie (TCP + TLS) 10 s, cała wymiana (DNS, połączenie, nagłówki, treść) 30 s
+na próbę; opcjonalny `signal` wywołującego przerywa też czekanie na rate limit i backoff
+(`aborted`, bez retry). Retry tylko dla: `timeout`, przejściowych błędów sieci (`ECONNRESET`,
+`ECONNREFUSED`, `ECONNABORTED`, `EPIPE`, `ETIMEDOUT`, `ENETUNREACH`, `EHOSTUNREACH`,
+`EAI_AGAIN`), 429, 502, 503, 504; max 2 ponowienia; backoff `1 s × 2^(n-1) × (1 + los[0,1))`,
+a przy `Retry-After` (sekundy lub HTTP-date) czekamy dłużej z tych dwóch; `Retry-After` > 60 s
+→ błąd bez czekania. `Retry-After` (dowolnej długości, przy 429/502/503/504) jest też
+zapamiętywany jako termin dla hosta — także gdy ponowień już nie ma: kolejne żądania do tego
+hosta czekają do terminu, a dopóki zostało do niego > 60 s, kończą się od razu `http_status`
+(ze statusem, który termin ustawił) bez ruchu sieciowego. Żądania jednego klienta są ściśle
+sekwencyjne; między końcem żądania a startem następnego do tego samego hosta mija co najmniej
+`minIntervalMs`. Odstępy, backoff i terminy liczone zegarem monotonicznym
+(`performance.now()`); zegar ścienny tylko do przeliczenia `Retry-After` w formie HTTP-date.
+Budżet błędów: każda nieudana próba (także odrzucenie przez politykę URL lub termin
+`Retry-After`) zużywa jednostkę; po wyczerpaniu
+każde kolejne `get` kończy się `budget_exhausted`, a retry, którego budżet by nie dopuścił,
+nie jest podejmowany. Jeden klient = jeden przebieg źródła.
+
+Logi (JSON-lines): `sourceId`, `host`, `method`, `status`, `durationMs` (bez czekania na rate
+limit), `attempt`, `bytes`, `errorCode`, `causeCode`, `willRetry` — nigdy pełny URL, ścieżka,
+zapytanie, nagłówki ani treść. User-Agent: `RadarZamowien/0.1 (+<CRAWLER_CONTACT>)` (e-mail
+jako `mailto:`).
+
+Seamy `SafeHttpClientDeps` (resolver, transport, zegary, sleep, losowość, limity) istnieją
+**wyłącznie dla testów**: własny transport lub resolver omija przypinanie adresu i ochronę
+SSRF, własny zegar/sleep — rate limit. Kod produkcyjny tworzy klienta tylko z `options`;
+pilnuje tego reguła ESLint `no-restricted-syntax` dla `src/**` (zakaz drugiego argumentu
+konstruktora, argumentów rozwijanych `...` i dziedziczenia po `SafeHttpClient` — także przez
+import przestrzeni nazw `ns.SafeHttpClient` — oraz importu pod inną nazwą; test w
+`tests/http-client-lint-guard.test.ts`), a obejścia, których lint nie wykryje
+(`const C = SafeHttpClient`, `Reflect.construct`), wyłapuje review. Limity w seamie można
+tylko zaostrzyć.
 
 ### 4.3 Ingestion (PR-03)
 
@@ -278,5 +348,5 @@ Serializacja pól nie rzuca (`Error` → `{name, message}`, `bigint` → string,
 `"[Circular]"`); logger nie redaguje pól (`docs/SECURITY.md` §12).
 Błędy bazy w CLI (`health`, `migrate`) są raportowane jako stały powód + kod SQLSTATE/errno,
 nigdy jako komunikat sterownika/serwera.
-_(plan, PR-02/03)_ Każdy wpis związany z pobieraniem zawiera `sourceId`; podsumowanie
+Każdy wpis `SafeHttpClient` zawiera `sourceId` i host (PR-02); _(plan, PR-03)_ podsumowanie
 przebiegu w `ingestion_runs`. Alerting/deployment: PR-07.

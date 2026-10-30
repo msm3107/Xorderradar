@@ -10,6 +10,28 @@ const databaseUrlSchema = z.string().refine((value) => {
 });
 
 /**
+ * Public contact of the operator, put into the crawler User-Agent so source
+ * owners can reach us: an e-mail address or an `https:` URL without
+ * credentials. Restricted to printable ASCII without `(`, `)`, `"` and `\`, so it
+ * can be embedded verbatim in the User-Agent comment.
+ */
+export const crawlerContactSchema = z
+  .string()
+  .max(200)
+  .refine((value) => {
+    if (!/^[\x21-\x7e]+$/.test(value) || /[()"\\]/.test(value)) return false;
+    if (z.email().safeParse(value).success) return true;
+    const url = URL.parse(value);
+    return (
+      url !== null &&
+      url.protocol === "https:" &&
+      url.hostname !== "" &&
+      url.username === "" &&
+      url.password === ""
+    );
+  });
+
+/**
  * Runtime configuration parsed from environment variables.
  *
  * Only variables actually used by the code belong here. Later PRs add their own
@@ -20,6 +42,9 @@ const configSchema = z
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
     LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
     DATABASE_URL: databaseUrlSchema,
+    // Optional here so `health`/`migrate` work without it; commands that fetch
+    // from sources must pass it to SafeHttpClient, which refuses to start without it.
+    CRAWLER_CONTACT: crawlerContactSchema.optional(),
   })
   // Unknown variables are ignored on purpose: process.env always contains many
   // unrelated entries (PATH, HOME, ...), so .strict() would be meaningless here.
@@ -27,6 +52,7 @@ const configSchema = z
     environment: env.NODE_ENV,
     logLevel: env.LOG_LEVEL,
     databaseUrl: env.DATABASE_URL,
+    crawlerContact: env.CRAWLER_CONTACT ?? null,
   }));
 
 export type AppConfig = z.output<typeof configSchema>;

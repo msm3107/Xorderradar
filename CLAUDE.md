@@ -25,7 +25,7 @@ Also useful: `docs/ROADMAP.md`, `docs/ARCHITECTURE.md`, `docs/SECURITY.md`, `doc
 ## Commands
 
 ```bash
-pnpm install        # Node >= 22.13, pnpm 10 (see packageManager in package.json)
+pnpm install        # Node >= 22.19, pnpm 10 (see packageManager in package.json)
 pnpm check          # format:check + lint + typecheck + test
 pnpm health         # run the health command from source
 pnpm build && pnpm start health
