@@ -96,4 +96,59 @@ export const migrations: Readonly<Record<string, Migration>> = {
       `.execute(db);
     },
   },
+
+  "0002_ingestion_runs": {
+    async up(db: Kysely<unknown>) {
+      // One row per source per `ingest` run (docs/ARCHITECTURE.md §7). Only
+      // counters and short codes: never document content or personal data.
+      await sql`
+        CREATE TABLE ingestion_runs (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          source_id text NOT NULL,
+          publication_date date NOT NULL,
+          max_records integer NOT NULL,
+          started_at timestamptz NOT NULL,
+          finished_at timestamptz NOT NULL,
+          status text NOT NULL,
+          documents integer NOT NULL,
+          extracted integer NOT NULL,
+          inserted integer NOT NULL,
+          updated integer NOT NULL,
+          unchanged integer NOT NULL,
+          rejected integer NOT NULL,
+          incomplete jsonb NOT NULL DEFAULT '[]',
+          error_code text,
+          CONSTRAINT ingestion_runs_source_id_fkey
+            FOREIGN KEY (source_id) REFERENCES sources (id),
+          CONSTRAINT ingestion_runs_max_records_check CHECK (max_records > 0),
+          CONSTRAINT ingestion_runs_finished_at_check CHECK (finished_at >= started_at),
+          CONSTRAINT ingestion_runs_status_check
+            CHECK (status IN ('succeeded', 'incomplete', 'failed')),
+          CONSTRAINT ingestion_runs_counters_check
+            CHECK (documents >= 0 AND extracted >= 0 AND inserted >= 0 AND updated >= 0
+                   AND unchanged >= 0 AND rejected >= 0),
+          CONSTRAINT ingestion_runs_incomplete_check CHECK (jsonb_typeof(incomplete) = 'array'),
+          -- A short machine code (e.g. http_status, invalid_document), never a message.
+          CONSTRAINT ingestion_runs_error_code_check
+            CHECK (error_code IS NULL OR error_code ~ '^[a-z][a-z0-9_]{0,63}$'),
+          -- Mirrors the domain rule: a code exactly when the run failed.
+          CONSTRAINT ingestion_runs_error_code_status_check
+            CHECK ((status = 'failed') = (error_code IS NOT NULL))
+        )
+      `.execute(db);
+
+      await sql`
+        CREATE INDEX ingestion_runs_source_started_idx
+          ON ingestion_runs (source_id, started_at DESC)
+      `.execute(db);
+
+      // The first source (D-015). An existing row (e.g. disabled by the
+      // operator) is left exactly as it is.
+      await sql`
+        INSERT INTO sources (id, name, base_url, enabled)
+        VALUES ('bzp', 'Biuletyn Zamówień Publicznych', 'https://ezamowienia.gov.pl/', true)
+        ON CONFLICT (id) DO NOTHING
+      `.execute(db);
+    },
+  },
 };

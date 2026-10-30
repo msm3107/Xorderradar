@@ -190,13 +190,17 @@ async function fetchNoticeType(
     if (next !== null && seenCursors.has(next)) {
       return { pages: page, records, stop: "repeated_cursor" };
     }
-    documents.push({
+    const document: RawDocument = {
       sourceId: BZP_SOURCE_ID,
       url: response.url,
       fetchedAt: ctx.now(),
       contentType: response.contentType,
       body,
-    });
+    };
+    // Streaming (ingest): the page is processed before the next request and
+    // not kept, so memory stays bounded by one page (D-008).
+    if (ctx.onDocument === undefined) documents.push(document);
+    else await ctx.onDocument(document);
     records += items.length;
     if (items.length < pageSize) return { pages: page, records, stop: null };
     if (records >= budget) return { pages: page, records, stop: "max_records" };
@@ -213,7 +217,8 @@ async function fetchNoticeType(
  * a busy type never starves the next one (small contracts come second), so a
  * run returns at most `BZP_NOTICE_TYPES.length × maxRecords` records. HTTP
  * failures (HttpClientError) and unusable documents (SourceFormatError) reject
- * the whole fetch.
+ * the whole fetch. With `ctx.onDocument`, documents are streamed to it instead
+ * of being returned (pages handed over before a failure stay handed over).
  */
 async function fetchNotices(ctx: FetchContext): Promise<FetchResult> {
   if (!CALENDAR_DATE.test(ctx.publicationDate)) {

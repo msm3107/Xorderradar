@@ -48,7 +48,10 @@ describe.skipIf(skipWithoutDatabase)("CLI with a real database (PostgreSQL)", ()
   it("migrate applies pending migrations, then reports nothing to apply", async () => {
     const first = await run(["migrate"], schema.url);
     expect(first.code).toBe(ExitCode.Ok);
-    expect(JSON.parse(first.stdout)).toEqual({ status: "ok", applied: ["0001_core_schema"] });
+    expect(JSON.parse(first.stdout)).toEqual({
+      status: "ok",
+      applied: ["0001_core_schema", "0002_ingestion_runs"],
+    });
 
     const second = await run(["migrate"], schema.url);
     expect(second.code).toBe(ExitCode.Ok);

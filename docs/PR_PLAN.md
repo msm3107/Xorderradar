@@ -111,6 +111,15 @@ z RSS. Preferencja: API → feed → dane strukturalne → HTML.
 
 **Cel:** zapisywać dane ze źródła w ujednoliconym formacie, bez duplikatów.
 
+**Podział:**
+
+- **PR-03A — rdzeń ingestu:** fingerprint + `content_hash`, deduplikacja i wykrywanie zmian
+  (`inserted/updated/unchanged/rejected`), komenda `ingest` z advisory lockiem, tabela
+  `ingestion_runs`, testy integracyjne. Kryteria akceptacji 1–4.
+- **PR-03B — helpery normalizacji:** białe znaki, HTML → tekst (`htmlBody`: opis, kontakt,
+  wartość), daty Europe/Warsaw, województwa/powiaty, słownik kategorii (CPV → kategorie MVP),
+  fallback niepoprawnego e-maila do `contact.raw`, pseudonimizowane fixture'y HTML.
+
 **Zakres:**
 
 - wspólne helpery normalizacji (daty w strefie Europe/Warsaw, białe znaki, HTML → tekst,

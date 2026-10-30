@@ -1,3 +1,4 @@
+import type { IncompleteReason } from "../domain/ingestion-run.js";
 import type { OpportunityCandidate } from "../domain/opportunity.js";
 import type { GetOptions, HttpResponse } from "../infrastructure/http/safe-http-client.js";
 import type { Logger } from "../infrastructure/logger.js";
@@ -28,6 +29,14 @@ export interface FetchContext {
   /** Clock for `RawDocument.fetchedAt`. */
   readonly now: () => Date;
   readonly logger: Logger;
+  /**
+   * Streaming mode (ingest, D-008): when set, `fetch` hands each document to
+   * this callback as soon as it is fetched, awaits it before the next request
+   * and does not retain the document — `FetchResult.documents` is then empty.
+   * A rejection stops the fetch and propagates unchanged. When absent (preview),
+   * documents are collected and returned.
+   */
+  readonly onDocument?: (doc: RawDocument) => Promise<void>;
 }
 
 /** One fetched response, kept in memory only (D-008). */
@@ -41,11 +50,8 @@ export interface RawDocument {
   readonly body: string;
 }
 
-/**
- * Why a listing was not read to its natural end: a run limit was reached or
- * pagination could not continue safely. More records may exist.
- */
-export type IncompleteReason = "max_records" | "max_pages" | "invalid_cursor" | "repeated_cursor";
+/** Defined with the run record that stores it (src/domain/ingestion-run.ts). */
+export type { IncompleteReason };
 
 export interface IncompleteFetch {
   /** Which part of the source was cut short (e.g. a notice type). */

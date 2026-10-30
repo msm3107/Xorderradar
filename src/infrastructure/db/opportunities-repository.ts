@@ -82,12 +82,87 @@ function toOpportunity(row: Selectable<OpportunitiesTable>): Opportunity {
   };
 }
 
+type ParsedDraft = z.output<typeof opportunityDraftSchema>;
+
+/**
+ * `INSERT … ON CONFLICT (fingerprint) DO UPDATE` for a validated draft, shared
+ * by `upsertOpportunity` and `ingestOpportunity`. `id` and `first_seen_at` are
+ * never changed by the update; the update only applies to a row of the same
+ * source (a fingerprint is per source; never move a row to another source).
+ * With `onlyIfChanged` the update also requires a different `content_hash`, so
+ * an unchanged notice is not written at all and no row is returned.
+ */
+function upsertQuery(db: Kysely<Database>, draft: ParsedDraft, onlyIfChanged: boolean) {
+  return db
+    .insertInto("opportunities")
+    .values({
+      source_id: draft.sourceId,
+      source_url: draft.sourceUrl,
+      external_id: draft.externalId,
+      issuer_name: draft.issuerName,
+      title: draft.title,
+      description: draft.description,
+      location: draft.location === null ? null : JSON.stringify(draft.location),
+      published_at: draft.publishedAt,
+      deadline: draft.deadline,
+      estimated_value: draft.estimatedValue,
+      currency: draft.currency,
+      categories: draft.categories,
+      contact: draft.contact === null ? null : JSON.stringify(draft.contact),
+      fetched_at: draft.fetchedAt,
+      fingerprint: draft.fingerprint,
+      content_hash: draft.contentHash,
+      status: draft.status,
+    })
+    .onConflict((oc) => {
+      const update = oc
+        .column("fingerprint")
+        .doUpdateSet((eb) => ({
+          source_url: eb.ref("excluded.source_url"),
+          external_id: eb.ref("excluded.external_id"),
+          issuer_name: eb.ref("excluded.issuer_name"),
+          title: eb.ref("excluded.title"),
+          description: eb.ref("excluded.description"),
+          location: eb.ref("excluded.location"),
+          published_at: eb.ref("excluded.published_at"),
+          deadline: eb.ref("excluded.deadline"),
+          estimated_value: eb.ref("excluded.estimated_value"),
+          currency: eb.ref("excluded.currency"),
+          categories: eb.ref("excluded.categories"),
+          contact: eb.ref("excluded.contact"),
+          fetched_at: eb.ref("excluded.fetched_at"),
+          content_hash: eb.ref("excluded.content_hash"),
+          status: eb.ref("excluded.status"),
+          updated_at: sql<Date>`now()`,
+        }))
+        .where("opportunities.source_id", "=", (eb) => eb.ref("excluded.source_id"));
+      return onlyIfChanged
+        ? update.where("opportunities.content_hash", "is distinct from", (eb) =>
+            eb.ref("excluded.content_hash"),
+          )
+        : update;
+    });
+}
+
+/** Unique index on `(source_id, external_id)` (migration 0001). */
+const SOURCE_EXTERNAL_ID_KEY = "opportunities_source_external_id_key";
+
+/** The conflict-update WHERE did not match because the fingerprint belongs to another source. */
+function fingerprintOfOtherSource(): DomainError {
+  return new DomainError(
+    "duplicate",
+    "Fingerprint already stored for another source (opportunities_fingerprint_key)",
+    ["fingerprint"],
+    "opportunities_fingerprint_key",
+  );
+}
+
 /**
  * Inserts the draft, or — when its `fingerprint` already exists — overwrites
  * the stored fields with the draft, in one atomic statement
  * (`INSERT … ON CONFLICT (fingerprint) DO UPDATE`). `id` and `first_seen_at`
- * are never changed by an update. Whether anything actually changed (content
- * hash comparison) is decided by ingestion in PR-03, not here.
+ * are never changed by an update. Always writes; ingestion uses
+ * `ingestOpportunity`, which skips unchanged content.
  *
  * Refusals are DomainErrors: invalid draft (`invalid_input`), unregistered
  * source (`unknown_reference`), the same `(sourceId, externalId)` under a
@@ -100,51 +175,7 @@ export async function upsertOpportunity(
 ): Promise<UpsertOpportunityResult> {
   const draft = parseDomain(opportunityDraftSchema, input);
   const row = await withDomainErrors(() =>
-    db
-      .insertInto("opportunities")
-      .values({
-        source_id: draft.sourceId,
-        source_url: draft.sourceUrl,
-        external_id: draft.externalId,
-        issuer_name: draft.issuerName,
-        title: draft.title,
-        description: draft.description,
-        location: draft.location === null ? null : JSON.stringify(draft.location),
-        published_at: draft.publishedAt,
-        deadline: draft.deadline,
-        estimated_value: draft.estimatedValue,
-        currency: draft.currency,
-        categories: draft.categories,
-        contact: draft.contact === null ? null : JSON.stringify(draft.contact),
-        fetched_at: draft.fetchedAt,
-        fingerprint: draft.fingerprint,
-        content_hash: draft.contentHash,
-        status: draft.status,
-      })
-      .onConflict((oc) =>
-        oc
-          .column("fingerprint")
-          .doUpdateSet((eb) => ({
-            source_url: eb.ref("excluded.source_url"),
-            external_id: eb.ref("excluded.external_id"),
-            issuer_name: eb.ref("excluded.issuer_name"),
-            title: eb.ref("excluded.title"),
-            description: eb.ref("excluded.description"),
-            location: eb.ref("excluded.location"),
-            published_at: eb.ref("excluded.published_at"),
-            deadline: eb.ref("excluded.deadline"),
-            estimated_value: eb.ref("excluded.estimated_value"),
-            currency: eb.ref("excluded.currency"),
-            categories: eb.ref("excluded.categories"),
-            contact: eb.ref("excluded.contact"),
-            fetched_at: eb.ref("excluded.fetched_at"),
-            content_hash: eb.ref("excluded.content_hash"),
-            status: eb.ref("excluded.status"),
-            updated_at: sql<Date>`now()`,
-          }))
-          // A fingerprint is per source; never move a row to another source.
-          .where("opportunities.source_id", "=", (eb) => eb.ref("excluded.source_id")),
-      )
+    upsertQuery(db, draft, false)
       .returningAll()
       // xmax is 0 only for a row version created by a plain INSERT; the
       // ON CONFLICT DO UPDATE path leaves a non-zero xmax. This is the standard
@@ -152,17 +183,69 @@ export async function upsertOpportunity(
       .returning(sql<boolean>`(xmax = 0)`.as("inserted"))
       .executeTakeFirst(),
   );
-  if (row === undefined) {
-    // The conflict-update WHERE did not match: same fingerprint, other source.
-    throw new DomainError(
-      "duplicate",
-      "Fingerprint already stored for another source (opportunities_fingerprint_key)",
-      ["fingerprint"],
-      "opportunities_fingerprint_key",
-    );
-  }
+  if (row === undefined) throw fingerprintOfOtherSource();
   const { inserted, ...stored } = row;
   return { outcome: inserted ? "inserted" : "updated", opportunity: toOpportunity(stored) };
+}
+
+export type IngestOutcome = "inserted" | "updated" | "unchanged";
+
+export interface IngestOpportunityResult {
+  readonly outcome: IngestOutcome;
+  /** Id of the stored row (new, updated or left as it was). */
+  readonly id: string;
+}
+
+/**
+ * Change detection for ingestion (docs/ARCHITECTURE.md §5): inserts a new
+ * fingerprint, updates a stored one only when `content_hash` differs, and
+ * writes nothing when the content is the same (`unchanged` — `fetched_at` and
+ * `updated_at` stay as they were). Same DomainError refusals as
+ * `upsertOpportunity`.
+ *
+ * Safe under concurrent writes of the same fingerprint: one row, outcomes
+ * inserted + unchanged/updated (see the retry below).
+ *
+ * When the upsert returns no row, one more read tells "unchanged" (same
+ * source) from "fingerprint of another source". A row that vanished in
+ * between (deleted concurrently) is an unexpected state and a plain Error.
+ */
+export async function ingestOpportunity(
+  db: Kysely<Database>,
+  input: OpportunityDraft,
+): Promise<IngestOpportunityResult> {
+  const draft = parseDomain(opportunityDraftSchema, input);
+  const write = () =>
+    withDomainErrors(() =>
+      upsertQuery(db, draft, true)
+        // See upsertOpportunity for the xmax idiom.
+        .returning(["id", sql<boolean>`(xmax = 0)`.as("inserted")])
+        .executeTakeFirst(),
+    );
+  let row: Awaited<ReturnType<typeof write>>;
+  try {
+    row = await write();
+  } catch (error: unknown) {
+    // ON CONFLICT resolves conflicts on its arbiter (fingerprint) only. When
+    // the same notice is inserted concurrently, the other unique index
+    // (source_id, external_id) can report the conflict instead — after the
+    // other insert has committed. One retry then takes the conflict path. A
+    // real conflict (the external id stored under another fingerprint) fails
+    // the same way again.
+    if (!(error instanceof DomainError) || error.constraint !== SOURCE_EXTERNAL_ID_KEY) throw error;
+    row = await write();
+  }
+  if (row !== undefined) return { outcome: row.inserted ? "inserted" : "updated", id: row.id };
+  const stored = await db
+    .selectFrom("opportunities")
+    .select(["id", "source_id"])
+    .where("fingerprint", "=", draft.fingerprint)
+    .executeTakeFirst();
+  if (stored === undefined) {
+    throw new Error("Opportunity row vanished between upsert and lookup (concurrent delete?)");
+  }
+  if (stored.source_id !== draft.sourceId) throw fingerprintOfOtherSource();
+  return { outcome: "unchanged", id: stored.id };
 }
 
 export async function getOpportunity(
