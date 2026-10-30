@@ -169,4 +169,31 @@ export const migrations: Readonly<Record<string, Migration>> = {
       `.execute(db);
     },
   },
+
+  "0004_notice_updates": {
+    async up(db: Kysely<unknown>) {
+      // Which update notice set the stored deadline (D-015): its number and
+      // publication time, both null until an update is applied. They decide
+      // which of several updates wins (the latest published) and keep the
+      // deadline when the original notice is fetched again. Existing rows
+      // stay null. Bound as the domain's notice numbers (text(200)).
+      await sql`
+        ALTER TABLE opportunities
+          ADD COLUMN deadline_update_notice text,
+          ADD COLUMN deadline_update_published_at timestamptz,
+          ADD CONSTRAINT opportunities_deadline_update_check
+            CHECK ((deadline_update_notice IS NULL) = (deadline_update_published_at IS NULL)),
+          ADD CONSTRAINT opportunities_deadline_update_notice_check
+            CHECK (char_length(deadline_update_notice) BETWEEN 1 AND 200)
+      `.execute(db);
+
+      // Records read but deliberately not applied (e.g. an update whose
+      // original is not stored). Earlier runs had none: default 0.
+      await sql`
+        ALTER TABLE ingestion_runs
+          ADD COLUMN skipped integer NOT NULL DEFAULT 0,
+          ADD CONSTRAINT ingestion_runs_skipped_check CHECK (skipped >= 0)
+      `.execute(db);
+    },
+  },
 };

@@ -7,7 +7,11 @@ import {
   type CliDatabase,
   type CliSourceDeps,
 } from "../src/cli.js";
-import { overallStatus, type IngestionRunResult } from "../src/ingestion/run.js";
+import {
+  overallStatus,
+  type IngestionOutcome,
+  type IngestionRunResult,
+} from "../src/ingestion/run.js";
 import { sourceAdapters } from "../src/sources/registry.js";
 
 const DATABASE_URL = "postgres://radar:not-a-real-password@db.example.invalid:5432/radar";
@@ -86,6 +90,41 @@ describe("ingest arguments", () => {
     [["ingest", "--limit", "5", "--limit", "6"], "Option --limit given twice."],
     [["ingest", "bzp", "bzp"], 'Source "bzp" given twice.'],
     [["ingest", "nieznane-zrodlo"], 'Unknown source: "nieznane-zrodlo"'],
+    [["ingest", "--from"], "Option --from needs a value."],
+    [["ingest", "--to", "--limit", "5"], "--to must be a calendar date YYYY-MM-DD."],
+    [["ingest", "--from", "2026-10-01"], "Options --from and --to must be given together."],
+    [["ingest", "--to", "2026-10-01"], "Options --from and --to must be given together."],
+    [
+      ["ingest", "--from", "2026-10-01", "--to", "2026-10-02", "--from", "2026-10-01"],
+      "Option --from given twice.",
+    ],
+    [["ingest", "--from", "2026-02-29", "--to", "2026-03-01"], "--from must be a calendar date"],
+    [["ingest", "--from", "2026-10-01", "--to", "1.10.2026"], "--to must be a calendar date"],
+    [["ingest", "--from", "2026-10-02", "--to", "2026-10-01"], "--from must not be after --to."],
+    [
+      ["ingest", "--from", "2026-09-01", "--to", "2026-10-02"],
+      "--from/--to may cover at most 31 days.",
+    ],
+    [
+      ["ingest", "--date", "2026-10-01", "--from", "2026-10-01", "--to", "2026-10-01"],
+      "Option --date cannot be combined with --from/--to.",
+    ],
+    // Days outside 2000–2999 are refused before any list of days is built.
+    [["ingest", "--date", "9999-12-31"], "--date must be a day from 2000-01-01 to 2999-12-31."],
+    [["ingest", "--date", "1999-12-31"], "--date must be a day from 2000-01-01 to 2999-12-31."],
+    [["ingest", "--date", "3000-01-01"], "--date must be a day from 2000-01-01 to 2999-12-31."],
+    [
+      ["ingest", "--from", "9999-12-01", "--to", "9999-12-31"],
+      "--from must be a day from 2000-01-01 to 2999-12-31.",
+    ],
+    [
+      ["ingest", "--from", "0100-01-01", "--to", "2026-10-01"],
+      "--from must be a day from 2000-01-01 to 2999-12-31.",
+    ],
+    [
+      ["ingest", "--from", "2000-01-01", "--to", "2999-12-31"],
+      "--from/--to may cover at most 31 days.",
+    ],
   ])("%j is a usage error (exit 2) before config or database", async (args, message) => {
     const result = await run(args, { env: { DATABASE_URL: undefined } });
     expect(result.code).toBe(ExitCode.Usage);
@@ -98,7 +137,9 @@ describe("ingest arguments", () => {
   it("lists ingest in the usage text", async () => {
     const result = await run(["--help"]);
     expect(result.code).toBe(ExitCode.Ok);
-    expect(result.stdout).toContain("ingest [sourceId...] [--date YYYY-MM-DD] [--limit N]");
+    expect(result.stdout).toContain(
+      "ingest [sourceId...] [--date YYYY-MM-DD | --from YYYY-MM-DD --to YYYY-MM-DD] [--limit N]",
+    );
     expect(result.stdout).toContain(`default ${String(INGEST_DEFAULT_LIMIT)}`);
   });
 
@@ -109,9 +150,24 @@ describe("ingest arguments", () => {
     expect(result.code).toBe(ExitCode.Ok);
     expect(JSON.parse(result.stdout)).toMatchObject({
       status: "skipped",
-      publicationDate: "2026-10-29",
+      mode: "date",
+      from: "2026-10-29",
+      to: "2026-10-29",
       limit: 5,
     });
+  });
+});
+
+describe("ingest day ranges", () => {
+  it.each([
+    [["ingest", "--from", "2026-10-01", "--to", "2026-10-31"], "2026-10-01", "2026-10-31"],
+    [["ingest", "--to", "2026-10-29", "--from", "2026-10-29"], "2026-10-29", "2026-10-29"],
+    [["ingest", "--from", "2028-02-28", "--to", "2028-03-01"], "2028-02-28", "2028-03-01"],
+  ])("%j is a range (then needs the lock)", async (args, from, to) => {
+    const result = await run(args);
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(result.calls.lockAttempts).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: "skipped", mode: "range", from, to });
   });
 });
 
@@ -127,12 +183,17 @@ describe("ingest command (stub database)", () => {
   it("reports skipped and exits 0 without fetching when another run holds the lock", async () => {
     const result = await run(["ingest"]);
     expect(result.code).toBe(ExitCode.Ok);
+    // Without a date option: catch-up, whose days are only known under the lock.
     expect(JSON.parse(result.stdout)).toEqual({
       status: "skipped",
       reason: "lock_busy",
-      publicationDate: "2026-10-29",
+      mode: "catch_up",
+      from: null,
+      to: null,
       limit: INGEST_DEFAULT_LIMIT,
       runs: [],
+      notRun: [],
+      clipped: [],
     });
     expect(result.stderr).toContain(
       "Ingest skipped: another ingest run holds the lock; nothing was fetched.\n",
@@ -144,7 +205,13 @@ describe("ingest command (stub database)", () => {
   });
 
   it("reports a lock lost late in the run as failed even when every source finished", async () => {
-    const finished: IngestionRunResult[] = [runResult()];
+    const finished: IngestionOutcome = {
+      runs: [runResult()],
+      notRun: [],
+      clipped: [],
+      from: "2026-10-29",
+      to: "2026-10-29",
+    };
     const result = await run(["ingest"], {
       database: {
         // The stub stands in for the task, whose result type T the generic
@@ -187,7 +254,15 @@ function runResult(overrides: Partial<IngestionRunResult> = {}): IngestionRunRes
     status: "succeeded",
     startedAt: NOW,
     finishedAt: NOW,
-    counters: { documents: 0, extracted: 0, inserted: 0, updated: 0, unchanged: 0, rejected: 0 },
+    counters: {
+      documents: 0,
+      extracted: 0,
+      inserted: 0,
+      updated: 0,
+      unchanged: 0,
+      rejected: 0,
+      skipped: 0,
+    },
     incomplete: [],
     errorCode: null,
     runId: "00000000-0000-4000-8000-000000000001",

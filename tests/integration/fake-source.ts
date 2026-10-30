@@ -99,7 +99,7 @@ export function fakeSource(sourceId: string, script: readonly FakeStep[] = []): 
         status: deadline === null ? "unknown" : "open",
       });
       if (!result.success) return { ok: false, externalId: notice.externalId, reason: "invalid" };
-      return { ok: true, candidate: result.data };
+      return { ok: true, kind: "opportunity", candidate: result.data };
     },
   };
   return source;

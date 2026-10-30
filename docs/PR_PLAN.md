@@ -116,7 +116,9 @@ z RSS. Preferencja: API → feed → dane strukturalne → HTML.
 - **PR-03A — rdzeń ingestu:** fingerprint + `content_hash`, deduplikacja i wykrywanie zmian
   (`inserted/updated/unchanged/rejected`), komenda `ingest` z advisory lockiem, tabela
   `ingestion_runs`, testy integracyjne. Kryteria akceptacji 1–4.
-- **PR-03B — zmiany ogłoszeń BZP i helpery normalizacji:**
+- **PR-03B — zmiany ogłoszeń BZP i nadrabianie pominiętych dni** (podział decyzją właściciela;
+  helpery normalizacji przeniesione bez zmian do PR-03C, w PR-03B tylko przeliczenie czasu
+  Europe/Warsaw → UTC potrzebne dla terminu ze zmiany):
   - **zmiany ogłoszeń (`NoticeUpdateNotice`, D-015):** pobieranie typu `NoticeUpdateNotice`
     (z tym samym limitem rekordów/stron na typ co pozostałe); powiązanie z pierwotnym
     ogłoszeniem wyłącznie przez `tenderId` (kolumna `tender_id`, PR-03A); wyciągnięcie nowego
@@ -135,14 +137,9 @@ z RSS. Preferencja: API → feed → dane strukturalne → HTML.
   - **kolejność zmian:** gdy dla jednego `tenderId` jest kilka `NoticeUpdateNotice`, wygrywa
     zmiana o najpóźniejszej dacie publikacji; starsza zmiana (np. pobrana później przy
     backfillu) nie nadpisuje nowszej;
-  - **decyzja otwarta dla PR-03B:** który wiersz aktualizować, gdy kilka wierszy ma ten sam
-    `(source_id, tender_id)` (np. kilka ogłoszeń jednego postępowania; nowa wersja
-    pierwotnego jako `…/02` nie jest potwierdzona). Do rozstrzygnięcia na danych z API przed
-    implementacją — bez zgadywania; do tego czasu taki przypadek ma być zalogowany i
-    pozostawiony bez zmian;
-  - **helpery normalizacji:** białe znaki, HTML → tekst (`htmlBody`: opis, kontakt, wartość),
-    daty Europe/Warsaw, województwa/powiaty, słownik kategorii (CPV → kategorie MVP), fallback
-    niepoprawnego e-maila do `contact.raw`, pseudonimizowane fixture'y HTML.
+  - **który wiersz** (rozstrzygnięte przez właściciela): gdy kilka wierszy ma ten sam
+    `(source_id, tender_id)`, zmiana trafia do starszego —
+    `published_at ASC NULLS LAST, first_seen_at ASC, id ASC` (D-015);
   - **Kryteria akceptacji PR-03B (zmiany ogłoszeń):**
     1. `NoticeUpdateNotice` z nowym terminem zmienia `deadline` pierwotnego ogłoszenia
        (znalezionego po `source_id` + `tender_id`); przebieg liczy to jako `updated`.
@@ -157,10 +154,26 @@ z RSS. Preferencja: API → feed → dane strukturalne → HTML.
        opublikowanej, niezależnie od kolejności ingestu — z testem.
     6. `NoticeUpdateNotice` nie tworzy własnego wiersza w `opportunities` (test: liczba ofert
        po ingeście dnia z samymi zmianami się nie zmienia).
-  - **Kandydat (do potwierdzenia przez właściciela):** nadrabianie pominiętych dni —
-    `ingest --from YYYY-MM-DD --to YYYY-MM-DD` albo automatycznie dni od ostatniego przebiegu
-    `succeeded` w `ingestion_runs` (cron, który nie ruszył przez kilka dni, dziś gubi te dni;
-    to samo dotyczy zmian ogłoszeń z tych dni).
+  - **nadrabianie pominiętych dni (decyzja właściciela, D-021):**
+    `ingest --from YYYY-MM-DD --to YYYY-MM-DD`; bez opcji dnia — automatycznie dni od
+    ostatniego pokrytego dnia źródła w `ingestion_runs` do wczoraj (cron, który nie ruszył przez
+    kilka dni, dziś gubi te dni; to samo dotyczy zmian ogłoszeń z tych dni).
+  - **Kryteria akceptacji PR-03B (nadrabianie):**
+
+    7. `ingest --from A --to B` pobiera każdy dzień zakresu (jeden przebieg na źródło i dzień);
+       niepoprawny zakres (`A > B`, ponad 31 dni, tylko jedna z opcji, razem z `--date`) →
+       błąd użycia bez pobierania.
+    8. Bez opcji dnia `ingest` pobiera dni od dnia po ostatnim pokrytym (przebieg `succeeded`
+       albo `incomplete` rozpoczęty po końcu dnia) do wczoraj; świeże źródło — tylko wczoraj;
+       nic do nadrobienia — nic nie jest pobierane; ponad 31 dni → 31 najnowszych, reszta
+       raportowana jako przycięta.
+    9. Nieudany dzień zatrzymuje kolejne dni tego źródła (raportowane jako niewykonane), a
+       następne nadrabianie zaczyna od niego — z testami integracyjnymi.
+
+- **PR-03C — helpery normalizacji** (przeniesione bez zmian z PR-03B):
+  - **helpery normalizacji:** białe znaki, HTML → tekst (`htmlBody`: opis, kontakt, wartość),
+    daty Europe/Warsaw, województwa/powiaty, słownik kategorii (CPV → kategorie MVP), fallback
+    niepoprawnego e-maila do `contact.raw`, pseudonimizowane fixture'y HTML.
 
 **Zakres:**
 

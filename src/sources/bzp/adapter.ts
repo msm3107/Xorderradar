@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isWellFormedText } from "../../domain/common.js";
+import { noticeUpdateSchema } from "../../domain/notice-update.js";
 import {
   opportunityCandidateSchema,
   type OpportunityLocation,
@@ -16,6 +17,7 @@ import {
   type RawDocument,
   type SourceAdapter,
 } from "../types.js";
+import { extractDeadlineChange } from "./notice-update.js";
 import { bzpProvinces } from "./provinces.js";
 
 /**
@@ -28,9 +30,23 @@ const LIST_URL = `https://${BZP_HOST}/mo-board/api/v1/notice`;
 /** Public notice page; `objectId` is the notice id. */
 const DETAIL_URL = `https://${BZP_HOST}/mo-client-board/bzp/notice-details/id/`;
 
-/** National below-EU contract notices, then small contracts published voluntarily (Pzp does not apply). */
-export const BZP_NOTICE_TYPES = ["ContractNotice", "SmallContractNotice"] as const;
+/**
+ * National below-EU contract notices, then small contracts published
+ * voluntarily (Pzp does not apply), then notices changing earlier notices —
+ * last, so an update of a notice published the same day finds it stored.
+ */
+export const BZP_NOTICE_TYPES = [
+  "ContractNotice",
+  "SmallContractNotice",
+  "NoticeUpdateNotice",
+] as const;
 export type BzpNoticeType = (typeof BZP_NOTICE_TYPES)[number];
+/** Notice types mapped to opportunities; NoticeUpdateNotice is a change to one of them. */
+const OPPORTUNITY_NOTICE_TYPES: ReadonlySet<string> = new Set([
+  "ContractNotice",
+  "SmallContractNotice",
+]);
+const NOTICE_UPDATE_TYPE = "NoticeUpdateNotice";
 
 /**
  * Records per request: a record is typically ~31 KB (median) and up to ~100 KB (max 95.6 KB
@@ -44,6 +60,12 @@ export const BZP_MAX_PAGES_PER_TYPE = 40;
 const MAX_RECORDS_PER_DOCUMENT = 500;
 /** Bound on every string read from a record, before any regular expression runs on it. */
 const MAX_FIELD_LENGTH = 20_000;
+/**
+ * Bound on an update notice's `htmlBody`, the one field parsed as markup
+ * (src/sources/bzp/notice-update.ts). Observed on 2026-10-29: 4 379–32 895
+ * characters; a longer body rejects the record instead of being cut.
+ */
+const MAX_HTML_BODY_LENGTH = 200_000;
 /** Same bound as the domain's `tenderId` (and `externalId`). */
 const MAX_TENDER_ID_LENGTH = 200;
 /** C0 controls and DEL: never part of an identifier (NUL is also rejected by PostgreSQL text). */
@@ -84,12 +106,37 @@ const bzpRecordSchema = z.object({
 export type BzpRecord = z.output<typeof bzpRecordSchema>;
 
 /**
- * An extracted list item: either the validated record, or the field paths that
- * did not match (turned into a rejection by `normalize`, so one bad record
- * never fails the whole page).
+ * A NoticeUpdateNotice: the same list fields as a contract notice, but only
+ * these are used. `htmlBody` is kept (bounded) because the change itself is
+ * only published there; its `submittingOffersDate` is always null.
+ */
+const bzpUpdateRecordSchema = z.object({
+  noticeNumber: field,
+  publicationDate: field,
+  tenderId: optionalField.catch(null),
+  htmlBody: z.string().max(MAX_HTML_BODY_LENGTH),
+});
+
+export type BzpUpdateRecord = z.output<typeof bzpUpdateRecordSchema>;
+
+/**
+ * An extracted list item: either the validated record (a notice, or an update
+ * of an earlier notice), or the field paths that did not match (turned into a
+ * rejection by `normalize`, so one bad record never fails the whole page).
  */
 export type BzpNotice =
-  | { readonly valid: true; readonly fetchedAt: Date; readonly record: BzpRecord }
+  | {
+      readonly valid: true;
+      readonly kind: "notice";
+      readonly fetchedAt: Date;
+      readonly record: BzpRecord;
+    }
+  | {
+      readonly valid: true;
+      readonly kind: "update";
+      readonly fetchedAt: Date;
+      readonly record: BzpUpdateRecord;
+    }
   | {
       readonly valid: false;
       readonly fetchedAt: Date;
@@ -143,7 +190,7 @@ function cursorOf(item: unknown): string | null {
  * Unicode or containing a control character → null (never a reason to reject
  * the notice; PostgreSQL would refuse a NUL in text and fail the whole row).
  */
-function tenderIdOf(record: BzpRecord): string | null {
+function tenderIdOf(record: { readonly tenderId?: string | null | undefined }): string | null {
   const value = record.tenderId?.trim() ?? "";
   return value.length > 0 &&
     value.length <= MAX_TENDER_ID_LENGTH &&
@@ -239,7 +286,8 @@ async function fetchNoticeType(
 /**
  * Fetches every configured notice type published on `ctx.publicationDate`,
  * sequentially, each within its own `ctx.maxRecords` records and page limit:
- * a busy type never starves the next one (small contracts come second), so a
+ * a busy type never starves the next one (small contracts come second,
+ * updates third), so a
  * run returns at most `BZP_NOTICE_TYPES.length × maxRecords` records. HTTP
  * failures (HttpClientError) and unusable documents (SourceFormatError) reject
  * the whole fetch. With `ctx.onDocument`, documents are streamed to it instead
@@ -275,21 +323,42 @@ function issuePaths(error: z.ZodError): string[] {
   return [...new Set(error.issues.map((issue) => issue.path.map(String).join(".") || "(root)"))];
 }
 
+function invalidNotice(item: unknown, fetchedAt: Date, invalidFields: string[]): BzpNotice {
+  return { valid: false, fetchedAt, externalId: externalIdOf(item), invalidFields };
+}
+
+/**
+ * One list item, dispatched on its own `noticeType` (not on the listing it
+ * came from): contract notices and small contracts → the notice schema,
+ * NoticeUpdateNotice → the update schema, anything else → invalid
+ * (`noticeType`). A non-object item is invalid as a whole (`(root)`).
+ */
+function extractNotice(item: unknown, fetchedAt: Date): BzpNotice {
+  if (typeof item !== "object" || item === null || Array.isArray(item)) {
+    return invalidNotice(item, fetchedAt, ["(root)"]);
+  }
+  const noticeType = stringProperty(item, "noticeType");
+  if (noticeType === NOTICE_UPDATE_TYPE) {
+    const update = bzpUpdateRecordSchema.safeParse(item);
+    return update.success
+      ? { valid: true, kind: "update", fetchedAt, record: update.data }
+      : invalidNotice(item, fetchedAt, issuePaths(update.error));
+  }
+  if (noticeType === null || !OPPORTUNITY_NOTICE_TYPES.has(noticeType)) {
+    return invalidNotice(item, fetchedAt, ["noticeType"]);
+  }
+  const notice = bzpRecordSchema.safeParse(item);
+  return notice.success
+    ? { valid: true, kind: "notice", fetchedAt, record: notice.data }
+    : invalidNotice(item, fetchedAt, issuePaths(notice.error));
+}
+
 /**
  * Pure. Throws SourceFormatError when the document is not a JSON array (or is
  * too long); each item is validated on its own.
  */
 function extractNotices(doc: RawDocument): BzpNotice[] {
-  return parseRecords(doc.body).map((item): BzpNotice => {
-    const result = bzpRecordSchema.safeParse(item);
-    if (result.success) return { valid: true, fetchedAt: doc.fetchedAt, record: result.data };
-    return {
-      valid: false,
-      fetchedAt: doc.fetchedAt,
-      externalId: externalIdOf(item),
-      invalidFields: issuePaths(result.error),
-    };
-  });
+  return parseRecords(doc.body).map((item) => extractNotice(item, doc.fetchedAt));
 }
 
 /**
@@ -356,6 +425,32 @@ function reject(externalId: string | null, reason: string): NormalizeResult {
 }
 
 /**
+ * An update notice → NoticeUpdate (D-015): its own number and publication
+ * time, the procedure's tenderId (the link to the original) and the change
+ * read from `htmlBody` — the new offer deadline, or none with a reason. A body
+ * that cannot be read safely is a rejection with a fixed reason.
+ */
+function normalizeUpdate(record: BzpUpdateRecord, fetchedAt: Date): NormalizeResult {
+  const externalId = externalIdOf(record);
+  const publishedAt = parseUtcTimestamp(record.publicationDate.trim());
+  if (publishedAt === null) return reject(externalId, "invalid value: publishedAt");
+  const change = extractDeadlineChange(record.htmlBody);
+  if (!change.ok) return reject(externalId, change.reason);
+  const result = noticeUpdateSchema.safeParse({
+    sourceId: BZP_SOURCE_ID,
+    externalId: record.noticeNumber,
+    tenderId: tenderIdOf(record),
+    publishedAt,
+    fetchedAt,
+    change: change.change,
+  });
+  if (!result.success) {
+    return reject(externalId, `invalid value: ${issuePaths(result.error).join(", ")}`);
+  }
+  return { ok: true, kind: "notice_update", update: result.data };
+}
+
+/**
  * Pure mapping (D-015). Values the list API does not provide (description,
  * contact, estimated value) stay null; nothing is guessed or truncated — a
  * record that does not fit the domain rules is rejected with the field names.
@@ -364,6 +459,7 @@ function normalizeNotice(notice: BzpNotice): NormalizeResult {
   if (!notice.valid) {
     return reject(notice.externalId, `invalid source fields: ${notice.invalidFields.join(", ")}`);
   }
+  if (notice.kind === "update") return normalizeUpdate(notice.record, notice.fetchedAt);
   const { record, fetchedAt } = notice;
   const externalId = externalIdOf(record);
   // Both timestamps: surrounding whitespace trimmed, then the strict format;
@@ -396,7 +492,7 @@ function normalizeNotice(notice: BzpNotice): NormalizeResult {
   if (!result.success) {
     return reject(externalId, `invalid value: ${issuePaths(result.error).join(", ")}`);
   }
-  return { ok: true, candidate: result.data };
+  return { ok: true, kind: "opportunity", candidate: result.data };
 }
 
 export const bzpAdapter: SourceAdapter<BzpNotice> = {

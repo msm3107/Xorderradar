@@ -28,7 +28,7 @@ function fixture(name: string): Buffer {
 
 /**
  * Serves captured BZP responses: page 1 of contract notices (3), then small
- * contracts (2). Each request first waits for `gate` (or the request's abort,
+ * contracts (2), then no notice updates (an empty day). Each request first waits for `gate` (or the request's abort,
  * like SafeHttpClient); `started` resolves when the first request arrives.
  */
 class FixtureHttpClient implements SourceHttpClient {
@@ -58,10 +58,13 @@ class FixtureHttpClient implements SourceHttpClient {
         resolve();
       });
     });
+    const noticeType = new URL(href).searchParams.get("NoticeType");
     const name =
-      new URL(href).searchParams.get("NoticeType") === "ContractNotice"
+      noticeType === "ContractNotice"
         ? "contract-notice-2026-10-29-page1.json"
-        : "small-contract-notice-2026-10-29.json";
+        : noticeType === "SmallContractNotice"
+          ? "small-contract-notice-2026-10-29.json"
+          : "empty-2026-11-20.json";
     return {
       url: href,
       status: 200,
@@ -127,11 +130,14 @@ function logLines(stderr: string) {
 
 const reportSchema = z.object({
   status: z.string(),
-  publicationDate: z.string(),
+  mode: z.enum(["date", "range", "catch_up"]),
+  from: z.string().nullable(),
+  to: z.string().nullable(),
   limit: z.number(),
   runs: z.array(
     z.looseObject({
       sourceId: z.string(),
+      publicationDate: z.string(),
       runId: z.string().nullable(),
       status: z.string(),
       errorCode: z.string().nullable(),
@@ -161,20 +167,24 @@ describe.skipIf(skipWithoutDatabase)("ingest command (PostgreSQL, fake network)"
     const http = new FixtureHttpClient();
     const first = await run(["ingest", "bzp"], schema, { http });
     expect(first.code).toBe(ExitCode.Ok);
-    // Default date: yesterday (UTC); one page per notice type (the fixtures are short).
-    expect(http.urls).toHaveLength(2);
+    // Default: catch-up, which on a fresh database is yesterday (UTC) only;
+    // one page per notice type (the fixtures are short).
+    expect(http.urls).toHaveLength(3);
     expect(http.urls[0]).toContain("PublicationDateFrom=2026-10-29");
     const report = reportSchema.parse(JSON.parse(first.stdout));
     expect(report).toMatchObject({
       status: "succeeded",
-      publicationDate: "2026-10-29",
+      mode: "catch_up",
+      from: "2026-10-29",
+      to: "2026-10-29",
       limit: 1000,
     });
     expect(report.runs).toEqual([
       expect.objectContaining({
         sourceId: "bzp",
+        publicationDate: "2026-10-29",
         status: "succeeded",
-        documents: 2,
+        documents: 3,
         extracted: 5,
         inserted: 5,
         updated: 0,
@@ -320,9 +330,13 @@ describe.skipIf(skipWithoutDatabase)("ingest command (PostgreSQL, fake network)"
     expect(JSON.parse(result.stdout)).toEqual({
       status: "skipped",
       reason: "lock_busy",
-      publicationDate: "2026-10-28",
+      mode: "date",
+      from: "2026-10-28",
+      to: "2026-10-28",
       limit: 1000,
       runs: [],
+      notRun: [],
+      clipped: [],
     });
     expect(result.stderr).toContain(
       "Ingest skipped: another ingest run holds the lock; nothing was fetched.\n",

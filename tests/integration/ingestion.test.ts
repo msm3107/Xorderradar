@@ -69,15 +69,15 @@ async function ingest(
     ...overrides,
   };
   const { allEnabled = false, ...rest } = request;
-  const results = await runIngestion(deps, {
-    publicationDate: DAY,
+  const outcome = await runIngestion(deps, {
+    days: { mode: "range", from: DAY, to: DAY },
     maxRecords: 100,
     // Without sourceIds runIngestion takes every enabled source (the default).
     ...(allEnabled ? {} : { sourceIds: adapters.map((adapter) => adapter.sourceId) }),
     ...rest,
   });
   const logs = lines.map((line) => logLineSchema.parse(JSON.parse(line)));
-  return { results, logs };
+  return { results: outcome.runs, outcome, logs };
 }
 
 const storedRowSchema = z.object({
@@ -198,6 +198,7 @@ describe.skipIf(skipWithoutDatabase)("runIngestion (PostgreSQL, fake sources)", 
       updated: 0,
       unchanged: 4,
       rejected: 0,
+      skipped: 0,
     });
     // Unchanged means not written at all: fetched_at/updated_at stay (D-017).
     expect(await storedRows(schema, "zrodlo-a")).toEqual(before);
@@ -578,7 +579,7 @@ describe.skipIf(skipWithoutDatabase)("runIngestion source selection (PostgreSQL)
     });
     const request = (sourceIds: string[]): IngestionRequest => ({
       sourceIds,
-      publicationDate: DAY,
+      days: { mode: "range", from: DAY, to: DAY },
       maxRecords: 10,
     });
 
@@ -601,9 +602,9 @@ describe.skipIf(skipWithoutDatabase)("runIngestion source selection (PostgreSQL)
 
   it("refuses an invalid date or limit", async () => {
     const source = fakeSource("zrodlo-s2", []);
-    await expect(ingest(schema, [source], { publicationDate: "2026-02-30" })).rejects.toThrow(
-      IngestionRequestError,
-    );
+    await expect(
+      ingest(schema, [source], { days: { mode: "range", from: "2026-02-30", to: "2026-02-30" } }),
+    ).rejects.toThrow(IngestionRequestError);
     await expect(ingest(schema, [source], { maxRecords: 0 })).rejects.toThrow(
       IngestionRequestError,
     );
@@ -862,6 +863,7 @@ describe.skipIf(skipWithoutDatabase)("recordIngestionRun and migration 0002 (Pos
         updated: 1,
         unchanged: 0,
         rejected: 1,
+        skipped: 0,
       },
       incomplete: [],
       errorCode: null,
@@ -882,6 +884,7 @@ describe.skipIf(skipWithoutDatabase)("recordIngestionRun and migration 0002 (Pos
     expect(await migrateToLatest(schema.db)).toEqual([
       "0002_ingestion_runs",
       "0003_opportunities_tender_id",
+      "0004_notice_updates",
     ]);
     expect(await getSource(schema.db, "bzp")).toMatchObject({
       name: "BZP (wyłączone przez operatora)",

@@ -2,11 +2,13 @@
 
 Current phase: PHASE 1 — DATA PIPELINE
 Current PR: PR-03 — Ingestion, Normalization & Deduplication
-Status: Part A (ingestion core) merged in PR #4 (head 6263cd8). The owner-review follow-up
-round (docs, `tender_id`, lock busy → skipped, `health` schema check) arrived after the merge
-and is in a follow-up PR; Code & Safety re-review PASS, Quality Review ACCEPT WITH NOTES (notes
-applied); awaiting owner verification. Part B (BZP notice updates + normalization helpers) not
-started.
+Status: Part A (ingestion core) merged in PR #4 (head 6263cd8); its owner-review follow-up
+round (docs, `tender_id`, lock busy → skipped, `health` schema check) merged in PR #5
+(e71decc). Part B (BZP notice updates + catch-up of missed days; owner split: normalization
+helpers moved unchanged to Part C) implemented. Code & Safety Review PASS with findings → fix
+round (M1, M2, L3–L5) → C&S re-review PASS; Quality Review REJECT (documentation only, AC1–AC9
+met) → documentation fix round → C&S check PASS → Quality re-review ACCEPT. PR ready for the
+owner's review.
 
 ## Completed
 
@@ -103,9 +105,70 @@ started.
 
 ## In progress
 
-**PR-03 — Part A (ingestion core)** — merged in PR #4; the owner-review follow-up round is in
-a follow-up PR (Code & Safety re-review PASS, Quality Review ACCEPT WITH NOTES); awaiting owner
-verification of that PR (scope split
+**PR-03 — Part B (BZP notice updates + catch-up)** — implemented; Code & Safety Review PASS
+with findings → fix round → C&S re-review PASS; Quality Review REJECT (documentation only,
+AC1–AC9 met) → documentation fix round → C&S check PASS → Quality re-review ACCEPT; PR
+opened for the owner's review (not merged). Owner
+decisions: the update goes to the older row of `(source_id, tender_id)`; catch-up via
+`--from/--to` and automatically without a day option; PR-03 split (B = updates + catch-up,
+C = normalization helpers; only the Warsaw-local → UTC helper is in B).
+
+- BZP adapter fetches a third type, `NoticeUpdateNotice` (last, same per-type limits),
+  dispatching every record on its own `noticeType`; update records read only `noticeNumber`,
+  `publicationDate`, `tenderId`, `htmlBody` (≤ 200 000 chars, longer → rejected).
+  `NormalizeResult` gains `kind` (`opportunity` | `notice_update`); `NoticeUpdate` domain
+  schema (`src/domain/notice-update.ts`).
+- `src/sources/bzp/notice-update.ts`: linear text scan of `htmlBody` (comments, script, style,
+  attributes ignored; an unclosed tag, comment, script or style anywhere → rejected as
+  `invalid source fields: htmlBody`); applies only a change of an
+  "Ogłoszenie o zamówieniu" (3.1) with one 3.4.1.) / "8.1. Termin składania ofert" block, value
+  after "Po zmianie:" as `YYYY-MM-DD HH:MM` Europe/Warsaw → UTC (`src/sources/warsaw-time.ts`;
+  DST gap/overlap → rejected). Linked only by `tenderId` (section 3.2 unused, D-015).
+- Migration `0004_notice_updates`: `opportunities.deadline_update_notice` /
+  `deadline_update_published_at` (both null or both set) and `ingestion_runs.skipped`.
+  `applyDeadlineUpdate`: one atomic `UPDATE` of the older row
+  (`published_at ASC NULLS LAST, first_seen_at ASC, id ASC`) when the stored provenance is
+  absent or older by `(published_at, notice number)`; result `updated` / `unchanged` /
+  `skipped` (`no_original`, `superseded`). Upserts keep a deadline set by an update (AC4).
+  Skips (`no_tender_id`, `not_contract_notice_change`, `no_deadline_change`, `no_original`,
+  `superseded`) counted in `skipped` and logged at info without HTML.
+- Catch-up (D-021, `src/ingestion/catch-up.ts`, `lastCoveredDay`): `ingest --from/--to`
+  (≤ 31 days, counted before any list is built; days in 2000–2999 only) and, without a day option, per source the days after the last covered day up to
+  yesterday UTC (covered = `succeeded`/`incomplete` run started after the day ended); fresh
+  source → yesterday only; > 31 days → newest 31 + `clipped`; a failed day stops the source's
+  later days (`notRun`). Report: `mode`, `from`, `to`, `runs[].publicationDate`, `notRun`,
+  `clipped`.
+- `source:preview` lists updates (`noticeUpdates` count, `updates` list), never applies them.
+- Docs: DECISIONS D-015 (amended), D-019 (busy report shape), D-021 (new); PR_PLAN (split,
+  AC 7–9 for catch-up, PR-03C); ARCHITECTURE, README, SECURITY §8/§12, fixture README.
+- Code & Safety Review: PASS with findings; fix round:
+  - M1: `daysBetween` listed days before the 31-day check and never ended past year 9999
+    (`"+010000-…"` sorts before `"9999-…"`), so `ingest --date 9999-12-31` hung under the lock.
+    Now the span is counted arithmetically (`daySpan`) before any list is built (CLI and
+    `runIngestion`), `daysBetween` loops on numeric time and throws above 31 days, catch-up
+    compares day counts, and `ingest` accepts days in 2000–2999 only (`isIngestDay`; usage
+    error otherwise; `source:preview` unchanged).
+  - M2/L4: operator notes in D-015/D-021 and README (re-run the following days after a
+    backfill so `no_original` updates get applied; manual `--date` of a later day after a
+    failed day; a day that always fails).
+  - L3: `textSegments` reports an early stop; an unclosed tag, comment, script or style
+    anywhere now rejects the record (`invalid source fields: htmlBody`, warn) instead of a
+    `no_deadline_change` skip.
+  - L5: open item under Next action.
+- Quality Review: REJECT on documentation only; fix round:
+  - STATE header/In progress made consistent, the pre-PR-03B notes rewritten as post-PR-03B
+    caveats for PR-05, a new Last verification entry.
+  - README: the D-020/D-014 paragraphs moved back out of the operator-notes list; timeout and
+    `--limit` described per source and day (also ARCHITECTURE §4.3/§6, SECURITY, D-021);
+    first-deployment recipe in "Cron"; the two meanings of "skipped" defined.
+  - Small contracts: both captured `SmallContractNotice` originals have `tenderId` = `null`, so
+    no update can be linked to them — recorded in D-015 and Next action item 6.
+  - `clipped[].firstSkipped/lastSkipped` renamed to `from`/`to` (code, tests, D-021, README,
+    ARCHITECTURE); the `ingest` usage text defines a covered day; D-015 wording ("do PR-03B
+    nie pobierał").
+
+**PR-03 — Part A (ingestion core)** — merged in PR #4; the owner-review follow-up round
+merged in PR #5 (e71decc) (scope split
 recorded in `docs/PR_PLAN.md` → PR-03 „Podział”; acceptance criteria 1–4):
 
 - `src/ingestion/fingerprint.ts` (D-016): `fingerprint` = SHA-256 of
@@ -230,7 +293,7 @@ recorded in `docs/PR_PLAN.md` → PR-03 „Podział”; acceptance criteria 1–
 
 ## Decisions made
 
-See `docs/DECISIONS.md` (D-001 … D-020). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
+See `docs/DECISIONS.md` (D-001 … D-021). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
 on `node:https` with pinned lookup, no HTTP library) accepted in PR-02 Part A; D-015 (first
 source: BZP through the official API) in PR-02 Part B; PR-03 Part A: D-016 (fingerprint and
 `content_hash` format), D-017 (`unchanged` writes nothing, no `last_seen_at`), D-018 (ingest
@@ -238,35 +301,46 @@ limit 1000 per notice type, 10-min source timeout, streaming), D-019 (advisory l
 (source selection and configuration errors). The PR-03A owner-review round amended D-015
 (notice-update limitation, `tenderId` mapping), D-016 (`tenderId` in `content_hash`), D-019
 (lock busy → skipped, exit 0) and D-020 (readiness = no pending migrations) without new IDs.
+PR-03 Part B: D-015 amended (notice updates: linking by `tenderId` only, older-row rule,
+latest published update wins, provenance columns, skip reasons), D-019 (busy report shape),
+D-021 (ingest day ranges and automatic catch-up).
 
 ## Next action
 
-1. Owner verifies the PR-03A follow-up PR (owner-review round after PR #4 was merged; Code &
-   Safety re-review PASS, Quality Review ACCEPT WITH NOTES).
+1. Owner reviews and merges the PR-03 Part B PR (BZP notice updates + catch-up). Quality
+   re-review nits left for later: D-018 body amended by the coordinator; the `ingest` usage
+   line "reported as clipped, from-to)…" could be rewrapped (cosmetic).
 2. Owner verifies PR-02 AC1 outside the container (command and checklist under Blockers); a
    first live `ingest bzp --date <past weekday>` on the same machine is a useful follow-up
-   check (exit 0, `inserted` > 0, a second run all `unchanged`).
-3. PR-03 Part B — BZP notice updates (`NoticeUpdateNotice` linked by `tender_id`, new
-   deadline from `htmlBody`, never guessed; see the notes below and `docs/PR_PLAN.md`) and
-   normalization helpers (`docs/PR_PLAN.md` → PR-03 „Podział”): whitespace,
-   HTML → text from `htmlBody` (description, contact, value), dates in Europe/Warsaw,
-   voivodeships/counties, category dictionary (CPV → MVP categories), invalid published e-mail
-   → `contact.raw` instead of rejecting the notice, pseudonymised HTML fixtures. Note: adding
-   description/contact/value changes `content_hash`, but only rows fetched again become
-   `updated` (D-016). The daily cron fetches only yesterday, so older rows are neither marked
-   nor enriched: Part B must document a backfill step (`ingest --date …` for every publication
-   day whose notices still have open deadlines). Backfill re-ingests the originals with their
-   original `submittingOffersDate`, so it must not undo a deadline already taken from a later
-   `NoticeUpdateNotice` (PR-03B AC4), and it must also cover the update notices of those days
-   (the latest published update wins, AC5).
+   check (exit 0, `inserted` > 0, a second run all `unchanged`; `skipped` > 0 and some
+   `updated` from `NoticeUpdateNotice` when originals of that day's updates are stored).
+3. PR-03 Part C — normalization helpers (`docs/PR_PLAN.md` → PR-03C): whitespace,
+   HTML → text from `htmlBody` (description, contact, value), dates in Europe/Warsaw in
+   general, voivodeships/counties, category dictionary (CPV → MVP categories), invalid
+   published e-mail → `contact.raw` instead of rejecting the notice, pseudonymised HTML
+   fixtures. Note: adding description/contact/value changes `content_hash`, but only rows
+   fetched again become `updated` (D-016); a backfill (`ingest --from/--to`, ≤ 31 days per
+   call) re-ingests the originals and keeps deadlines set by update notices (PR-03B AC4).
 4. Open points carried from D-015/PR-02 for PR-03: whether the API's publication-day boundary
    is UTC or Polish time (cron at ~06:00 Europe/Warsaw ingests yesterday UTC; overlapping days
    are harmless thanks to dedup) — verify on the first live runs.
-5. Open question for PR-03B/PR-05 (Quality Review N6): BZP cancellation notices (a tender
-   withdrawn → status `cancelled`) have no plan item yet. Without one the digest may show
-   cancelled tenders as open; decide in PR-03B whether to fetch and apply them like
-   `NoticeUpdateNotice` (by `tenderId`), or record the limitation for PR-05.
-6. Deferred in Part A: fingerprint variant for sources with neither an external id nor a
+5. Open question for PR-03C/PR-05 (Quality Review N6): BZP cancellation notices (a tender
+   withdrawn → status `cancelled`) have no plan item yet and are not handled by PR-03B
+   (recorded in D-015). Without one the digest may show cancelled tenders as open; decide
+   whether to fetch and apply them like `NoticeUpdateNotice` (by `tenderId`), or record the
+   limitation for PR-05.
+6. Open item from the PR-03B reviews (C&S L5, Quality Review): deadline changes of small
+   contracts are effectively not applied. Both captured `SmallContractNotice` originals
+   (fixture 2026-10-29) have `tenderId` = `null`, and updates are linked only by `tenderId`, so
+   no update can reach them whatever section 3.1 says. Verify on live data both questions:
+   (a) do small-contract originals ever carry a `tenderId`; (b) how section 3.1 "Nazwa
+   zmienianego ogłoszenia" reads in a `NoticeUpdateNotice` that changes a
+   `SmallContractNotice` (if it is not exactly "Ogłoszenie o zamówieniu", such changes are
+   skipped as `not_contract_notice_change`). Suggested check: `source:preview bzp --date <day>`
+   on a few weekdays — `SmallContractNotice` records in the list and `updates[].skipReason`
+   (`no_original`/`not_contract_notice_change`) of their updates. Until then the stored
+   deadline of a small contract may be outdated (recorded in D-015).
+7. Deferred in Part A: fingerprint variant for sources with neither an external id nor a
    stable URL (D-016; with the first such source); `last_seen_at` (D-017; when a feature needs
    it, e.g. detecting withdrawn notices).
 
@@ -276,22 +350,34 @@ Notes from the Part A Code & Safety Review (for the Quality Review and later):
   `closed`), so re-ingesting a notice after its deadline reports `updated` once. Intended: the
   stored state of the offer changed (D-016, D-017).
 - **BZP notice updates (owner's live query, 2026-10-28; D-015):** changes to a published
-  notice come as a separate notice type, `NoticeUpdateNotice`, which `ingest` does not fetch.
+  notice come as a separate notice type, `NoticeUpdateNotice` (handled since PR-03B; until
+  then `ingest` did not fetch it).
   At least 100 that day (`PageSize=100` returned a full page; 331 `ContractNotice` the same
   day); in 96 of 100 the `htmlBody` concerns the offer submission deadline. An update notice
   has its own `noticeNumber` and links to the original only through `tenderId`
   (`ocds-148610-…`, present in 100/100); its `submittingOffersDate` is `null` — the new
   deadline is only in `htmlBody`. All 100 had the suffix `/01`; the risk of a new version of
   the original as `…/02` is not confirmed.
-  - **PR-03A AC2** (change detected as `updated`) is met mechanically, but for BZP it will not
-    happen in production — it depends on PR-03B (scope and AC in `docs/PR_PLAN.md`).
-  - **PR-05 must not rely on the stored `deadline` for BZP before PR-03B lands:** "skip
-    notices past their deadline" would drop tenders whose deadline was extended.
+  - **PR-03A AC2** (change detected as `updated`): since PR-03B a BZP deadline change reaches
+    the stored row through `NoticeUpdateNotice` and is counted as `updated`.
+  - **PR-05 and the stored BZP `deadline` (after PR-03B):** PR-05 may rely on the deadline of
+    a `ContractNotice` row being updated by `NoticeUpdateNotice` for the days that were
+    ingested in order. It still may not rely on it for: small contracts (`SmallContractNotice`
+    — originals without `tenderId`, see Next action item 6); days that were clipped
+    (`clipped`) or never recovered (`failed` days skipped by the operator, `notRun`);
+    `no_original` skips after an out-of-order backfill until the following days are
+    re-ingested (D-021 operator notes). For those, "skip notices past their deadline" can still
+    drop a tender whose deadline was extended.
 - **PR-04/05:** the stored `status` stays `open` after the deadline for rows that are never
   re-fetched, so matching and the digest must decide "still open" from `deadline` vs now, not
   from the stored `status`.
 
 Notes from Part B (for later PRs):
+
+- PR-03B observability (Quality Review): deadline updates are counted in `updated` together
+  with changed notices, and skip reasons are visible only in info logs (`notice update
+skipped`). If operators need the rates, per-reason skip counts in the summary log line are
+  the simple next step — out of PR-03B scope.
 
 - `tests/fixtures/bzp/README.md`: the exact `NoticeType`/`PageSize` of the captured empty day are not
   recorded (written as `…`); the body `[]` is the real response.
@@ -370,6 +456,24 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-10-30, PR-03 Part B Quality Review fix round (documentation; `clipped` `from`/`to`
+rename; `ingest` usage text; Node 22.22.0, pnpm 10.28.0, PostgreSQL 16):
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 740/740 tests passed (26 files; same count as after the Code &
+Safety fix round, which added 16 tests to the 724 below). No dependency changes, no live network
+calls. Existing tests changed only for the `clipped` field rename (`firstSkipped`/`lastSkipped`
+→ `from`/`to`) in `tests/catch-up.test.ts` and `tests/integration/catch-up.test.ts`.
+
+2026-10-30, PR-03 Part B Coder session (Node 22.22.0, pnpm 10.28.0, PostgreSQL 16):
+`TEST_DATABASE_URL=… REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 724/724
+tests passed (26 files; before: 625 in 21 files). No dependency changes. No live network
+calls (fixtures and fake sources only). Existing tests changed only where the contract changed
+on purpose: BZP adapter request lists/document counts (+ `NoticeUpdateNotice`) and `kind`
+guards, fake source `kind`, `runIngestion` request/outcome shape (`days`, `IngestionOutcome`),
+`skipped` counter, exact migration lists (+ `0004`), ingest CLI usage/report shape (`mode`,
+`from`, `to`, `notRun`, `clipped`, `publicationDate` per run), `source:preview` request lists
+and `noticeUpdates`.
 
 2026-10-30, PR-03 Part A owner-review follow-up (docs, `tender_id`, lock busy → skipped,
 `health` schema check; Node 22.22.0, pnpm 10.28.0, PostgreSQL 16):

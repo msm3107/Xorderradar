@@ -1,4 +1,5 @@
 import type { Kysely } from "kysely";
+import type { NoticeUpdate } from "./domain/notice-update.js";
 import { checkHealth } from "./health.js";
 import { ConfigError, loadConfig, type AppConfig } from "./infrastructure/config.js";
 import {
@@ -16,14 +17,22 @@ import {
   type SafeHttpClientOptions,
 } from "./infrastructure/http/safe-http-client.js";
 import { createLogger, type Logger } from "./infrastructure/logger.js";
+import {
+  daySpan,
+  INGEST_MAX_DAY,
+  INGEST_MAX_DAYS,
+  INGEST_MIN_DAY,
+  isIngestDay,
+  yesterdayUtc,
+} from "./ingestion/catch-up.js";
 import { INGEST_LOCK_KEY, withIngestLock, type LockResult } from "./ingestion/lock.js";
 import {
   IngestionRequestError,
   overallStatus,
   runIngestion,
   SchemaNotReadyError,
+  type IngestionOutcome,
   type IngestionRequest,
-  type IngestionRunResult,
 } from "./ingestion/run.js";
 import { previewSource, type SourcePreview } from "./sources/preview.js";
 import { sourceAdapters } from "./sources/registry.js";
@@ -67,7 +76,7 @@ export interface CliSourceDeps {
   readonly now: () => Date;
   /** Run-level timeout of one source run (docs/SECURITY.md §4). */
   readonly runTimeoutMs: number;
-  /** Timeout of one source within `ingest`; INGEST_SOURCE_TIMEOUT_MS when absent. */
+  /** Timeout of one source and day within `ingest`; INGEST_SOURCE_TIMEOUT_MS when absent. */
   readonly ingestTimeoutMs?: number;
 }
 
@@ -81,16 +90,18 @@ export interface CliDeps {
 
 /**
  * Bounds a whole `source:preview` run. Its default limit needs one request per
- * notice type; the 500-record maximum (per notice type) about 40 requests at
- * >= 2 s each.
+ * notice type (3 for BZP); the 500-record maximum (per notice type) up to
+ * 3 × 20 requests at >= 2 s each (>= 120 s).
  */
 export const SOURCE_RUN_TIMEOUT_MS = 5 * 60_000;
 
 /**
- * Bounds one source within `ingest` (D-018). The default limit of 1000
- * records per notice type is at most 2 × 40 pages for BZP, i.e. 80 requests
- * spaced >= 2 s apart (>= 160 s) plus response and write time; 10 minutes
- * leaves about 7 s per request.
+ * Bounds one source and one publication day within `ingest` (D-018). The
+ * default limit of 1000 records per notice type is at most 3 × 40 pages for
+ * BZP (contract notices, small contracts, notice updates), i.e. 120 requests
+ * spaced >= 2 s apart (>= 240 s) plus response and write time; 10 minutes
+ * leaves about 5 s per request. A run covers up to INGEST_MAX_DAYS days, each
+ * with its own timeout: the worst case is 31 × 10 min per source (D-021).
  */
 export const INGEST_SOURCE_TIMEOUT_MS = 10 * 60_000;
 
@@ -152,18 +163,27 @@ Commands:
   migrate   Apply pending database migrations; prints the applied names (none when up to date).
   source:preview <sourceId> [--date YYYY-MM-DD] [--limit N]
             Fetch the notices a source published on one day and print them normalized as
-            JSON; nothing is stored. Requires CRAWLER_CONTACT.
+            JSON, with the notice updates listed separately (new deadline or skip reason);
+            nothing is stored. Requires CRAWLER_CONTACT.
             Sources: ${[...sourceAdapters.keys()].join(", ")}.
             --date   publication day, default yesterday (UTC)
             --limit  max records per notice type, 1-${String(PREVIEW_MAX_LIMIT)}, default ${String(PREVIEW_DEFAULT_LIMIT)}
-  ingest [sourceId...] [--date YYYY-MM-DD] [--limit N]
-            Fetch and store the notices published on one day, with deduplication and change
-            detection, from the given sources or all enabled ones; prints a JSON summary and
-            records each source run. One run at a time (lock): while another run holds it,
+  ingest [sourceId...] [--date YYYY-MM-DD | --from YYYY-MM-DD --to YYYY-MM-DD] [--limit N]
+            Fetch and store the notices published on the given days, with deduplication and
+            change detection, and apply published notice updates (new offer deadlines), from
+            the given sources or all enabled ones; prints a JSON summary and records each
+            source's run per day. Without --date/--from/--to: catch-up, i.e. per source every
+            day after the last day it covered (a succeeded or incomplete run started after
+            that day ended) up to yesterday (UTC); yesterday only for a source that covered
+            none; at most the ${String(INGEST_MAX_DAYS)} days ending yesterday (older missing days are
+            reported as clipped, from-to). Days run in order; a failed day stops that source's later
+            days (reported as notRun). One run at a time (lock): while another run holds it,
             prints status "skipped" and exits 0 without fetching. Requires CRAWLER_CONTACT
             and an up-to-date schema (migrate). Exit 1 when any source failed.
-            --date   publication day, default yesterday (UTC)
-            --limit  max records per notice type, 1-${String(INGEST_MAX_LIMIT)}, default ${String(INGEST_DEFAULT_LIMIT)}
+            --date   one publication day (days from ${INGEST_MIN_DAY} to ${INGEST_MAX_DAY})
+            --from, --to
+                     a range of publication days, both included, at most ${String(INGEST_MAX_DAYS)} days
+            --limit  max records per notice type and day, 1-${String(INGEST_MAX_LIMIT)}, default ${String(INGEST_DEFAULT_LIMIT)}
 `;
 
 type Command = "health" | "migrate" | "source:preview" | "ingest";
@@ -179,10 +199,16 @@ interface PreviewArgs {
   readonly limit: number;
 }
 
+/** `date`: --date; `range`: --from/--to; `catch_up`: neither (the default, D-021). */
+type IngestDays =
+  | { readonly mode: "date"; readonly date: string }
+  | { readonly mode: "range"; readonly from: string; readonly to: string }
+  | { readonly mode: "catch_up" };
+
 interface IngestArgs {
   /** Empty: every enabled source. */
   readonly sourceIds: readonly string[];
-  readonly publicationDate: string;
+  readonly days: IngestDays;
   readonly limit: number;
 }
 
@@ -200,11 +226,6 @@ function isCalendarDate(value: string): boolean {
   return (
     date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
   );
-}
-
-/** The previous calendar day in UTC. */
-function yesterdayUtc(now: Date): string {
-  return new Date(now.getTime() - 86_400_000).toISOString().slice(0, 10);
 }
 
 /** Returns the parsed arguments or a usage error message. */
@@ -243,14 +264,45 @@ function parsePreviewArgs(args: readonly string[], sources: CliSourceDeps): Prev
   };
 }
 
+const INGEST_DAY_OPTIONS = ["--date", "--from", "--to"] as const;
+type IngestDayOption = (typeof INGEST_DAY_OPTIONS)[number];
+
+function isIngestDayOption(value: string): value is IngestDayOption {
+  return (INGEST_DAY_OPTIONS as readonly string[]).includes(value);
+}
+
+/** The day options as given (each already a calendar date) → the days, or a usage error. */
+function ingestDays(dates: ReadonlyMap<IngestDayOption, string>): IngestDays | string {
+  const date = dates.get("--date");
+  const from = dates.get("--from");
+  const to = dates.get("--to");
+  if (date !== undefined) {
+    if (from !== undefined || to !== undefined) {
+      return "Option --date cannot be combined with --from/--to.";
+    }
+    return { mode: "date", date };
+  }
+  if (from === undefined && to === undefined) return { mode: "catch_up" };
+  if (from === undefined || to === undefined) {
+    return "Options --from and --to must be given together.";
+  }
+  if (from > to) return "--from must not be after --to.";
+  // Counted, never listed: a wide range is refused without building it.
+  if (daySpan(from, to) > INGEST_MAX_DAYS) {
+    return `--from/--to may cover at most ${String(INGEST_MAX_DAYS)} days.`;
+  }
+  return { mode: "range", from, to };
+}
+
 /**
- * `ingest [sourceId...] [--date YYYY-MM-DD] [--limit N]`. Source ids must be
- * supported by this build (enabled in the database is checked later, before
- * any fetch). Returns the parsed arguments or a usage error message.
+ * `ingest [sourceId...] [--date D | --from A --to B] [--limit N]`. Source
+ * ids must be supported by this build (enabled in the database is checked
+ * later, before any fetch). Returns the parsed arguments or a usage error
+ * message.
  */
 function parseIngestArgs(args: readonly string[], sources: CliSourceDeps): IngestArgs | string {
   const sourceIds: string[] = [];
-  let publicationDate: string | null = null;
+  const dates = new Map<IngestDayOption, string>();
   let limit: number | null = null;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index] ?? "";
@@ -260,14 +312,19 @@ function parseIngestArgs(args: readonly string[], sources: CliSourceDeps): Inges
       sourceIds.push(arg);
       continue;
     }
-    if (arg !== "--date" && arg !== "--limit") return `Unexpected argument: ${JSON.stringify(arg)}`;
+    if (!isIngestDayOption(arg) && arg !== "--limit") {
+      return `Unexpected argument: ${JSON.stringify(arg)}`;
+    }
     const value = args[index + 1];
     if (value === undefined) return `Option ${arg} needs a value.`;
     index++;
-    if (arg === "--date") {
-      if (publicationDate !== null) return "Option --date given twice.";
-      if (!isCalendarDate(value)) return "--date must be a calendar date YYYY-MM-DD.";
-      publicationDate = value;
+    if (isIngestDayOption(arg)) {
+      if (dates.has(arg)) return `Option ${arg} given twice.`;
+      if (!isCalendarDate(value)) return `${arg} must be a calendar date YYYY-MM-DD.`;
+      if (!isIngestDay(value)) {
+        return `${arg} must be a day from ${INGEST_MIN_DAY} to ${INGEST_MAX_DAY}.`;
+      }
+      dates.set(arg, value);
     } else {
       if (limit !== null) return "Option --limit given twice.";
       if (!/^[1-9]\d{0,3}$/.test(value) || Number(value) > INGEST_MAX_LIMIT) {
@@ -276,11 +333,9 @@ function parseIngestArgs(args: readonly string[], sources: CliSourceDeps): Inges
       limit = Number(value);
     }
   }
-  return {
-    sourceIds,
-    publicationDate: publicationDate ?? yesterdayUtc(sources.now()),
-    limit: limit ?? INGEST_DEFAULT_LIMIT,
-  };
+  const days = ingestDays(dates);
+  if (typeof days === "string") return days;
+  return { sourceIds, days, limit: limit ?? INGEST_DEFAULT_LIMIT };
 }
 
 /** Returns the invocation or a usage error message. */
@@ -427,6 +482,25 @@ function countReasons(preview: SourcePreview): Record<string, number> {
 }
 
 /**
+ * A notice update as `source:preview` lists it: the new deadline it carries,
+ * or why ingestion would skip it on its own. Whether an original is stored
+ * (`no_original`) or a later update applied (`superseded`) is only known when
+ * ingesting: nothing is read from the database here.
+ */
+function previewUpdate(update: NoticeUpdate) {
+  const { change } = update;
+  const skipReason =
+    update.tenderId === null ? "no_tender_id" : change.kind === "none" ? change.reason : null;
+  return {
+    externalId: update.externalId,
+    tenderId: update.tenderId,
+    publishedAt: update.publishedAt,
+    deadline: change.kind === "deadline" ? change.deadline : null,
+    skipReason,
+  };
+}
+
+/**
  * `source:preview`: one bounded source run (record limit, page limits in the
  * adapter, run timeout) through a fresh SafeHttpClient, printed as JSON on
  * stdout. Nothing is stored. Log lines (JSON on stderr) carry the sourceId,
@@ -497,6 +571,7 @@ async function runSourcePreview(
     documents: preview.documents,
     extracted: preview.extracted,
     normalized: preview.candidates.length,
+    noticeUpdates: preview.updates.length,
     rejected: preview.rejections.length,
   };
   logger.info("source preview finished", {
@@ -517,6 +592,7 @@ async function runSourcePreview(
     incomplete: preview.incomplete,
     rejections: preview.rejections,
     records: preview.candidates,
+    updates: preview.updates.map(previewUpdate),
   };
   io.stdout(`${JSON.stringify(report)}\n`);
   return ExitCode.Ok;
@@ -524,7 +600,8 @@ async function runSourcePreview(
 
 /**
  * `ingest`: runs the sources under the ingest lock (one run at a time, D-019)
- * and prints a JSON summary on stdout. Each source's run is stored in
+ * over the requested days or catch-up (D-021) and prints a JSON summary on
+ * stdout. Each source's run per day is stored in
  * `ingestion_runs` and logged (sourceId, status, counters, duration) by
  * runIngestion. Exit 0 when every source succeeded or was incomplete, and
  * when another run holds the lock (status `skipped`, reason `lock_busy`:
@@ -548,13 +625,24 @@ async function runIngest(
   }
   if (database.withIngestLock === undefined) throw new Error("database cannot run ingest");
   const logger = createLogger(config.logLevel, io.stderr);
+  const { days } = args;
   const request: IngestionRequest = {
     ...(args.sourceIds.length > 0 ? { sourceIds: args.sourceIds } : {}),
-    publicationDate: args.publicationDate,
+    days:
+      days.mode === "date"
+        ? { mode: "range", from: days.date, to: days.date }
+        : days.mode === "range"
+          ? days
+          : { mode: "catch_up" },
     maxRecords: args.limit,
   };
+  // Known up front except for catch-up, whose days are planned under the lock.
+  const requested =
+    request.days.mode === "range"
+      ? { from: request.days.from, to: request.days.to }
+      : { from: null, to: null };
 
-  let locked: LockResult<IngestionRunResult[]>;
+  let locked: LockResult<IngestionOutcome>;
   try {
     locked = await database.withIngestLock(
       (db, signal) =>
@@ -600,23 +688,30 @@ async function runIngest(
     const skipped = {
       status: "skipped",
       reason: "lock_busy",
-      publicationDate: args.publicationDate,
+      mode: days.mode,
+      ...requested,
       limit: args.limit,
       runs: [],
+      notRun: [],
+      clipped: [],
     };
     io.stdout(`${JSON.stringify(skipped)}\n`);
     io.stderr("Ingest skipped: another ingest run holds the lock; nothing was fetched.\n");
     return ExitCode.Ok;
   }
-  const runs = locked.value;
+  const outcome = locked.value;
+  const { runs } = outcome;
   // Without the lock another run may have started: never report success.
   const status = locked.lockLost ? "failed" : overallStatus(runs);
   const report = {
     status,
-    publicationDate: args.publicationDate,
+    mode: days.mode,
+    from: outcome.from,
+    to: outcome.to,
     limit: args.limit,
     runs: runs.map((run) => ({
       sourceId: run.sourceId,
+      publicationDate: run.publicationDate,
       runId: run.runId,
       status: run.status,
       startedAt: run.startedAt,
@@ -626,6 +721,8 @@ async function runIngest(
       incomplete: run.incomplete,
       errorCode: run.errorCode,
     })),
+    notRun: outcome.notRun,
+    clipped: outcome.clipped,
   };
   io.stdout(`${JSON.stringify(report)}\n`);
   if (status !== "failed") return ExitCode.Ok;

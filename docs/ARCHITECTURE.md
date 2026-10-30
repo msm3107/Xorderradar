@@ -8,9 +8,11 @@
 > oficjalne API (`src/sources/`, D-015) — i komendę `source:preview` (część B), bez zapisu do
 > bazy. PR-03 część A dodaje zapis: `src/ingestion/` (fingerprint, `content_hash`, przebieg
 > `runIngestion`, blokada), tabelę `ingestion_runs` (migracja `0002_ingestion_runs`), kolumnę
-> `opportunities.tender_id` (migracja `0003`) i komendę `ingest`; część B — później: obsługa
-> zmian ogłoszeń BZP (`NoticeUpdateNotice`, D-015) i helpery normalizacji (białe znaki, HTML → tekst, daty
-> Europe/Warsaw, województwa/powiaty, CPV → kategorie, fallback kontaktu do `contact.raw`). Wszystko poniżej oznaczone
+> `opportunities.tender_id` (migracja `0003`) i komendę `ingest`; część B — obsługę zmian
+> ogłoszeń BZP (`NoticeUpdateNotice`, D-015; migracja `0004_notice_updates`) i nadrabianie
+> pominiętych dni (`ingest --from/--to`, D-021); część C — później: helpery normalizacji (białe
+> znaki, HTML → tekst, daty Europe/Warsaw, województwa/powiaty, CPV → kategorie, fallback
+> kontaktu do `contact.raw`). Wszystko poniżej oznaczone
 > _(plan, PR-xx)_ to projekt docelowy — kontrakty mogą zostać doprecyzowane w danym PR, a
 > zmiana musi trafić do tego dokumentu i do `docs/DECISIONS.md`.
 
@@ -53,7 +55,9 @@ src/
 │   └── http/               # SafeHttpClient: polityka URL/IP, retry, limity      [PR-02]
 ├── domain/                 # typy + schematy zod: Source, Opportunity, CompanyProfile [PR-01]
 ├── sources/                # kontrakt adaptera, rejestr, podgląd; bzp/ = BZP    [PR-02]
+│                           # warsaw-time.ts: czas lokalny Europe/Warsaw → UTC   [PR-03B]
 ├── ingestion/              # fingerprint, content_hash, runIngestion, blokada ingest [PR-03A]
+│                           # catch-up.ts: plan dni nadrabiania                  [PR-03B]
 ├── matching/               # scoring + wyjaśnienie                             (plan, PR-04)
 ├── notifications/          # digest, szablon, wysyłka, idempotencja            (plan, PR-05)
 └── web/                    # minimalny UI renderowany po stronie serwera       (plan, PR-06)
@@ -149,21 +153,26 @@ interface SourceAdapter<TNotice = unknown> {
   wartości ze źródła), więc można go logować i grupować.
 - `normalize` zwraca `OpportunityCandidate` (`src/domain/opportunity.ts`) = `OpportunityDraft`
   bez `fingerprint` i `contentHash`: te liczy ingestion (PR-03) według reguł z §5, więc
-  adapter nie zna ich definicji. Wspólny kształt pól, ta sama reguła waluty.
+  adapter nie zna ich definicji. Wspólny kształt pól, ta sama reguła waluty. Od PR-03B wynik
+  ma `kind`: `opportunity` (`candidate`) albo `notice_update` (`update`: `NoticeUpdate` z
+  `src/domain/notice-update.ts` — `sourceId`, `externalId` = numer ogłoszenia o zmianie,
+  `tenderId` lub `null`, `publishedAt`, `fetchedAt`, `change` = `{kind: "deadline", deadline}`
+  albo `{kind: "none", reason}`); zmiany nie są ofertami — stosuje je ingestion.
 - `src/sources/registry.ts` — statyczna mapa `sourceId → adapter`; `src/sources/preview.ts` —
-  `previewSource` (fetch → extract → normalize, bez zapisu; odrzucenia liczone i logowane).
+  `previewSource` (fetch → extract → normalize, bez zapisu; odrzucenia liczone i logowane;
+  zmiany ogłoszeń tylko wypisywane w `updates`, nigdy stosowane).
 
 Adapter **nie zawiera**: logiki dopasowania, wysyłki e-maili, UI, billingu, dostępu do bazy.
 
 **BZP (`src/sources/bzp/`, D-015):** `GET /mo-board/api/v1/notice` na `ezamowienia.gov.pl`,
-typy `ContractNotice` i `SmallContractNotice` po kolei, każdy z własnym limitem rekordów i
-stron (jeden typ nie wypiera drugiego). Paginacja keyset: `PageSize` = min(25, pozostały
+typy `ContractNotice`, `SmallContractNotice` i `NoticeUpdateNotice` (PR-03B) po kolei, każdy
+z własnym limitem rekordów i stron (jeden typ nie wypiera drugiego). Paginacja keyset: `PageSize` = min(25, pozostały
 limit typu), `SearchAfter` = `objectId` ostatniego rekordu
 (tylko poprawny GUID). Koniec typu: pusta lub krótsza strona; przerwanie: limit rekordów,
 40 stron na typ, brak/niepoprawny kursor, powtórzony kursor (strona kończąca się już użytym
 kursorem powtarza zebrane rekordy, więc jest odrzucana), przerwany `signal`. Strona
 dłuższa niż żądany `PageSize` → `SourceFormatError`. Ekstrakcja waliduje tylko używane pola
-(każde ≤ 20 000 znaków), resztę — w tym `htmlBody` — odrzuca. Mapowanie: `sourceUrl` = strona
+(każde ≤ 20 000 znaków), resztę — w tym `htmlBody` ofert — odrzuca. Mapowanie: `sourceUrl` = strona
 ogłoszenia (`/mo-client-board/bzp/notice-details/id/{objectId}`), `externalId` =
 `noticeNumber`, `tenderId` = identyfikator OCDS postępowania (brak, pusty, nie-tekst, dłuższy
 niż 200 znaków, z niepoprawnym Unicode albo ze znakami sterującymi → `null`, bez odrzucania
@@ -173,10 +182,18 @@ kodów `PLxx`, nieznany kod → brak województwa), kategorie = kody CPV w kolej
 bez duplikatów, `status` = `open`/`closed` względem `fetchedAt` albo `unknown` bez terminu;
 opis, kontakt i wartość — `null` (brak pól strukturalnych; kontakt, a czasem wartość, bywają
 tylko w odrzucanym `htmlBody` — kandydat na „HTML → tekst” w PR-03).
-**Zmiany ogłoszeń BZP nie są jeszcze wykrywane:** BZP publikuje je jako osobne
-`NoticeUpdateNotice` (własny `noticeNumber`, powiązanie z pierwotnym ogłoszeniem tylko przez
-`tenderId`, nowy termin tylko w `htmlBody`), których adapter nie pobiera, więc `updated` dla
-BZP w praktyce nie wystąpi, a zapisany `deadline` może być nieaktualny — do PR-03B (D-015).
+**Zmiany ogłoszeń BZP (PR-03B, D-015):** BZP publikuje je jako osobne `NoticeUpdateNotice`
+(własny `noticeNumber`, powiązanie z pierwotnym ogłoszeniem tylko przez `tenderId`, nowy
+termin tylko w `htmlBody`). Rekord jest rozpoznawany po własnym `noticeType`; dla zmiany
+ekstrakcja czyta `noticeNumber`, `publicationDate`, `tenderId` i `htmlBody` (≤ 200 000
+znaków, dłuższy → odrzucenie). `src/sources/bzp/notice-update.ts` (`extractDeadlineChange`)
+czyta `htmlBody` liniowo jako tekst między znacznikami (bez komentarzy, `<script>`, `<style>`
+i atrybutów; niedomknięty znacznik, komentarz, `<script>` lub `<style>` → odrzucenie) i zwraca tylko nowy termin z bloku „3.4.1.)” / „8.1. Termin składania ofert” /
+„Po zmianie:” (`YYYY-MM-DD HH:MM` Europe/Warsaw → UTC, `src/sources/warsaw-time.ts`; godzina
+pominięta lub powtórzona przy zmianie czasu → odrzucenie), gdy zmieniane ogłoszenie to
+„Ogłoszenie o zamówieniu” (sekcja 3.1). Inna zmiana → `change.kind = "none"` ze stałym
+powodem; niejednoznaczna lub niepoprawna → odrzucenie ze stałym powodem. HTML nie jest
+zapisywany ani logowany.
 
 ### 4.2 SafeHttpClient (PR-02, zaimplementowany)
 
@@ -255,16 +272,23 @@ import przestrzeni nazw `ns.SafeHttpClient` — oraz importu pod inną nazwą; t
 (`const C = SafeHttpClient`, `Reflect.construct`), wyłapuje review. Limity w seamie można
 tylko zaostrzyć.
 
-### 4.3 Ingestion (PR-03A, zaimplementowany)
+### 4.3 Ingestion (PR-03A, PR-03B, zaimplementowany)
 
 `src/ingestion/run.ts`:
 
 ```ts
-runIngestion(deps: IngestionDeps, request: IngestionRequest): Promise<IngestionRunResult[]>;
 interface IngestionDeps {
   db; adapters; createHttpClient(adapter); now; logger; sourceTimeoutMs; signal?;
 }
-interface IngestionRequest { sourceIds?: string[]; publicationDate: string; maxRecords: number }
+runIngestion(deps: IngestionDeps, request: IngestionRequest): Promise<IngestionOutcome>;
+interface IngestionRequest { sourceIds?: string[]; days: IngestionDays; maxRecords: number }
+type IngestionDays = { mode: "range"; from: string; to: string } | { mode: "catch_up" };
+interface IngestionOutcome {
+  runs: IngestionRunResult[]; // źródło po źródle, w każdym dni rosnąco
+  notRun: { sourceId; publicationDate; reason: "previous_day_failed" | "aborted" }[];
+  clipped: { sourceId; from; to }[]; // nadrabianie ponad 31 dni
+  from: string | null; to: string | null; // zaplanowane dni (null: nic do zrobienia)
+}
 // IngestionRunResult = IngestionRunSummary (src/domain/ingestion-run.ts) + runId (null = nie zapisano)
 ```
 
@@ -275,14 +299,30 @@ interface IngestionRequest { sourceIds?: string[]; publicationDate: string; maxR
   pobraniem (CLI: kod 2). Niewykonana którakolwiek migracja (`pendingMigrations`, odczyt
   rejestru `kysely_migration`) → `SchemaNotReadyError` przed pobraniem (ingest nie migruje
   sam; CLI: kod 1; D-020).
+- **Dni (PR-03B, D-021):** `range` — każdy dzień od `from` do `to` (dni z lat 2000–2999,
+  najwyżej 31, `INGEST_MAX_DAYS` — liczone arytmetycznie przed zbudowaniem listy; inaczej
+  `IngestionRequestError`). `catch_up` — per źródło, pod blokadą:
+  `lastCoveredDay` (`src/infrastructure/db/ingestion-runs-repository.ts`: najnowszy dzień z
+  przebiegiem `succeeded`/`incomplete` rozpoczętym po końcu tego dnia, UTC) → `catchUpDays`
+  (`src/ingestion/catch-up.ts`): dni od następnego do wczoraj, bez pokrytego dnia — tylko
+  wczoraj, ponad 31 → 31 najnowszych + `clipped` (log warn); nic do zrobienia → log info
+  `nothing to catch up`. Źródła po kolei, w każdym dni rosnąco, jeden przebieg na dzień;
+  `failed` dnia → kolejne dni źródła w `notRun` (`previous_day_failed`, log warn), inne
+  źródła działają dalej; przerwany sygnał → reszta w `notRun` (`aborted`).
 - **Przebieg źródła** (sekwencyjnie, każde izolowane): nowy klient HTTP, `signal` =
-  timeout źródła (`AbortSignal.timeout`, CLI: 10 min, D-018) połączony z sygnałem całego
+  timeout przebiegu źródła i dnia (`AbortSignal.timeout`, CLI: 10 min, D-018) połączony z sygnałem całego
   przebiegu (CLI: sygnał blokady ingest, przerywany przy jej utracie, D-019); `adapter.fetch`
   w trybie `onDocument`, każdy dokument od razu: `extract` → `normalize` → ponowna walidacja
-  kandydata → `fingerprint`/`contentHash` → `ingestOpportunity`. Po przerwaniu sygnału nie
+  kandydata → `fingerprint`/`contentHash` → `ingestOpportunity`; zmiana ogłoszenia
+  (`kind: "notice_update"`, ponowna walidacja `noticeUpdateSchema`, `sourceId` musi być
+  źródłem przebiegu) → `applyDeadlineUpdate` (PR-03B). Po przerwaniu sygnału nie
   startuje kolejny zapis; zapis w toku ogranicza timeout zapytania (30/35 s). Przerwany sygnał
   całego przebiegu → kolejne źródła nie startują (log `ingestion aborted, sources not run`).
-- **Wyniki rekordu:** `inserted` / `updated` / `unchanged` / `rejected`. Odrzucenie przez
+- **Wyniki rekordu:** `inserted` / `updated` / `unchanged` / `rejected` / `skipped`
+  (PR-03B: zmiana ogłoszenia przeczytana, ale celowo niezastosowana — `no_tender_id`,
+  `not_contract_notice_change`, `no_deadline_change`, `no_original`, `superseded`; log info
+  `notice update skipped` ze stałym powodem). Zmiana z nowym terminem zapisana → `updated`,
+  ta sama już zapisana → `unchanged`. Odrzucenie przez
   `normalize` lub `DomainError` repozytorium (np. `duplicate`, `invalid_input`) → `rejected`,
   log warn z kodem i nazwą constraintu, przebieg trwa dalej. Inny błąd zapisu (połączenie,
   timeout) → przebieg źródła `failed` (`database_error`).
@@ -331,7 +371,7 @@ wysyłce wg strategii opisanej w PR-05.
 
 ## 5. Model danych
 
-Stan zgodny z migracjami `0001_core_schema` i `0002_ingestion_runs`
+Stan zgodny z migracjami `0001_core_schema` … `0004_notice_updates`
 (`src/infrastructure/db/migrations.ts`) — źródłem
 prawdy są migracje. Wszystkie kolumny czasu to `timestamptz`; `id` typu uuid generuje
 `gen_random_uuid()`. Statusy to `text` + `CHECK` (a nie typ `enum` PostgreSQL): dodanie
@@ -375,6 +415,11 @@ jawne, bo trafiają do `DomainError.constraint`.
 | `content_hash`    | text              | nie  | wykrywanie zmian treści                                                   |
 | `status`          | text + CHECK      | nie  | `open` / `closed` / `cancelled` / `unknown`; bez wartości domyślnej       |
 
+Od migracji `0004_notice_updates` (PR-03B, D-015) — pochodzenie terminu ustawionego przez
+ogłoszenie o zmianie: `deadline_update_notice text` (numer ogłoszenia o zmianie) i
+`deadline_update_published_at timestamptz` (jego publikacja), obie `NULL`, dopóki żadna
+zmiana nie została zastosowana.
+
 Ograniczenia:
 
 - `opportunities_source_external_id_key` — indeks częściowy
@@ -387,6 +432,8 @@ Ograniczenia:
 - `opportunities_currency_check` — `currency ~ '^[A-Z]{3}$'`,
 - `opportunities_status_check` — `status IN ('open','closed','cancelled','unknown')`,
 - `opportunities_location_check`, `opportunities_contact_check` — jsonb jest obiektem,
+- `opportunities_deadline_update_check` — obie kolumny pochodzenia `NULL` albo obie ustawione,
+  `opportunities_deadline_update_notice_check` — numer niepusty, najwyżej 200 znaków (0004),
 - `opportunities_source_tender_id_idx` — indeks częściowy (nieunikalny, jedno postępowanie ma
   kilka ogłoszeń) `(source_id, tender_id) WHERE tender_id IS NOT NULL` (migracja 0003; pod
   wyszukiwanie pierwotnego ogłoszenia w PR-03B).
@@ -436,6 +483,15 @@ external_id)` zamiast `fingerprint` jest ponawiany jeden raz (D-017). `status` w
 `upsertOpportunity` (PR-01) działa bez zmian (zawsze nadpisuje). Deduplikacja między różnymi
 źródłami — poza MVP.
 
+**Termin ze zmiany (PR-03B, D-015):** `applyDeadlineUpdate` — jedno `UPDATE` starszego wiersza
+`(source_id, tender_id)` (`published_at ASC NULLS LAST, first_seen_at ASC, id ASC`), tylko gdy
+jego `(deadline_update_published_at, deadline_update_notice)` jest puste albo mniejsze niż w
+zmianie; ustawia `deadline`, `status`, pochodzenie i `updated_at`, nie zmienia `fetched_at`,
+`content_hash` ani `fingerprint`. Nic nie zapisano → odczyt rozróżnia `no_original`,
+`unchanged` (ta sama zmiana) i `superseded` (nowsza już zapisana). Upserty (`ingestOpportunity`,
+`upsertOpportunity`) przy wierszu z pochodzeniem zostawiają jego `deadline` i liczą `status` z
+tego terminu i nowego `fetched_at` — ponowne pobranie oryginału nie cofa przedłużenia.
+
 ### `company_profiles` (= subskrypcja)
 
 `id uuid` (PK, `gen_random_uuid()`), `email text` (`company_profiles_email_key` UNIQUE;
@@ -460,7 +516,7 @@ Jeden wiersz na przebieg jednego źródła: `id uuid` (PK), `source_id` (FK →
 `sources`, `ingestion_runs_source_id_fkey`), `publication_date date`, `max_records int`
 (`> 0`), `started_at`/`finished_at timestamptz` (`finished_at >= started_at`), `status`
 (`succeeded`/`incomplete`/`failed`), liczniki `documents`, `extracted`, `inserted`, `updated`,
-`unchanged`, `rejected` (`int >= 0`), `incomplete jsonb` (tablica `{part, reason}`, domyślnie
+`unchanged`, `rejected`, `skipped` (migracja `0004`, domyślnie 0) (`int >= 0`), `incomplete jsonb` (tablica `{part, reason}`, domyślnie
 `[]`), `error_code text` (tylko kod `^[a-z][a-z0-9_]{0,63}$`, nigdy komunikat). Wszystko
 `NOT NULL` poza `error_code`. Constrainty nazwane `ingestion_runs_*_check`; indeks
 `ingestion_runs_source_started_idx (source_id, started_at DESC)` pod „ostatnie przebiegi
@@ -493,20 +549,23 @@ DO NOTHING` — istniejący wiersz, np. wyłączony przez operatora, zostaje bez
   Lokalnie skrypty `pnpm dev|health|start` dodają `--env-file-if-exists=.env` (Node), przy
   czym prawdziwe zmienne środowiskowe mają pierwszeństwo; bezpośrednie `node dist/main.js`
   (produkcja, cron) `.env` nie czyta — zmienne eksportuje środowisko.
-- `ingest [sourceId...] [--date YYYY-MM-DD] [--limit N]` (PR-03A) — pobiera i zapisuje
-  ogłoszenia z dnia publikacji (domyślnie wczoraj według UTC) wybranych źródeł (domyślnie
-  wszystkich włączonych w bazie), do N rekordów na typ ogłoszenia (domyślnie i maks. 1000),
-  timeout 10 min na źródło (D-018). Kolejność kontroli: argumenty (kod 2) → konfiguracja (w
+- `ingest [sourceId...] [--date YYYY-MM-DD | --from YYYY-MM-DD --to YYYY-MM-DD] [--limit N]`
+  (PR-03A, zakresy i nadrabianie PR-03B, D-021) — pobiera i zapisuje ogłoszenia z dnia
+  publikacji (`--date`), z każdego dnia zakresu (`--from/--to`, najwyżej 31 dni) albo —
+  domyślnie — z dni od ostatniego pokrytego do wczoraj według UTC (nadrabianie; świeże źródło:
+  wczoraj) wybranych źródeł (domyślnie wszystkich włączonych w bazie), do N rekordów na typ ogłoszenia i dzień (domyślnie i maks. 1000),
+  timeout 10 min na źródło i dzień (D-018, D-021). Kolejność kontroli: argumenty (kod 2) → konfiguracja (w
   tym `CRAWLER_CONTACT`, kod 1) → baza. Nie migruje sama (oczekujące migracje → kod 1). Wynik:
-  JSON na stdout (`status`, przebiegi z licznikami, `runId`, `errorCode`) + linia logu na
-  źródło. Kod 0, gdy każde źródło `succeeded` lub `incomplete`, a także gdy blokada jest
+  JSON na stdout (`status`, `mode` = `date`/`range`/`catch_up`, `from`, `to`, `limit`,
+  przebiegi z `publicationDate`, licznikami, `runId`, `errorCode`, `notRun`, `clipped`) +
+  linia logu na przebieg. Kod 0, gdy każde źródło `succeeded` lub `incomplete`, a także gdy blokada jest
   zajęta (`status: "skipped"`, nic nie uruchomiono); 1, gdy któreś `failed`, podsumowania nie
   zapisano, blokada została utracona w trakcie (`lock_lost`) albo baza niedostępna; 2 — błąd
   użycia (także źródło niewłączone w bazie).
 - **Blokada ingest (D-019):** `pg_try_advisory_lock(7206120309001)` na sesji jednego,
   dedykowanego połączenia z puli (`db.connection().execute`), zwalniana w `finally`
   (`pg_advisory_unlock`); zerwane połączenie zwalnia ją samo. Zajęta → stdout
-  `{"status":"skipped","reason":"lock_busy",…,"runs":[]}`, komunikat „Ingest skipped: …” na
+  `{"status":"skipped","reason":"lock_busy",…,"runs":[],"notRun":[],"clipped":[]}`, komunikat „Ingest skipped: …” na
   stderr, log `ingest lock busy` (warn), kod 0, bez pobierania i bez wiersza w
   `ingestion_runs`. Połączenie z blokadą jest sprawdzane co 5 s;
   utrata → przerwanie przebiegu (`lock_lost`, log `ingest lock lost`, komunikat
@@ -516,8 +575,8 @@ failed`) — wynik zostaje, a blokada znika z końcem sesji. Każde połączenie
   `src/ingestion/lock.ts`) jest wspólny dla całej bazy (advisory locki nie znają schematów),
   inny niż blokada Migratora Kysely; nowy klucz dla innej komendy = nowa stała tutaj.
 - Planowany harmonogram (przykład w README; ten PR nie dodaje artefaktu cron/wdrożenia):
-  `ingest` raz dziennie ok. 06:00 Europe/Warsaw (dzień publikacji = wczoraj UTC, więc dzień
-  jest już zamknięty); `digest` (PR-05) — rano, po `ingest`.
+  `ingest` raz dziennie ok. 06:00 Europe/Warsaw bez opcji dnia (nadrabianie: zwykle tylko
+  wczoraj UTC, dzień już zamknięty; po przerwie — pominięte dni); `digest` (PR-05) — rano, po `ingest`.
 
 ## 7. Obserwowalność
 
@@ -531,7 +590,10 @@ koniec przebiegu (`sourceId`, `status`, `durationMs`, liczniki, `incomplete`), k
 odrzucenie (`sourceId`, `externalId`, powód) i przerwane listingi. `ingest` (PR-03A) loguje: koniec przebiegu źródła
 (`source ingestion finished`: `sourceId`, `runId`, `status`, `durationMs`, liczniki,
 `incomplete`, `errorCode`), błąd źródła (`sourceId`, `errorCode`, `httpStatus`), odrzucenia
-(`sourceId`, `externalId`, powód albo `errorCode` + `constraint`), niezapisane podsumowanie
+(`sourceId`, `externalId`, powód albo `errorCode` + `constraint`), pominięte zmiany ogłoszeń
+(`notice update skipped`: `sourceId`, `externalId`, `tenderId`, stały powód), plan dni
+(`nothing to catch up`, `catch-up clipped, older missing days not run`, `days not run after
+a failed day`), niezapisane podsumowanie
 (`sourceId`, `errorCode` = SQLSTATE), zajętą, utraconą i niezwolnioną blokadę (`lockKey`,
 `errorCode`) oraz pominięte po przerwaniu źródła (`sourceIds`) — bez treści
 dokumentów, tytułów, danych kontaktowych i adresu bazy. Podsumowanie każdego przebiegu jest w

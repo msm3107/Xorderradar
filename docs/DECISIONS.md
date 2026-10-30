@@ -208,10 +208,11 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
     bez CAPTCHA, z rate limitem SafeHttpClient (min. 2 s między żądaniami do hosta), w
     ograniczonej liczbie stron.
   - **Pokrycie i częstotliwość:** setki ogłoszeń dziennie (wewnętrzna tablica platformy
-    pokazywała 966 ogłoszeń od 2026-10-29 do rana 2026-10-30). Pobieramy dwa typy:
+    pokazywała 966 ogłoszeń od 2026-10-29 do rana 2026-10-30). Pobieramy dwa typy ofert:
     `ContractNotice` (krajowe ogłoszenia o zamówieniu poniżej progów UE, od 130 tys. zł) i
     `SmallContractNotice` („Ogłoszenie dotyczące zamówienia, dla którego nie ma obowiązku
-    stosowania ustawy Pzp” — małe zamówienia, które zamawiający dobrowolnie publikują w BZP).
+    stosowania ustawy Pzp” — małe zamówienia, które zamawiający dobrowolnie publikują w BZP),
+    a od PR-03B także ogłoszenia o zmianie (`NoticeUpdateNotice`, niżej).
     Planowany przebieg: raz dziennie (cron w kolejnym PR), dzień publikacji = wczoraj.
   - **Znane ograniczenie pokrycia:** 2026-10-28 w całym kraju było 331 `ContractNotice`, ale
     tylko 7 `SmallContractNotice` — wszystkie z pustym `cpvCode`, 3 bez terminu składania
@@ -220,7 +221,7 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
     korzystać ze słów kluczowych w tytule, nie tylko z CPV (`docs/STATE.md`).
   - **Znane ograniczenie — zmiany ogłoszeń** (źródło: przegląd właściciela, zapytanie na żywo
     2026-10-28): zmiany publikowane są jako osobny typ `NoticeUpdateNotice`, którego `ingest`
-    nie pobiera. Tego dnia było ich co najmniej 100 (`PageSize=100` zwróciło pełną stronę; dla
+    do PR-03B nie pobierał. Tego dnia było ich co najmniej 100 (`PageSize=100` zwróciło pełną stronę; dla
     porównania 331 `ContractNotice`); w 96 ze 100 `htmlBody` dotyczy terminu składania ofert.
     Ogłoszenie o zmianie ma własny `noticeNumber` i łączy się z pierwotnym ogłoszeniem tylko
     przez `tenderId` (`ocds-148610-…`, obecny w 100/100); jego `submittingOffersDate` jest
@@ -229,7 +230,74 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
     potwierdzone. Skutek: zapisany `deadline` ogłoszenia BZP może być nieaktualny (zwykle za
     wczesny), a ponowne pobranie pierwotnego ogłoszenia go nie poprawi. Obsługa zmian →
     PR-03B (`docs/PR_PLAN.md`); do tego czasu nic, co filtruje po terminie, nie może na nim
-    polegać dla BZP.
+    polegać dla BZP. **Rozwiązane w PR-03B** (punkt niżej) dla `ContractNotice` — **z
+    wyjątkiem małych zamówień:** oba zarejestrowane oryginały `SmallContractNotice`
+    (fixture 2026-10-29) mają `tenderId` = `null`, więc żadnej zmiany nie da się z nimi
+    powiązać (powiązanie tylko przez `tenderId`), niezależnie od treści sekcji 3.1. Termin
+    małego zamówienia nadal może być nieaktualny.
+  - **Zmiany ogłoszeń — obsługa (PR-03B, decyzje właściciela).** `ingest` i `source:preview`
+    pobierają trzeci typ, `NoticeUpdateNotice` (ten sam endpoint listy, po `ContractNotice` i
+    `SmallContractNotice`, z tymi samymi limitami stron i rekordów na typ). Rekord jest
+    rozpoznawany po własnym `noticeType`; inny nieznany typ jest odrzucany (`noticeType`).
+    - **Co czytamy:** tylko numer (`noticeNumber`), `publicationDate`, `tenderId` i
+      `htmlBody` (do 200 000 znaków; dłuższy → odrzucenie `invalid source fields: htmlBody`,
+      bez przycinania; limit 20 000 znaków dla pozostałych pól go nie dotyczy). Treść
+      `htmlBody` nie jest zapisywana ani logowana — z niej wychodzi wyłącznie sparsowany
+      termin. `submittingOffersDate` ogłoszenia o zmianie jest zawsze `null` i nie jest
+      używane.
+    - **Parsowanie `htmlBody`** (`src/sources/bzp/notice-update.ts`): liniowy przegląd tekstu
+      między znacznikami (komentarze, `<script>`, `<style>` i atrybuty pomijane; kilka encji
+      dekodowanych). Niedomknięty znacznik, komentarz, `<script>` albo `<style>` w dowolnym
+      miejscu → odrzucenie `invalid source fields: htmlBody` (treść ucięta lub zepsuta — nie
+      wiadomo, czy przeczytano całe ogłoszenie, więc nie ma też pominięcia „brak zmiany”).
+      Rodzaj zmienianego
+      ogłoszenia = tekst po etykiecie „3.1.) Nazwa zmienianego ogłoszenia:”; zmiana stosowana
+      tylko, gdy to dokładnie „Ogłoszenie o zamówieniu” (inaczej pominięcie
+      `not_contract_notice_change`). Zmiana terminu = blok po nagłówku „3.4.1.)” z etykietą
+      „8.1. Termin składania ofert”; nowa wartość = tekst po „Po zmianie:” w formacie
+      `YYYY-MM-DD HH:MM` czasu Europe/Warsaw, przeliczony na UTC (`src/sources/warsaw-time.ts`).
+      Brak takiego bloku → pominięcie `no_deadline_change`; dwa bloki → odrzucenie
+      `ambiguous deadline change`; wartość brakująca, powtórzona, w innym formacie, niemożliwa
+      w kalendarzu albo niejednoznaczna przy zmianie czasu (godzina pominięta lub powtórzona)
+      → odrzucenie `invalid value: deadline`; brak lub powtórzenie sekcji 3.1 →
+      `invalid source fields: htmlBody`. Nic nie jest zgadywane.
+    - **Powiązanie tylko przez `tenderId`.** Sekcja 3.2 („Numer zmienianego ogłoszenia w
+      BZP”) nie jest używana. Ogłoszenie o zmianie bez `tenderId` → pominięcie
+      `no_tender_id`; bez zapisanego oryginału → pominięcie `no_original` (nie tworzy
+      oferty). Ogłoszenia o zmianie nigdy nie są zapisywane jako osobne oferty.
+      **Pominięcie `no_original` nie jest zapamiętywane ani ponawiane** (bez kolejki i
+      mechanizmu ponowień): jeśli oryginał trafi do bazy później — backfill jego dnia
+      (`--from/--to`) albo dzień zmiany pobrany przed dniem oryginału — zostaje zapisany z
+      nieaktualnym terminem. Operator musi wtedy ponownie pobrać dni następujące po dniu
+      oryginału, aż do ostatniego pokrytego dnia, rosnąco (D-021, „Uwagi dla operatora”).
+    - **Który wiersz:** gdy kilka wierszy jednego źródła ma ten sam `tender_id`, zmiana trafia
+      do **starszego** — kolejność `published_at ASC NULLS LAST, first_seen_at ASC, id ASC`.
+    - **Co się zmienia:** `deadline`, `status` (`open`, gdy nowy termin > czas pobrania
+      ogłoszenia o zmianie, inaczej `closed`), `updated_at` i pochodzenie terminu:
+      `deadline_update_notice` (numer ogłoszenia o zmianie) i `deadline_update_published_at`
+      (jego publikacja; migracja `0004_notice_updates`, obie kolumny `NULL` albo obie
+      ustawione). `fetched_at`, `content_hash` i `fingerprint` zostają bez zmian. Jedna
+      instrukcja `UPDATE` (atomowa).
+    - **Kolejność zmian:** wygrywa najpóźniej opublikowana — zmiana jest zapisywana tylko, gdy
+      `(deadline_update_published_at, deadline_update_notice)` wiersza jest puste albo mniejsze
+      niż w nowej zmianie (remis publikacji rozstrzyga numer). Starsza zmiana przeczytana
+      później → pominięcie `superseded`; ta sama zmiana ponownie → `unchanged`.
+    - **Ponowne pobranie oryginału** (np. nadrabianie dni) nie cofa terminu z ogłoszenia o
+      zmianie: gdy wiersz ma `deadline_update_published_at`, zmieniona treść aktualizuje
+      pozostałe pola, ale `deadline` zostaje, a `status` jest liczony z tego terminu i czasu
+      pobrania.
+    - **Liczniki:** `ingestion_runs.skipped` (migracja `0004`, domyślnie 0) liczy rekordy
+      przeczytane, ale celowo niezastosowane; zawsze
+      `extracted = inserted + updated + unchanged + rejected + skipped`. Pominięcie jest
+      logowane (info `notice update skipped`: `sourceId`, `externalId`, `tenderId`, stały
+      powód).
+    - **Nie obsługujemy (jeszcze):** zmian innych pól niż termin składania ofert; ogłoszeń o
+      unieważnieniu postępowania (otwarte pytanie N6, `docs/STATE.md`); zmian małych zamówień
+      (`SmallContractNotice`) — ich oryginały w zarejestrowanych danych nie mają `tenderId`
+      (więc nie ma powiązania), a zmiana z sekcją 3.1 innej niż „Ogłoszenie o zamówieniu”
+      jest pomijana (`not_contract_notice_change`). Czy oryginały małych zamówień kiedykolwiek
+      mają `tenderId` i co zawiera sekcja 3.1 ich zmian — do sprawdzenia na żywo
+      (`docs/STATE.md`, „Next action”).
 - **API (zweryfikowane prawdziwymi zapytaniami):**
   `GET https://ezamowienia.gov.pl/mo-board/api/v1/notice?NoticeType=…&PublicationDateFrom=YYYY-MM-DD&PublicationDateTo=YYYY-MM-DD&PageSize=N[&SearchAfter=<objectId>]`.
   Wymagane: `PageSize` (1–500), `NoticeType`, obie daty; błędy to 400
@@ -269,7 +337,8 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
     ~2,4 MB, czyli ~2× zapasu względem limitu 5 MB (nie zwiększać `PageSize` bez ponownego
     sprawdzenia); max 40 stron i limit rekordów — oba **osobno dla każdego typu ogłoszenia**,
     żeby liczne `ContractNotice` nie wyparły małych zamówień (`SmallContractNotice` pobierane
-    jako drugie); przebieg zwraca więc najwyżej 2 × limit rekordów. Osiągnięcie limitu jest
+    jako drugie, `NoticeUpdateNotice` jako trzecie); przebieg zwraca więc najwyżej 3 × limit
+    rekordów (do PR-03B: 2 ×). Osiągnięcie limitu jest
     raportowane, nie ciche. Przebieg ma limit czasu (`AbortSignal`, `source:preview`: 5 min);
   - przerwanie przebiegu w trakcie żądania zużywa jednostkę budżetu błędów SafeHttpClient, a
     przerwanie w kolejce/czekaniu — nie. Zostawiamy bez zmian: klient = jeden przebieg, a
@@ -364,6 +433,9 @@ external_id)` (błąd po zatwierdzeniu tamtego zapisu), `ingestOpportunity` pona
 - **Konsekwencje:** dzień z > 1000 ogłoszeniami jednego typu daje przebieg `incomplete`
   (`max_records`) — widoczny w JSON-ie, logu i `ingestion_runs`, kod wyjścia 0. Podniesienie
   limitu wymaga przeliczenia timeoutu.
+- **Uzupełnienie (PR-03B):** od PR-03B BZP pobiera 3 typy ogłoszeń (D-015), więc to najwyżej
+  120 żądań na dzień, ≥ 240 s samych przerw i średnio ~5 s na żądanie w limicie 10 min;
+  timeout dotyczy jednego przebiegu źródła i dnia (D-021). Tytuł decyzji zostaje bez zmian.
 
 ## D-019 — Jedno `ingest` naraz: sesyjny advisory lock PostgreSQL
 
@@ -376,7 +448,8 @@ external_id)` (błąd po zatwierdzeniu tamtego zapisu), `ingestOpportunity` pona
   jedną transakcją (każdy rekord zapisywany osobno, żeby błąd nie cofał zapisanych). Zajęta
   blokada → nic nie jest pobierane ani zapisywane (bez wiersza w `ingestion_runs`), log
   `ingest lock busy` (warn), na stdout
-  `{"status":"skipped","reason":"lock_busy","publicationDate":…,"limit":…,"runs":[]}`, na
+  `{"status":"skipped","reason":"lock_busy","mode":…,"from":…,"to":…,"limit":…,"runs":[],"notRun":[],"clipped":[]}`
+  (od PR-03B; w trybie nadrabiania `from`/`to` = `null`, bo dni są znane dopiero pod blokadą), na
   stderr „Ingest skipped: another ingest run holds the lock; nothing was fetched.” i **kod 0**.
   Zmiana po przeglądzie właściciela (PR-03A; wcześniej kod 1): nałożenie się crona na trwający
   przebieg to oczekiwany stan, nie awaria — kod 1 dawałby fałszywe alarmy monitoringu.
@@ -422,3 +495,58 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     instalacja działała po `migrate` bez ręcznego SQL; istniejący wiersz (np. wyłączony) nie
     jest nadpisywany.
 - **Konsekwencje:** wyłączenie źródła = `UPDATE sources SET enabled = false` (bez wdrożenia).
+
+## D-021 — `ingest`: zakresy dni i automatyczne nadrabianie pominiętych dni
+
+- **Status:** Accepted (PR-03B, decyzja właściciela)
+- **Kontekst:** cron pobiera „wczoraj”; nieudany albo pominięty przebieg (awaria, przerwa w
+  działaniu hosta) zostawiał dziurę, którą trzeba było łatać ręcznie `--date` dzień po dniu.
+  Ogłoszenia o zmianie (D-015) dają ten sam problem: pominięty dzień = pominięte zmiany
+  terminów.
+- **Decyzja:**
+  - `ingest [sourceId...] [--date D | --from A --to B] [--limit N]`. `--date D` = jeden dzień;
+    `--from/--to` = zakres (oba wymagane, `A ≤ B`, najwyżej 31 dni, `INGEST_MAX_DAYS`); bez
+    opcji dnia — **nadrabianie** (domyślne, także dla crona). Dni tylko z lat 2000–2999
+    (`INGEST_MIN_DAY`/`INGEST_MAX_DAY` w `src/ingestion/catch-up.ts`; inaczej błąd użycia, kod
+    2): daleko poza realnymi dniami publikacji, a od roku 10000 zapis dnia przestaje być
+    `YYYY-MM-DD`. Długość zakresu jest liczona arytmetycznie, zanim powstanie lista dni, a
+    lista nigdy nie przekracza 31 dni.
+  - **Nadrabianie** (per źródło, pod blokadą `ingest`, D-019 — odczyt i przebieg nie mogą się
+    przeplatać z innym `ingest`): dni od dnia po ostatnim **pokrytym** dniu do wczoraj (UTC),
+    rosnąco. Dzień jest pokryty, gdy ma przebieg `succeeded` albo `incomplete` (limit nie jest
+    ponawiany przez nadrabianie — jest widoczny w raporcie), który wystartował **po końcu
+    tego dnia** (UTC): przebieg dnia jeszcze trwającego (np. ręczne `--date` dzisiaj) mógł nie
+    widzieć ogłoszeń opublikowanych później, więc nie ukrywa dnia. `failed` nigdy nie pokrywa.
+    Źródło bez pokrytego dnia (świeża instalacja) → tylko wczoraj (bez pobierania historii).
+  - **Przycięcie:** więcej niż 31 brakujących dni → 31 najnowszych (kończąc na wczoraj);
+    starsze są raportowane (`clipped[]`: `from` i `to` — pierwszy i ostatni pominięty dzień,
+    oba włącznie; log warn
+    `catch-up clipped, older missing days not run`) i nie są później nadrabiane automatycznie
+    (nadrabianie liczy od najnowszego pokrytego dnia) — można je pobrać ręcznie `--from/--to`.
+  - **Przebieg:** źródło po źródle, w każdym dni rosnąco; jeden wiersz `ingestion_runs` na
+    źródło i dzień. Nieudany dzień zatrzymuje kolejne dni tego źródła (`notRun` z powodem
+    `previous_day_failed`, log warn `days not run after a failed day`), żeby następne
+    nadrabianie zaczęło od niego i nie przeskoczyło dziury; inne źródła działają dalej.
+    Przerwanie (utracona blokada) → pozostałe dni `notRun` z powodem `aborted`.
+  - **Raport JSON:** `mode` (`date` / `range` / `catch_up`), `from`/`to` (zaplanowane dni;
+    `null`, gdy nie ma czego nadrabiać), `runs[]` z `publicationDate`, `notRun[]`,
+    `clipped[]`. Kod wyjścia jak dotąd (D-019, D-020).
+  - **Uwagi dla operatora** (bez dodatkowego mechanizmu):
+    - **Backfill i zmiany ogłoszeń:** pobranie starszych dni (`--from/--to`) zapisuje
+      oryginały z terminem z dnia publikacji. Zmiany tych ogłoszeń z późniejszych dni,
+      pominięte wcześniej jako `no_original` (D-015), nie są ponawiane same — po backfillu
+      trzeba ponownie pobrać dni **następujące po nim aż do ostatniego pokrytego dnia**,
+      rosnąco, porcjami po najwyżej 31 dni (`--from/--to`). To samo, gdy dzień zmiany był
+      pobrany przed dniem oryginału.
+    - **Ręczne `--date` późniejszego dnia po nieudanym dniu** przesuwa start nadrabiania za
+      nieudany dzień (nadrabianie liczy od najnowszego pokrytego dnia), więc nieudany dzień
+      trzeba wtedy pobrać ręcznie (`--date D`).
+    - **Dzień, który zawsze kończy się `failed`,** blokuje wszystkie nowsze dni tego źródła
+      (`notRun`). Obejście: `--from D+1 --to <wczoraj>` (po tym nadrabianie rusza od wczoraj),
+      a dzień D zapisać jako utracony (np. w `docs/STATE.md`) i zgłosić problem ze źródłem.
+- **Konsekwencje:** timeout 10 min (D-018) dotyczy jednego przebiegu, czyli źródła i dnia;
+  najgorszy czas jednego `ingest` = 31 dni × 10 min
+  × liczba źródeł — dla BZP ~5 h 10 min; w praktyce dzień trwa ~2–3 min (3 typy × kilka
+  stron, odstęp 2 s). Kolejny cron w trakcie długiego nadrabiania kończy się `skipped`
+  (`lock_busy`, kod 0). Granica dnia to UTC, jak dotąd (D-015, otwarte pytanie o granicę dnia
+  w API).

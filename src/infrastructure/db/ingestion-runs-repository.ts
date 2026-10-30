@@ -1,4 +1,4 @@
-import type { Kysely } from "kysely";
+import { sql, type Kysely } from "kysely";
 import { parseDomain } from "../../domain/common.js";
 import { ingestionRunSummarySchema, type IngestionRunSummary } from "../../domain/ingestion-run.js";
 import { withDomainErrors } from "./errors.js";
@@ -31,6 +31,7 @@ export async function recordIngestionRun(
         updated: run.counters.updated,
         unchanged: run.counters.unchanged,
         rejected: run.counters.rejected,
+        skipped: run.counters.skipped,
         incomplete: JSON.stringify(run.incomplete),
         error_code: run.errorCode,
       })
@@ -38,4 +39,26 @@ export async function recordIngestionRun(
       .executeTakeFirstOrThrow(),
   );
   return row.id;
+}
+
+/**
+ * The latest publication day `sourceId` has covered (`YYYY-MM-DD`), or null
+ * when it has none: the day of a run that finished `succeeded` or
+ * `incomplete` (a limit hit is not retried by catch-up, D-021) and started
+ * after that day had ended (UTC) — a run of today, or of a day still in
+ * progress, may have missed notices published later that day, so it never
+ * hides the day from catch-up. Failed runs never count.
+ */
+export async function lastCoveredDay(
+  db: Kysely<Database>,
+  sourceId: string,
+): Promise<string | null> {
+  const result = await sql<{ day: string | null }>`
+    SELECT max(publication_date)::text AS day
+    FROM ingestion_runs
+    WHERE source_id = ${sourceId}
+      AND status IN ('succeeded', 'incomplete')
+      AND started_at >= ((publication_date + 1)::timestamp AT TIME ZONE 'UTC')
+  `.execute(db);
+  return result.rows[0]?.day ?? null;
 }
