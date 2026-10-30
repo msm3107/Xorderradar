@@ -2,8 +2,10 @@
 
 Current phase: PHASE 1 — DATA PIPELINE
 Current PR: PR-02 — First Source Adapter
-Status: IN PROGRESS — Part A (SafeHttpClient) ready for owner verification (pull request opened,
-not merged); Part B (source selection + adapter) BLOCKED — see Blockers
+Status: IN PROGRESS — Part A (SafeHttpClient) MERGED (PR #2, 5533384); Part B (BZP adapter +
+`source:preview`) implemented and reviewed (Code & Safety Review PASS ×2 rounds, Quality Review
+PASS, round-2 fixes applied); AC1 pending owner verification on a machine with direct egress —
+see Blockers
 
 ## Completed
 
@@ -43,7 +45,8 @@ not merged); Part B (source selection + adapter) BLOCKED — see Blockers
 
 **PR-02 — First Source Adapter**, split into two increments on the same PR line:
 
-- **Part A — SafeHttpClient (done, Code & Safety Review PASS ×3, Quality Review ACCEPT).**
+- **Part A — SafeHttpClient (MERGED as PR #2, 5533384; Code & Safety Review PASS ×3, Quality
+  Review ACCEPT, owner review PASS).**
   `src/infrastructure/http/` — the only network route for adapters (D-014, no new dependency):
   - `node:https` with a pinned `lookup` (DNS resolved once, every address checked, connection to
     the validated IP, SNI/Host = hostname); `HTTPS_PROXY` deliberately ignored.
@@ -65,60 +68,103 @@ not merged); Part B (source selection + adapter) BLOCKED — see Blockers
   - AC3 met: timeout, size exceeded, host outside allowlist, private address, redirect outside
     allowlist, retry only for transient errors — 241 new tests (440 total).
   - Owner GitHub review of 11d8c4f: PASS (2 Low + Info + Nit), all addressed in a follow-up.
-- **Part B — not started:** step 0 source selection recorded in DECISIONS (terms, robots.txt,
-  API/feed, licence, small-order coverage) → adapter fetch → extract → normalize, real fixtures,
-  parser tests, `source:preview <id>`, per-run logs (AC1, AC2, AC4).
+- **Part B — implemented; Code & Safety Review PASS (2 rounds), Quality Review PASS, fixes from
+  both rounds applied.**
+  - Step 0: D-015 — BZP through the official "API BZP (WebService)" of e-Zamówienia
+    (`GET /mo-board/api/v1/notice`, terms §11, licence, coverage incl. small contracts; robots.txt
+    and the terms are re-checked by the operator, not at runtime). Rejected: Baza
+    Konkurencyjności, the internal Board/Search endpoint.
+  - `src/sources/types.ts`: `SourceAdapter` contract, `FetchContext`, `FetchResult` (documents +
+    `incomplete` limits), `NormalizeResult`, `SourceFormatError`. `src/domain/opportunity.ts`:
+    new `OpportunityCandidate` (= draft without `fingerprint`/`contentHash`, computed in PR-03);
+    the draft schema is unchanged in behaviour.
+  - `src/sources/bzp/`: `ContractNotice` + `SmallContractNotice`, PageSize ≤ 25 with
+    `SearchAfter` keyset pagination; stops on empty/short page, 40 pages and the record limit per
+    notice type (so `ContractNotice` cannot starve `SmallContractNotice`; a run returns at most
+    2 × limit records), invalid or repeated cursor, aborted signal. Pure `extract` (only mapped fields kept,
+    `htmlBody` dropped) and `normalize` (strict UTC dates, CPV codes, buyer seat + static
+    province map, description/contact/value `null`).
+  - `src/sources/registry.ts`, `src/sources/preview.ts`; CLI
+    `source:preview <sourceId> [--date YYYY-MM-DD] [--limit N]` (default yesterday UTC / 20
+    records per notice type, max 500, run timeout 5 min, requires `CRAWLER_CONTACT`, never opens the DB, JSON report on
+    stdout, logs with sourceId/status/durationMs/counts). HTTP client factory and adapters are
+    injected via `CliDeps.sources`.
+  - Real fixtures (`tests/fixtures/bzp/`, captured 2026-10-30, byte-identical, excluded from
+    Prettier) + tests: exact mapping, every record normalizes, province map = official glossary,
+    mutated-record edge cases, unusable documents, fetch loop with a fake client (exact URLs and
+    every stop condition), CLI tests, one smoke test (AC2, AC4).
+  - Part B to-dos from the Part A reviews resolved: run-level `AbortSignal` (CLI, 5 min);
+    page/record limits; GET with `Accept: */*` is enough for the JSON API (no D-014 amendment);
+    link pre-check not needed (no source links are fetched — detail URLs are stored only);
+    abort-vs-error-budget left unchanged and recorded in D-015 (one client per run, an abort ends
+    the run); `SafeHttpClient` is constructed once, in `defaultSourceDeps` in `src/cli.ts`, with
+    options only (for manual review). Not done (optional): gzip-only simplification.
 
 ## Blockers
 
-- **Part B / step 0:** the session container's network policy denies the candidate source hosts
-  (`ezamowienia.gov.pl`, `media.ezamowienia.gov.pl`,
-  `bazakonkurencyjnosci.funduszeeuropejskie.gov.pl`, `bazakonkurencyjnosci.gov.pl`). The owner
-  must allow them (environment settings → Network access) for source research and capturing real
-  fixtures. No mocked or invented source data is used meanwhile.
-- **AC1 cannot be verified in the session container even after allowing the hosts:** the
-  container has proxy-only egress (no direct DNS/TCP) and SafeHttpClient ignores the proxy by
-  design (D-014). Owner decision needed: will the production cron host have direct outbound
-  HTTPS?
-  - (A, recommended) keep D-014; use the container (curl via proxy) only for step 0 research and
-    fixture capture; verify `source:preview` (AC1) on the owner's machine / production host and
-    record "AC1 verified by owner outside the container".
-  - (B) only if production is proxy-only too: add CONNECT-proxy support with a D-014 revision
-    (local IP pinning loses meaning behind a proxy).
+- **AC1 (real notices via `source:preview`) cannot be verified in the session container:** it
+  has proxy-only egress and SafeHttpClient ignores the proxy by design (D-014). Owner runs, on a
+  machine with direct outbound HTTPS, with a real, monitored contact of the operator and a past
+  weekday:
+  `CRAWLER_CONTACT=<twój-monitorowany-kontakt> DATABASE_URL=postgres://… pnpm dev source:preview bzp --date 2026-10-29 --limit 25 | jq .`
+  and records "AC1 verified by owner outside the container" with the counts. PR-02 is not READY
+  before that.
+
+  **Expected result / what to check:**
+  - Exit code 0 (`echo $?`). stdout is one line of JSON — pipe it to `jq .` or
+    `python -m json.tool` to read it; the log lines go to stderr.
+  - `normalized` > 0, and **both** notice types delivered data: the stderr log lines
+    `source listing fetched` (one per `part`: `ContractNotice`, `SmallContractNotice`) each show
+    `records` > 0.
+  - `rejected` is 0, or every rejection has a reason that is explainable from the notice.
+  - `incomplete`: `max_records` for a part means more notices may exist for that day — expected
+    with a small `--limit`; it is not an error. Other reasons (`max_pages`, `invalid_cursor`,
+    `repeated_cursor`) should be reported back.
+  - Open 2–3 `sourceUrl` links in a browser and compare the title, buyer and submission deadline
+    with the page. Deadlines are printed in UTC (e.g. `08:00Z` = 09:00 CET on the page), so a
+    1–2 h difference is not a bug.
+
+- Open owner question (affects PR-07, not Part B): will the production cron host have direct
+  outbound HTTPS? If production is proxy-only too, CONNECT-proxy support needs a D-014 revision.
 
 ## Decisions made
 
-See `docs/DECISIONS.md` (D-001 … D-014). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
-on `node:https` with pinned lookup, no HTTP library) accepted in PR-02 Part A.
+See `docs/DECISIONS.md` (D-001 … D-015). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
+on `node:https` with pinned lookup, no HTTP library) accepted in PR-02 Part A; D-015 (first
+source: BZP through the official API) in PR-02 Part B.
 
 ## Next action
 
-1. Owner verifies the PR-02 Part A pull request and answers the blocker questions above (allow
-   the hosts; direct egress on the production host?).
-2. PR-02 Part B, step 0: source selection recorded in DECISIONS, then the adapter.
+1. Owner verifies AC1 outside the container (command and checklist under Blockers) and
+   reviews the PR.
+2. PR-03 — ingestion: fingerprint/`contentHash` from the validated candidate, storage,
+   `ingestion_runs`. Open points from D-015 for PR-03: whether the API's publication-day
+   boundary is UTC or Polish time (overlapping days + dedup make it harmless); scheduling of the
+   run per day. The ingestion run budget must not starve either notice type (keep the
+   per-notice-type limit of `source:preview`, or an equivalent). Size the ingestion limit and
+   run timeout together (Code & Safety re-review, Low): with `maxRecords` > 1000 a run can reach
+   80 pages (≥ 158 s of rate-limit gaps alone), so the 5-min timeout could abort a busy day
+   all-or-nothing — use timeout ≥ pages × (2 s + latency), or keep pages fetched before the
+   timeout and mark the run `incomplete`.
 
-PR-02 Part B to-dos (from Part A reviews):
+Notes from Part B (for later PRs):
 
-- Bound each source run with a caller `AbortSignal` (run-level timeout, SECURITY §4); note the
-  per-attempt worst case is 30 s × (1 + 2 retries) + backoff.
-- Enforce page/record limits per run (SECURITY §5); check robots.txt and terms in step 0.
-- The client supports GET only, fixed `Accept: */*`, https, default port, no proxy. If the source
-  needs more (e.g. POST search, JSON Accept), extend it deliberately with a D-014 amendment.
-- Review the adapter's construction of `SafeHttpClient` by hand: the lint guard does not catch
-  aliasing (`const C = SafeHttpClient`), `Reflect.construct` or renamed re-exports (optionally add
-  an `ExportSpecifier` selector).
-- Optional simplification: advertise only `gzip` and drop the br/raw-deflate paths unless the
-  chosen source uses them.
-- URL-policy rejections (`invalid_url`, `host_not_allowed`) consume the error budget, so the
-  adapter must pre-check every detail/attachment link with the pure
-  `parseRequestUrl(link, normalizeAllowedHosts(allowedHosts))` from
-  `src/infrastructure/http/address-policy.ts` (no traffic, no budget) before calling `get()`.
-  Off-allowlist links (e.g. `platformazakupowa.pl`, `http://`, attachments on another host) are
-  stored as `sourceUrl` without fetching, or dropped with a logged reason; otherwise ~10 foreign
-  links exhaust the budget and stop the run.
-- Decide whether a caller abort during a running attempt should consume the error budget: today a
-  run timeout that cuts off an in-flight request counts as a failure, while the same abort in the
-  queue or a rate-limit/backoff sleep does not (from the Part A owner-review re-review, Info).
+- `tests/fixtures/bzp/README.md`: the exact `NoticeType`/`PageSize` of the captured empty day are not
+  recorded (written as `…`); the body `[]` is the real response.
+- Optional simplification (Part A review): advertise only `gzip` and drop the br/raw-deflate paths
+  of SafeHttpClient — not done, out of Part B scope.
+- `source:preview` validates `DATABASE_URL` although it never opens the database (shared
+  config schema, existing config tests); revisit if a DB-less deployment of preview is needed,
+  and improve the resulting error message (it should say the variable is required by the shared
+  configuration even for preview) together with the `DATABASE_URL` message follow-up below.
+- Gaps handed to later PRs (Quality Review of Part B):
+  - `htmlBody` (dropped in Part B) contains the buyer's contact e-mail and sometimes the order
+    value (e.g. "Wartość zamówienia: 181300 PLN") — candidate for the PR-03 "HTML → text" step
+    (description, contact, value); there is no structured value field in the listing.
+  - CPV → MVP category mapping is still open; both captured small contracts have an empty
+    `cpvCode`, so category matching may also need title keywords (PR-03/04).
+  - `location` is the buyer's seat, not the place of performance — PR-04 region matching must
+    take that into account.
 
 Non-blocking follow-ups (handle when touching the files, no separate PR):
 
@@ -167,6 +213,14 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-10-30, PR-02 Part B session (Node 22.22.0, pnpm 10.28.0, PostgreSQL 16):
+
+- `TEST_DATABASE_URL=… REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean;
+  512/512 tests passed (17 files; 72 new in Part B, after both review fix rounds). No dependency
+  changes.
+- All tests offline (captured fixtures + fake HTTP client); the live API was not called from
+  the container (AC1 pending, see Blockers).
 
 2026-10-30, PR-02 Part A owner-review follow-up (Node 22.22.0, pnpm 10.28.0, PostgreSQL 16):
 

@@ -182,3 +182,83 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
   na 22.13. Zostawiamy, bo 22.19+ to bieżąca wersja w linii 22 LTS, a alternatywą byłby proces
   potomny z `NODE_EXTRA_CA_CERTS`. Do rewizji, jeśli host produkcyjny zostanie przypięty do
   wersji poniżej 22.19.
+
+## D-015 — Pierwsze źródło: BZP przez oficjalne „API BZP (WebService)” platformy e-Zamówienia
+
+- **Status:** Accepted (PR-02, część B)
+- **Kontekst:** krok 0 PR-02 — wybór jednego publicznego źródła małych zamówień (regulamin,
+  `robots.txt`, API/feed, licencja, częstotliwość, pokrycie małych zamówień). Badanie wykonane
+  2026-10-30 zapytaniami przez proxy kontenera (curl); SafeHttpClient nie był używany, bo
+  ignoruje proxy (D-014).
+- **Decyzja:** pierwszym źródłem jest **Biuletyn Zamówień Publicznych (BZP)** czytany przez
+  oficjalną usługę „API BZP (WebService)” platformy e-Zamówienia; adapter `bzp`
+  (`src/sources/bzp/`), allowlista `["ezamowienia.gov.pl"]`, wyłącznie `https`.
+  - **Podstawa korzystania:** Regulamin platformy e-Zamówienia §11
+    (https://ezamowienia.gov.pl/pl/regulamin/): „Korzystanie z usługi jest bezpłatne. Usługa
+    udostępnia metody pozwalające na dostęp do danych z publikowanych ogłoszeń… a. Odczyt
+    danych opublikowanych ogłoszeń według zadanych kryteriów, b. Odczyt ilości…” oraz „Usługa
+    dostępna jest pod adresem: http://ezamowienia.gov.pl/mo-board/api/v1/notice” (działa też
+    przez `https`; używamy tylko `https`). Regulamin nie ogranicza odczytu przez WebService.
+  - **`robots.txt`** (`https://ezamowienia.gov.pl/robots.txt`): 200 `text/plain`, treść to
+    2 bajty `as` — brak obowiązujących reguł (nic nie jest zabronione). Nie sprawdzamy go w
+    runtime; operator sprawdza `robots.txt` i regulamin ponownie przy przeglądzie źródła
+    (przed włączeniem crona i przy każdej zmianie adaptera).
+  - **Licencja:** brak jawnej licencji; ogłoszenia są publiczne z mocy prawa (obowiązek
+    publikacji w BZP wynika z ustawy Pzp). Pobieramy wyłącznie dane publiczne, bez logowania,
+    bez CAPTCHA, z rate limitem SafeHttpClient (min. 2 s między żądaniami do hosta), w
+    ograniczonej liczbie stron.
+  - **Pokrycie i częstotliwość:** setki ogłoszeń dziennie (wewnętrzna tablica platformy
+    pokazywała 966 ogłoszeń od 2026-10-29 do rana 2026-10-30). Pobieramy dwa typy:
+    `ContractNotice` (krajowe ogłoszenia o zamówieniu poniżej progów UE, od 130 tys. zł) i
+    `SmallContractNotice` („Ogłoszenie dotyczące zamówienia, dla którego nie ma obowiązku
+    stosowania ustawy Pzp” — małe zamówienia, które zamawiający dobrowolnie publikują w BZP).
+    Planowany przebieg: raz dziennie (cron w kolejnym PR), dzień publikacji = wczoraj.
+- **API (zweryfikowane prawdziwymi zapytaniami):**
+  `GET https://ezamowienia.gov.pl/mo-board/api/v1/notice?NoticeType=…&PublicationDateFrom=YYYY-MM-DD&PublicationDateTo=YYYY-MM-DD&PageSize=N[&SearchAfter=<objectId>]`.
+  Wymagane: `PageSize` (1–500), `NoticeType`, obie daty; błędy to 400
+  `application/problem+json`. Paginacja keyset: `SearchAfter` = `objectId` ostatniego rekordu
+  poprzedniej strony, wyniki rosnąco; pusta tablica albo strona krótsza niż `PageSize` = koniec
+  (`PageNumber` jest ignorowany, brak nagłówków paginacji). Odpowiedź: tablica JSON
+  (`application/json; charset=utf-8`, bez kompresji, z `Content-Length`) — działa ze stałymi
+  nagłówkami SafeHttpClient (`Accept: */*`, GET), więc D-014 nie wymaga zmian.
+- **Mapowanie** (`src/sources/bzp/adapter.ts`):
+  `externalId` = `noticeNumber` (np. `2026/BZP 00507107/01`); `sourceUrl` = strona ogłoszenia
+  `https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/id/{objectId}` (`objectId` to
+  identyfikator ogłoszenia — zweryfikowane `Board/GetNoticeDetailsById`; walidowany wyrażeniem
+  `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`); `title` = `orderObject`
+  ze zwiniętymi białymi znakami; `issuerName` = `organizationName`; `publishedAt` =
+  `publicationDate`; `deadline` = `submittingOffersDate` (lub `null`); `categories` = kody CPV
+  wyciągnięte z `cpvCode` (`"37520000-9 (Zabawki),…"` → `["37520000-9", …]`, `""` → `[]`);
+  `location` = **siedziba zamawiającego** (`organizationCity` + województwo ze statycznej mapy
+  kodów `organizationProvince` `PL02`…`PL32` zgodnej z oficjalnym słownikiem
+  `/mo-board/api/v1/glossary?glossaryType=province`; nieznany kod → brak województwa), a nie
+  miejsce realizacji — lista API go nie podaje. `description`, `contact`, `estimatedValue`,
+  `currency` = `null`: lista API nie ma dla nich pól strukturalnych; opis i kontakt (np.
+  e-mail zamawiającego), a czasem wartość zamówienia (np. „Wartość zamówienia: 181300 PLN”)
+  bywają tylko w `htmlBody` (pełny HTML ogłoszenia, którego parsowanie jest poza zakresem
+  PR-02 — nie przechowujemy go; kandydat na „HTML → tekst” w PR-03). `status`: `open`, gdy termin > `fetchedAt`; `closed`, gdy termin minął;
+  `unknown` bez terminu. Rekord z niepoprawnym polem jest odrzucany z powodem — nic nie jest
+  zgadywane ani przycinane.
+- **Odrzucone alternatywy:** Baza Konkurencyjności (funduszeeuropejskie) — aplikacja SPA z
+  wewnętrznym API (`/api/announcements/search`), bez udokumentowanego publicznego API w
+  regulaminie, Keycloak; kandydat na kolejne źródło. Wewnętrzny endpoint e-Zamówień
+  `Board/Search` — nieudokumentowany, a jego rekordy zawierają `userId`.
+- **Konsekwencje:**
+  - jedno żądanie na stronę (25 rekordów, `htmlBody` ma ~5–45 KB, więc odpowiedź jest daleko
+    poniżej limitu 5 MB), max 40 stron i limit rekordów — oba **osobno dla każdego typu
+    ogłoszenia**, żeby liczne `ContractNotice` nie wyparły małych zamówień
+    (`SmallContractNotice` pobierane jako drugie); przebieg zwraca więc najwyżej 2 × limit
+    rekordów. Osiągnięcie limitu jest raportowane, nie ciche. Przebieg ma limit czasu (`AbortSignal`,
+    `source:preview`: 5 min);
+  - przerwanie przebiegu w trakcie żądania zużywa jednostkę budżetu błędów SafeHttpClient, a
+    przerwanie w kolejce/czekaniu — nie. Zostawiamy bez zmian: klient = jeden przebieg, a
+    przerwanie kończy przebieg, więc budżet po nim nie ma znaczenia;
+  - adapter nie pobiera żadnych linków z treści źródła (link do ogłoszenia budujemy z
+    walidowanego `objectId` i tylko go zapisujemy), więc wstępne sprawdzanie linków
+    `parseRequestUrl` nie jest potrzebne;
+  - w kontenerze sesji ruch wychodzi tylko przez proxy, a SafeHttpClient celowo ignoruje proxy
+    (D-014): prawdziwe `source:preview` (PR-02 AC1) uruchamia właściciel na maszynie z
+    bezpośrednim wyjściem HTTPS;
+  - dzień publikacji jest przekazywany do API jako data `YYYY-MM-DD`; domyślnie „wczoraj” wg
+    UTC. Czy API liczy granice dnia w UTC, czy w czasie polskim — niezweryfikowane (do
+    sprawdzenia przy cronie w PR-03).

@@ -53,36 +53,63 @@ export const decimalAmountSchema = z
 export const currencySchema = z.string().regex(/^[A-Z]{3}$/, "3-letter upper-case ISO code");
 
 /**
- * A normalized notice ready to be stored. Every optional field is `null` when
- * the source does not provide it — never 0, an empty string or a guess.
+ * Fields of a normalized notice as produced by a source adapter. Every optional
+ * field is `null` when the source does not provide it — never 0, an empty
+ * string or a guess. A plain shape (not a schema) so the candidate and the
+ * draft share one set of field rules: zod cannot `.omit()` from a refined object.
+ */
+const opportunityCandidateShape = {
+  sourceId: sourceIdSchema,
+  sourceUrl: httpUrlSchema,
+  externalId: text(200).nullable(),
+  issuerName: text(500),
+  title: text(1000),
+  description: text(10_000).nullable(),
+  location: locationSchema.nullable(),
+  publishedAt: z.date().nullable(),
+  deadline: z.date().nullable(),
+  estimatedValue: decimalAmountSchema.nullable(),
+  currency: currencySchema.nullable(),
+  categories: labelList(),
+  contact: contactSchema.nullable(),
+  fetchedAt: z.date(),
+  status: z.enum(opportunityStatuses),
+};
+
+/** `currency` is required exactly when `estimatedValue` is present. */
+function valueHasCurrency(value: { estimatedValue: string | null; currency: string | null }) {
+  return (value.estimatedValue === null) === (value.currency === null);
+}
+const currencyIssue = {
+  message: "currency is required exactly when estimatedValue is present",
+  path: ["currency"],
+};
+
+/**
+ * What a source adapter's `normalize` returns (src/sources): an
+ * OpportunityDraft without `fingerprint` and `contentHash`, whose rules belong
+ * to ingestion (PR-03).
+ */
+export const opportunityCandidateSchema = z
+  .strictObject(opportunityCandidateShape)
+  .refine(valueHasCurrency, currencyIssue);
+
+export type OpportunityCandidate = z.output<typeof opportunityCandidateSchema>;
+
+/**
+ * A normalized notice ready to be stored: the candidate plus its deduplication
+ * key and content hash.
  *
  * `fingerprint` (deduplication key) and `contentHash` are taken as given: the
  * rules that compute them belong to ingestion (PR-03).
  */
 export const opportunityDraftSchema = z
   .strictObject({
-    sourceId: sourceIdSchema,
-    sourceUrl: httpUrlSchema,
-    externalId: text(200).nullable(),
-    issuerName: text(500),
-    title: text(1000),
-    description: text(10_000).nullable(),
-    location: locationSchema.nullable(),
-    publishedAt: z.date().nullable(),
-    deadline: z.date().nullable(),
-    estimatedValue: decimalAmountSchema.nullable(),
-    currency: currencySchema.nullable(),
-    categories: labelList(),
-    contact: contactSchema.nullable(),
-    fetchedAt: z.date(),
+    ...opportunityCandidateShape,
     fingerprint: text(200),
     contentHash: text(200),
-    status: z.enum(opportunityStatuses),
   })
-  .refine((draft) => (draft.estimatedValue === null) === (draft.currency === null), {
-    message: "currency is required exactly when estimatedValue is present",
-    path: ["currency"],
-  });
+  .refine(valueHasCurrency, currencyIssue);
 
 export type OpportunityDraft = z.input<typeof opportunityDraftSchema>;
 
