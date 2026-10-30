@@ -72,6 +72,11 @@ deployment.
 
 **Cel:** pobrać prawdziwe zamówienia z **jednego** publicznego źródła.
 
+**Podział:**
+
+- PR-02A: SafeHttpClient (kryterium akceptacji 3).
+- PR-02B: wybór źródła + adapter (kryteria akceptacji 1, 2, 4).
+
 **Krok 0 (przed kodem):** wybór źródła i zapis w DECISIONS: weryfikacja regulaminu,
 `robots.txt`, dostępności API/feedu, licencji danych, częstotliwości publikacji i tego, czy
 źródło faktycznie zawiera małe zamówienia. Kandydaci (wymagają weryfikacji, niczego nie

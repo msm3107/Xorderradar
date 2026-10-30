@@ -119,7 +119,10 @@ export interface SafeHttpClientDeps {
 }
 
 export interface GetOptions {
-  /** Cancels the request, including retry and rate-limit waits (e.g. a run timeout). */
+  /**
+   * Cancels the request, including the wait for its place in the client's queue
+   * and retry and rate-limit waits (e.g. a run timeout).
+   */
   readonly signal?: AbortSignal;
 }
 
@@ -357,8 +360,25 @@ export class SafeHttpClient {
 
   /** Fails with HttpClientError; never with another error type for request problems. */
   get(url: string | URL, options: GetOptions = {}): Promise<HttpResponse> {
-    const result = this.#queue.then(() => this.#get(url, options.signal));
-    this.#queue = result.catch(() => undefined);
+    const { signal } = options;
+    // `previous` settles when every earlier call has finished; it never rejects.
+    const previous = this.#queue;
+    // The caller's signal also cancels the wait for its place in the queue. Like
+    // an aborted rate-limit wait, this sends no traffic and does not consume the
+    // error budget. raceSignal removes its abort listener once either side settles.
+    const turn = signal === undefined ? previous : raceSignal(previous, signal);
+    const result = turn.then(
+      () => this.#get(url, signal),
+      () => {
+        throw new HttpClientError("aborted");
+      },
+    );
+    // An aborted queued call settles `result` early, so the next call must still
+    // wait for `previous` (the request that may still be in flight) as well as
+    // this one: an abort gives up only its own place and never lets a later
+    // request overtake a running one.
+    const settled = result.catch(() => undefined);
+    this.#queue = previous.then(() => settled);
     return result;
   }
 
@@ -712,7 +732,9 @@ async function readBody(
     { signal },
   );
   const raw = Buffer.concat(chunks, size);
-  if (decoder === null) return raw;
+  // Some servers send Content-Encoding on an empty body (empty list, 204); there
+  // is nothing to decode, and zlib would reject it as truncated (Z_BUF_ERROR).
+  if (decoder === null || raw.length === 0) return raw;
   try {
     return decoder(raw, { maxOutputLength: maxBytes });
   } catch (error: unknown) {

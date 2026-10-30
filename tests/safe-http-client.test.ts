@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import type { IncomingHttpHeaders } from "node:http";
 import { Readable } from "node:stream";
 import { brotliCompressSync, deflateRawSync, deflateSync, gzipSync } from "node:zlib";
@@ -71,6 +72,30 @@ const hangingStep = (request: TransportRequest): Promise<TransportResponse> =>
     request.signal.addEventListener("abort", () => {
       reject(new Error("aborted by signal"));
     });
+  });
+
+/** A 200 step that answers only once `release()` is called (a slow, in-flight request). */
+function gatedStep() {
+  let open: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const step = async (): Promise<TransportResponse> => {
+    await gate;
+    return { status: 200, headers: {}, body: Readable.from([Buffer.from("first")]) };
+  };
+  return {
+    step,
+    release: () => {
+      open();
+    },
+  };
+}
+
+/** Lets pending promise callbacks and the fake transport/resolver run. */
+const flush = (): Promise<void> =>
+  new Promise((resolve) => {
+    setImmediate(resolve);
   });
 
 function setup(
@@ -498,6 +523,76 @@ describe("SafeHttpClient timeouts and cancellation", () => {
     expect(requests).toEqual([]);
   });
 
+  it("rejects an already-aborted call without DNS, traffic, budget use or failure log", async () => {
+    const { client, requests, resolved, logs } = setup([{ status: 200 }], { errorBudget: 1 });
+    expect(await codeOf(client.get("https://example.org/a", { signal: AbortSignal.abort() }))).toBe(
+      "aborted",
+    );
+    expect(resolved).toEqual([]);
+    expect(requests).toEqual([]);
+    expect(logs()).toEqual([]);
+    expect((await client.get("https://example.org/b")).status).toBe(200);
+  });
+
+  it("cancels a call waiting in the queue while the request ahead is still pending", async () => {
+    const gated = gatedStep();
+    const { client, requests, logs } = setup([gated.step, { status: 200 }], { errorBudget: 1 });
+    let firstSettled = false;
+    const first = client.get("https://example.org/1").finally(() => {
+      firstSettled = true;
+    });
+    const controller = new AbortController();
+    const queued = client.get("https://example.org/2", { signal: controller.signal });
+    await flush();
+    expect(requests).toHaveLength(1);
+    controller.abort();
+    expect(await codeOf(queued)).toBe("aborted");
+    expect(firstSettled).toBe(false);
+    expect(requests).toHaveLength(1);
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+
+    gated.release();
+    expect((await first).body.toString()).toBe("first");
+    // Budget 1: the aborted wait was not counted as a failure, nor logged as one.
+    expect((await client.get("https://example.org/3")).status).toBe(200);
+    expect(logs().map((entry) => entry.message)).toEqual(["http request", "http request"]);
+  });
+
+  it("keeps later calls behind the in-flight request when a queued call aborts", async () => {
+    const gated = gatedStep();
+    const { client, requests, sleeps, maxActive } = setup([gated.step, { status: 200 }]);
+    const first = client.get("https://example.org/1");
+    const controller = new AbortController();
+    const aborted = client.get("https://example.org/2", { signal: controller.signal });
+    const third = client.get("https://example.org/3");
+    await flush();
+    controller.abort();
+    expect(await codeOf(aborted)).toBe("aborted");
+    await flush();
+    // The third call must not overtake the first, which is still in flight.
+    expect(requests.map((request) => request.url.pathname)).toEqual(["/1"]);
+
+    gated.release();
+    await first;
+    expect((await third).status).toBe(200);
+    expect(requests.map((request) => request.url.pathname)).toEqual(["/1", "/3"]);
+    expect(maxActive()).toBe(1);
+    // The minimum interval runs from the end of the first request.
+    expect(sleeps).toEqual([2000]);
+  });
+
+  it("removes its abort listener from a signal shared by queued calls", async () => {
+    const controller = new AbortController();
+    const { client } = setup([{ status: 200 }, { status: 200 }, { status: 200 }]);
+    const { signal } = controller;
+    await Promise.all([
+      client.get("https://example.org/1", { signal }),
+      client.get("https://example.org/2", { signal }),
+      client.get("https://example.org/3", { signal }),
+    ]);
+    expect(getEventListeners(signal, "abort")).toHaveLength(0);
+  });
+
   it("aborts during a retry wait", async () => {
     const controller = new AbortController();
     const { client, requests } = setup(
@@ -608,6 +703,25 @@ describe("SafeHttpClient size limit", () => {
       expect(await codeOf(client.get("https://example.org/"))).toBe("unsupported_encoding");
     }
   });
+
+  it.each(["gzip", "deflate", "br"])(
+    "returns an empty body with Content-Encoding %s without error or budget use",
+    async (encoding) => {
+      const { client, logs } = setup(
+        [
+          { status: 200, headers: { "content-encoding": encoding }, body: Buffer.alloc(0) },
+          { status: 200, body: Buffer.from("next") },
+        ],
+        { errorBudget: 1 },
+      );
+      const response = await client.get("https://example.org/empty");
+      expect(response.status).toBe(200);
+      expect(response.body.length).toBe(0);
+      // With a budget of 1, any counted failure would refuse this request.
+      expect((await client.get("https://example.org/next")).body.toString()).toBe("next");
+      expect(logs().map((entry) => entry.message)).toEqual(["http request", "http request"]);
+    },
+  );
 
   it("reports a corrupt compressed body as decompression_failed", async () => {
     const { client } = setup([

@@ -52,7 +52,9 @@ not merged); Part B (source selection + adapter) BLOCKED — see Blockers
     IPv6 allow-only `2000::/3` minus special ranges; IPv4-mapped always blocked.
   - Manual redirects (max 3, every hop revalidated); timeouts connect 10 s / total 30 s per
     attempt + optional caller `signal`; 5 MB limit (streamed, also after gzip/deflate/br
-    decompression); per-host min interval 2 s (floor 1 s, sequential queue, monotonic clock);
+    decompression; an empty body is returned as-is whatever its Content-Encoding); per-host
+    min interval 2 s (floor 1 s, sequential queue, monotonic clock; the caller `signal` also
+    cancels the wait in the queue without letting later calls overtake the in-flight request);
     retries max 2 only for timeouts/transient errnos/429/502/503/504 with jittered backoff and
     `Retry-After` (cap 60 s, per-host deadline); error budget 10 attempts.
   - User-Agent `RadarZamowien/0.1 (+<CRAWLER_CONTACT>)`; `CRAWLER_CONTACT` optional in config,
@@ -61,7 +63,8 @@ not merged); Part B (source selection + adapter) BLOCKED — see Blockers
   - `engines` raised to Node ≥ 22.19 (tests use `tls.setDefaultCACertificates`); `openssl` CLI
     needed for the real-TLS transport tests.
   - AC3 met: timeout, size exceeded, host outside allowlist, private address, redirect outside
-    allowlist, retry only for transient errors — 234 new tests (433 total).
+    allowlist, retry only for transient errors — 241 new tests (440 total).
+  - Owner GitHub review of 11d8c4f: PASS (2 Low + Info + Nit), all addressed in a follow-up.
 - **Part B — not started:** step 0 source selection recorded in DECISIONS (terms, robots.txt,
   API/feed, licence, small-order coverage) → adapter fetch → extract → normalize, real fixtures,
   parser tests, `source:preview <id>`, per-run logs (AC1, AC2, AC4).
@@ -106,6 +109,16 @@ PR-02 Part B to-dos (from Part A reviews):
   an `ExportSpecifier` selector).
 - Optional simplification: advertise only `gzip` and drop the br/raw-deflate paths unless the
   chosen source uses them.
+- URL-policy rejections (`invalid_url`, `host_not_allowed`) consume the error budget, so the
+  adapter must pre-check every detail/attachment link with the pure
+  `parseRequestUrl(link, normalizeAllowedHosts(allowedHosts))` from
+  `src/infrastructure/http/address-policy.ts` (no traffic, no budget) before calling `get()`.
+  Off-allowlist links (e.g. `platformazakupowa.pl`, `http://`, attachments on another host) are
+  stored as `sourceUrl` without fetching, or dropped with a logged reason; otherwise ~10 foreign
+  links exhaust the budget and stop the run.
+- Decide whether a caller abort during a running attempt should consume the error budget: today a
+  run timeout that cuts off an in-flight request counts as a failure, while the same abort in the
+  queue or a rate-limit/backoff sleep does not (from the Part A owner-review re-review, Info).
 
 Non-blocking follow-ups (handle when touching the files, no separate PR):
 
@@ -154,6 +167,15 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-10-30, PR-02 Part A owner-review follow-up (Node 22.22.0, pnpm 10.28.0, PostgreSQL 16):
+
+- Owner GitHub review of 11d8c4f: PASS, 0 Critical/High/Medium; 2 Low (empty body with
+  Content-Encoding → `decompression_failed`; caller `signal` ignored while queued), 1 Info
+  (Part B link pre-check to-do), 1 Nit (D-014 `engines` rationale) and the PR_PLAN split record —
+  all addressed.
+- `TEST_DATABASE_URL=… REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean;
+  440/440 tests passed (15 files). No dependency changes.
 
 2026-10-29, PR-02 Part A session (Node 22.22.0, pnpm 10.28.0, PostgreSQL 16):
 
