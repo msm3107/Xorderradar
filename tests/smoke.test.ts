@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterAll, describe, expect, it } from "vitest";
+import { migrateToLatest } from "../src/infrastructure/db/database.js";
 import {
-  requireTestDatabaseUrl,
+  createTestSchema,
   skipWithoutDatabase,
   unreachableDatabaseUrl,
 } from "./integration/test-database.js";
@@ -56,11 +57,22 @@ async function expectFailure(run: ReturnType<typeof runEntryPoint>) {
  */
 describe("smoke: application entry point", { timeout: TEST_TIMEOUT_MS }, () => {
   it.skipIf(skipWithoutDatabase)("`health` exits 0 and prints status ok", async () => {
+    // health also requires every migration applied: use a freshly migrated schema.
+    const schema = await createTestSchema();
+    try {
+      await migrateToLatest(schema.db);
+    } finally {
+      await schema.close();
+    }
     const { stdout } = await runEntryPoint({
       args: ["health"],
-      env: { NODE_ENV: "test", DATABASE_URL: requireTestDatabaseUrl() },
+      env: { NODE_ENV: "test", DATABASE_URL: schema.url },
     });
-    expect(JSON.parse(stdout)).toMatchObject({ status: "ok", service: "radar-zamowien" });
+    expect(JSON.parse(stdout)).toMatchObject({
+      status: "ok",
+      service: "radar-zamowien",
+      schema: { status: "ok" },
+    });
   });
 
   it("`health` exits 1 when the database is unreachable, without revealing the password", async () => {

@@ -157,6 +157,7 @@ describe("source:preview", () => {
       sourceUrl:
         "https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/id/08df3574-2846-e200-cfcf-e60001c05bd0",
       externalId: "2026/BZP 00507107/01",
+      tenderId: "ocds-148610-28a28ecf-bf58-4c1b-b2ba-e2adefdc2140",
       issuerName: "Zespół Żłobków m.st W-wy",
       title:
         "Dostawa zabawek dla dzieci od pierwszego dnia życia, w formie miękkiej przytulanki do Zespołu Żłobków m.st Warszawy - II procedura",

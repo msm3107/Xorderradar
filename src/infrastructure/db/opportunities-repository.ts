@@ -62,6 +62,7 @@ function toOpportunity(row: Selectable<OpportunitiesTable>): Opportunity {
     sourceId: row.source_id,
     sourceUrl: row.source_url,
     externalId: row.external_id,
+    tenderId: row.tender_id,
     issuerName: row.issuer_name,
     title: row.title,
     description: row.description,
@@ -99,6 +100,7 @@ function upsertQuery(db: Kysely<Database>, draft: ParsedDraft, onlyIfChanged: bo
       source_id: draft.sourceId,
       source_url: draft.sourceUrl,
       external_id: draft.externalId,
+      tender_id: draft.tenderId,
       issuer_name: draft.issuerName,
       title: draft.title,
       description: draft.description,
@@ -120,6 +122,7 @@ function upsertQuery(db: Kysely<Database>, draft: ParsedDraft, onlyIfChanged: bo
         .doUpdateSet((eb) => ({
           source_url: eb.ref("excluded.source_url"),
           external_id: eb.ref("excluded.external_id"),
+          tender_id: eb.ref("excluded.tender_id"),
           issuer_name: eb.ref("excluded.issuer_name"),
           title: eb.ref("excluded.title"),
           description: eb.ref("excluded.description"),

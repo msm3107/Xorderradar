@@ -116,9 +116,51 @@ z RSS. Preferencja: API → feed → dane strukturalne → HTML.
 - **PR-03A — rdzeń ingestu:** fingerprint + `content_hash`, deduplikacja i wykrywanie zmian
   (`inserted/updated/unchanged/rejected`), komenda `ingest` z advisory lockiem, tabela
   `ingestion_runs`, testy integracyjne. Kryteria akceptacji 1–4.
-- **PR-03B — helpery normalizacji:** białe znaki, HTML → tekst (`htmlBody`: opis, kontakt,
-  wartość), daty Europe/Warsaw, województwa/powiaty, słownik kategorii (CPV → kategorie MVP),
-  fallback niepoprawnego e-maila do `contact.raw`, pseudonimizowane fixture'y HTML.
+- **PR-03B — zmiany ogłoszeń BZP i helpery normalizacji:**
+  - **zmiany ogłoszeń (`NoticeUpdateNotice`, D-015):** pobieranie typu `NoticeUpdateNotice`
+    (z tym samym limitem rekordów/stron na typ co pozostałe); powiązanie z pierwotnym
+    ogłoszeniem wyłącznie przez `tenderId` (kolumna `tender_id`, PR-03A); wyciągnięcie nowego
+    terminu składania ofert z `htmlBody` — HTML jest niezaufany: wyciągamy tylko tę jedną
+    wartość, nie przechowujemy HTML-a; brak albo nieparsowalna wartość → brak zmiany (nigdy
+    zgadywanie); aktualizacja `deadline` pierwotnego ogłoszenia, wykryta jako `updated`;
+    rekordy `NoticeUpdateNotice` **nie są zapisywane jako osobne oferty** w `opportunities`
+    (byłyby szumem w matchingu i digeście) — służą wyłącznie do aktualizacji pierwotnego
+    ogłoszenia;
+  - **termin ze zmiany jest trwały:** ponowny ingest pierwotnego ogłoszenia (backfill
+    `ingest --date …` albo każde ponowne pobranie) mapuje znowu jego pierwotne
+    `submittingOffersDate`, więc bez dodatkowej reguły `content_hash` się różni, wiersz staje
+    się `updated` i przedłużony termin wraca do pierwotnego. PR-03B musi temu zapobiec (sposób
+    — np. zapamiętanie, które ogłoszenie ustawiło termin — do decyzji w PR-03B, zapisanej w
+    D-015);
+  - **kolejność zmian:** gdy dla jednego `tenderId` jest kilka `NoticeUpdateNotice`, wygrywa
+    zmiana o najpóźniejszej dacie publikacji; starsza zmiana (np. pobrana później przy
+    backfillu) nie nadpisuje nowszej;
+  - **decyzja otwarta dla PR-03B:** który wiersz aktualizować, gdy kilka wierszy ma ten sam
+    `(source_id, tender_id)` (np. kilka ogłoszeń jednego postępowania; nowa wersja
+    pierwotnego jako `…/02` nie jest potwierdzona). Do rozstrzygnięcia na danych z API przed
+    implementacją — bez zgadywania; do tego czasu taki przypadek ma być zalogowany i
+    pozostawiony bez zmian;
+  - **helpery normalizacji:** białe znaki, HTML → tekst (`htmlBody`: opis, kontakt, wartość),
+    daty Europe/Warsaw, województwa/powiaty, słownik kategorii (CPV → kategorie MVP), fallback
+    niepoprawnego e-maila do `contact.raw`, pseudonimizowane fixture'y HTML.
+  - **Kryteria akceptacji PR-03B (zmiany ogłoszeń):**
+    1. `NoticeUpdateNotice` z nowym terminem zmienia `deadline` pierwotnego ogłoszenia
+       (znalezionego po `source_id` + `tender_id`); przebieg liczy to jako `updated`.
+    2. Brak pierwotnego ogłoszenia, brak `tenderId`, brak lub nieparsowalny termin w
+       `htmlBody` → zapisany wiersz bez zmian, powód zalogowany (bez treści HTML), nic nie jest
+       zgadywane.
+    3. Testy na pseudonimizowanych fixture'ach prawdziwych `NoticeUpdateNotice` (także z
+       `htmlBody` dotyczącym czegoś innego niż termin) i na wrogim/niepoprawnym HTML-u.
+    4. Ponowny ingest pierwotnego ogłoszenia (także backfill jego dnia publikacji po dniu
+       zmiany) nie przywraca terminu sprzed `NoticeUpdateNotice` — z testem.
+    5. Przy kilku `NoticeUpdateNotice` jednego `tenderId` obowiązuje termin z najpóźniej
+       opublikowanej, niezależnie od kolejności ingestu — z testem.
+    6. `NoticeUpdateNotice` nie tworzy własnego wiersza w `opportunities` (test: liczba ofert
+       po ingeście dnia z samymi zmianami się nie zmienia).
+  - **Kandydat (do potwierdzenia przez właściciela):** nadrabianie pominiętych dni —
+    `ingest --from YYYY-MM-DD --to YYYY-MM-DD` albo automatycznie dni od ostatniego przebiegu
+    `succeeded` w `ingestion_runs` (cron, który nie ruszył przez kilka dni, dziś gubi te dni;
+    to samo dotyczy zmian ogłoszeń z tych dni).
 
 **Zakres:**
 
@@ -135,6 +177,10 @@ z RSS. Preferencja: API → feed → dane strukturalne → HTML.
 
 1. Dwukrotne uruchomienie `ingest` na tych samych danych nie tworzy duplikatów.
 2. Zmiana terminu/treści jest wykryta jako aktualizacja.
+   _Uwaga (przegląd właściciela PR-03A, zapytanie na żywo 2026-10-28):_ kryterium jest
+   spełnione mechanicznie (ponowne pobranie zmienionego ogłoszenia → `updated`, testy), ale
+   dla BZP w produkcji nie wystąpi: zmiany są osobnymi ogłoszeniami `NoticeUpdateNotice`
+   (nowy termin tylko w `htmlBody`), których PR-03A nie pobiera. Dla BZP zależy od PR-03B.
 3. Równoległe uruchomienia nie psują danych (lock + ograniczenia unikalności).
 4. Podsumowanie przebiegu jest zapisane i zalogowane.
 
@@ -183,6 +229,9 @@ z RSS. Preferencja: API → feed → dane strukturalne → HTML.
 
 1. Ponowne uruchomienie `digest` tego samego dnia nie wysyła duplikatów.
 2. E-mail zawiera tylko istotne pola i link do źródła; ogłoszenia po terminie są pomijane.
+   _Uwaga:_ przed PR-03B zapisany `deadline` ogłoszeń BZP może być nieaktualny (przedłużenia
+   terminu przychodzą jako `NoticeUpdateNotice`, D-015) — pomijanie po terminie nie może
+   wtedy polegać na nim dla BZP, bo odrzucałoby przetargi z przedłużonym terminem.
 3. Dane ze źródeł są escapowane w HTML (test z wrogim tytułem).
 4. Tryb `smtp` wymaga jawnej konfiguracji; testy nie wysyłają prawdziwych maili.
 

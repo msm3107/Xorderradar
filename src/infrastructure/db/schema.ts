@@ -28,6 +28,7 @@ export interface OpportunitiesTable {
   source_id: string;
   source_url: string;
   external_id: string | null;
+  tender_id: string | null;
   issuer_name: string;
   title: string;
   description: string | null;

@@ -72,6 +72,7 @@ const CONTENT_FIELDS = [
   "status",
   "sourceUrl",
   "externalId",
+  "tenderId",
 ] as const satisfies readonly (keyof OpportunityCandidate)[];
 
 /**

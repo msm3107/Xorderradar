@@ -151,4 +151,22 @@ export const migrations: Readonly<Record<string, Migration>> = {
       `.execute(db);
     },
   },
+
+  "0003_opportunities_tender_id": {
+    async up(db: Kysely<unknown>) {
+      // The source's procedure id (BZP: OCDS `tenderId`, D-015); null when the
+      // source does not give one. Rows stored before this migration stay null
+      // until they are fetched again. Lengths are bounded by the domain schema,
+      // like the other text columns.
+      await sql`ALTER TABLE opportunities ADD COLUMN tender_id text`.execute(db);
+
+      // Not unique: one procedure has several notices (the notice and the
+      // notices that change it). PR-03B looks the original up by this id.
+      await sql`
+        CREATE INDEX opportunities_source_tender_id_idx
+          ON opportunities (source_id, tender_id)
+          WHERE tender_id IS NOT NULL
+      `.execute(db);
+    },
+  },
 };

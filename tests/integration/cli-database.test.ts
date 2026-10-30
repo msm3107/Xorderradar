@@ -1,3 +1,4 @@
+import { sql } from "kysely";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { defaultCliDeps, ExitCode, runCli } from "../../src/cli.js";
 import {
@@ -33,16 +34,27 @@ describe.skipIf(skipWithoutDatabase)("CLI with a real database (PostgreSQL)", ()
     await schema.close();
   });
 
-  it("health reports the database as ok", async () => {
-    const result = await run(["health"], requireTestDatabaseUrl());
-    expect(result.code).toBe(ExitCode.Ok);
+  it("health exits 1 on a reachable but un-migrated database, without creating anything", async () => {
+    const result = await run(["health"], schema.url);
+    expect(result.code).toBe(ExitCode.Failure);
     expect(JSON.parse(result.stdout)).toEqual({
-      status: "ok",
+      status: "error",
       service: "radar-zamowien",
       environment: "test",
       database: { status: "ok" },
+      schema: {
+        status: "error",
+        reason: "not_migrated",
+        pending: ["0001_core_schema", "0002_ingestion_runs", "0003_opportunities_tender_id"],
+      },
     });
-    expect(result.stderr).toBe("");
+    expect(result.stderr).toBe("Schema check failed: not migrated; run `migrate`\n");
+    // Read-only: the check created neither the migration ledger nor its lock table.
+    const { rows } = await sql<{ ledger: string | null; lock: string | null }>`
+      SELECT to_regclass('kysely_migration')::text AS ledger,
+             to_regclass('kysely_migration_lock')::text AS lock
+    `.execute(schema.db);
+    expect(rows).toEqual([{ ledger: null, lock: null }]);
   });
 
   it("migrate applies pending migrations, then reports nothing to apply", async () => {
@@ -50,12 +62,25 @@ describe.skipIf(skipWithoutDatabase)("CLI with a real database (PostgreSQL)", ()
     expect(first.code).toBe(ExitCode.Ok);
     expect(JSON.parse(first.stdout)).toEqual({
       status: "ok",
-      applied: ["0001_core_schema", "0002_ingestion_runs"],
+      applied: ["0001_core_schema", "0002_ingestion_runs", "0003_opportunities_tender_id"],
     });
 
     const second = await run(["migrate"], schema.url);
     expect(second.code).toBe(ExitCode.Ok);
     expect(JSON.parse(second.stdout)).toEqual({ status: "ok", applied: [] });
+  });
+
+  it("health reports ok once every migration is applied", async () => {
+    const result = await run(["health"], schema.url);
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(JSON.parse(result.stdout)).toEqual({
+      status: "ok",
+      service: "radar-zamowien",
+      environment: "test",
+      database: { status: "ok" },
+      schema: { status: "ok" },
+    });
+    expect(result.stderr).toBe("");
   });
 
   it("migrate explains a search_path that names no existing schema", async () => {

@@ -19,6 +19,7 @@ function draft(overrides: Partial<OpportunityDraft> = {}): OpportunityDraft {
     sourceId: "test-source",
     sourceUrl: `https://zamowienia.example.gov.pl/ogloszenie/${String(counter)}`,
     externalId: null,
+    tenderId: null,
     issuerName: "Szkoła Podstawowa nr 1",
     title: "Przegląd instalacji elektrycznej",
     description: null,

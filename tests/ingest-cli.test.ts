@@ -105,7 +105,13 @@ describe("ingest arguments", () => {
   it("accepts sources and options in any order (then needs the lock)", async () => {
     const result = await run(["ingest", "--limit", "5", "bzp", "--date", "2026-10-29"]);
     expect(result.calls.lockAttempts).toBe(1);
-    expect(result.code).toBe(ExitCode.Failure);
+    // The stub's lock is busy: skipped (exit 0), with the parsed date and limit.
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "skipped",
+      publicationDate: "2026-10-29",
+      limit: 5,
+    });
   });
 });
 
@@ -118,12 +124,21 @@ describe("ingest command (stub database)", () => {
     expect(result.calls.closed).toBe(1);
   });
 
-  it("exits 1 without fetching when another run holds the lock", async () => {
+  it("reports skipped and exits 0 without fetching when another run holds the lock", async () => {
     const result = await run(["ingest"]);
-    expect(result.code).toBe(ExitCode.Failure);
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toContain("Another ingest run holds the lock; nothing was fetched.");
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(JSON.parse(result.stdout)).toEqual({
+      status: "skipped",
+      reason: "lock_busy",
+      publicationDate: "2026-10-29",
+      limit: INGEST_DEFAULT_LIMIT,
+      runs: [],
+    });
+    expect(result.stderr).toContain(
+      "Ingest skipped: another ingest run holds the lock; nothing was fetched.\n",
+    );
     expect(result.stderr).toContain('"message":"ingest lock busy"');
+    expect(result.stderr).not.toMatch(/fail|error/i);
     expect(result.calls.httpClients).toBe(0);
     expect(result.calls.closed).toBe(1);
   });

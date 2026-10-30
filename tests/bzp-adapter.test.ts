@@ -93,6 +93,7 @@ describe("bzpAdapter.extract + normalize on captured responses", () => {
       sourceId: "bzp",
       sourceUrl: `${DETAIL_URL}08df3574-2846-e200-cfcf-e60001c05bd0`,
       externalId: "2026/BZP 00507107/01",
+      tenderId: "ocds-148610-28a28ecf-bf58-4c1b-b2ba-e2adefdc2140",
       issuerName: "Zespół Żłobków m.st W-wy",
       title:
         "Dostawa zabawek dla dzieci od pierwszego dnia życia, w formie miękkiej przytulanki do Zespołu Żłobków m.st Warszawy - II procedura",
@@ -166,6 +167,7 @@ describe("bzpAdapter.extract + normalize on captured responses", () => {
       sourceId: "bzp",
       sourceUrl: `${DETAIL_URL}08df3592-115f-9078-cfcf-e60001c05eab`,
       externalId: "2026/BZP 00507754/01",
+      tenderId: null,
       issuerName: "Rudzki Zakład Aktywności Zawodowej",
       title: "dostawa środków piorących i dezynfekujących",
       description: null,
@@ -180,6 +182,7 @@ describe("bzpAdapter.extract + normalize on captured responses", () => {
       status: "open",
     });
     expect(second?.externalId).toBe("2026/BZP 00507787/01");
+    expect(second?.tenderId).toBeNull();
     expect(second?.issuerName).toBe("METRO WARSZAWSKIE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ");
     expect(second?.title).toBe("Dostawa elektromechanicznego sprzętu warsztatowego");
     expect(second?.publishedAt).toEqual(new Date("2026-10-29T08:17:02.629Z"));
@@ -216,6 +219,7 @@ describe("bzpAdapter.extract + normalize on captured responses", () => {
             "organizationProvince",
             "publicationDate",
             "submittingOffersDate",
+            "tenderId",
           ].sort(),
         );
       }
@@ -403,6 +407,33 @@ describe("bzpAdapter.normalize on mutated records", () => {
         reason: "invalid source fields: objectId",
       });
     }
+  });
+
+  it("maps tenderId trimmed, and an unusable one to null without rejecting the notice", () => {
+    const id = "ocds-148610-28a28ecf-bf58-4c1b-b2ba-e2adefdc2140";
+    expect(expectCandidate(normalizeMutated({ tenderId: ` ${id}\n` })).tenderId).toBe(id);
+    for (const tenderId of [
+      null,
+      undefined,
+      "",
+      "   ",
+      42,
+      { id },
+      [id],
+      "x".repeat(201),
+      "x".repeat(20_001),
+      "ocds-\ud800",
+      "ocds-\u0000x",
+      "ocds-\u0007x",
+      "ocds-\u007fx",
+    ]) {
+      const candidate = expectCandidate(normalizeMutated({ tenderId }));
+      expect(candidate.tenderId).toBeNull();
+      expect(candidate.externalId).toBe(FIRST_ID);
+    }
+    expect(expectCandidate(normalizeMutated({ tenderId: "x".repeat(200) })).tenderId).toHaveLength(
+      200,
+    );
   });
 
   it("ignores unknown extra fields", () => {

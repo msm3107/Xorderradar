@@ -26,7 +26,11 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
   });
 
   it("applies every migration on an empty database", async () => {
-    expect(await migrateToLatest(schema.db)).toEqual(["0001_core_schema", "0002_ingestion_runs"]);
+    expect(await migrateToLatest(schema.db)).toEqual([
+      "0001_core_schema",
+      "0002_ingestion_runs",
+      "0003_opportunities_tender_id",
+    ]);
     expect(await tablesInSchema()).toEqual([
       "company_profiles",
       "ingestion_runs",
@@ -43,7 +47,11 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
     const { rows } = await sql<{ name: string }>`SELECT name FROM kysely_migration`.execute(
       schema.db,
     );
-    expect(rows.map((row) => row.name)).toEqual(["0001_core_schema", "0002_ingestion_runs"]);
+    expect(rows.map((row) => row.name)).toEqual([
+      "0001_core_schema",
+      "0002_ingestion_runs",
+      "0003_opportunities_tender_id",
+    ]);
   });
 
   it("creates the integrity constraints from ARCHITECTURE §5", async () => {
@@ -58,6 +66,7 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
       expect.arrayContaining([
         "opportunities_fingerprint_key",
         "opportunities_source_external_id_key",
+        "opportunities_source_tender_id_idx",
         "opportunities_estimated_value_check",
         "opportunities_value_currency_check",
         "opportunities_currency_check",
@@ -69,6 +78,23 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
         "company_profiles_email_check",
       ]),
     );
+  });
+
+  it("adds a nullable tender_id column, indexed per source but not unique (0003)", async () => {
+    const { rows: columns } = await sql<{ data_type: string; is_nullable: string }>`
+      SELECT data_type, is_nullable FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'opportunities' AND column_name = 'tender_id'
+    `.execute(schema.db);
+    expect(columns).toEqual([{ data_type: "text", is_nullable: "YES" }]);
+    const { rows: indexes } = await sql<{ indexdef: string }>`
+      SELECT indexdef FROM pg_indexes
+      WHERE schemaname = current_schema() AND indexname = 'opportunities_source_tender_id_idx'
+    `.execute(schema.db);
+    expect(indexes).toHaveLength(1);
+    expect(indexes[0]?.indexdef).not.toContain("UNIQUE");
+    expect(indexes[0]?.indexdef).toContain("(source_id, tender_id)");
+    expect(indexes[0]?.indexdef).toContain("WHERE (tender_id IS NOT NULL)");
   });
 });
 
@@ -83,6 +109,10 @@ describe.skipIf(skipWithoutDatabase)("migrations: concurrent runs (PostgreSQL)",
 
   it("apply each migration exactly once", async () => {
     const runs = await Promise.all([migrateToLatest(schema.db), migrateToLatest(schema.db)]);
-    expect(runs.flat()).toEqual(["0001_core_schema", "0002_ingestion_runs"]);
+    expect(runs.flat()).toEqual([
+      "0001_core_schema",
+      "0002_ingestion_runs",
+      "0003_opportunities_tender_id",
+    ]);
   });
 });

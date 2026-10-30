@@ -2,8 +2,11 @@
 
 Current phase: PHASE 1 — DATA PIPELINE
 Current PR: PR-03 — Ingestion, Normalization & Deduplication
-Status: Part A (ingestion core) READY FOR PR — Code & Safety Review PASS (round 3), Quality Review
-ACCEPT WITH NOTES; awaiting user verification. Part B (normalization helpers) not started.
+Status: Part A (ingestion core) merged in PR #4 (head 6263cd8). The owner-review follow-up
+round (docs, `tender_id`, lock busy → skipped, `health` schema check) arrived after the merge
+and is in a follow-up PR; Code & Safety re-review PASS, Quality Review ACCEPT WITH NOTES (notes
+applied); awaiting owner verification. Part B (BZP notice updates + normalization helpers) not
+started.
 
 ## Completed
 
@@ -100,7 +103,10 @@ ACCEPT WITH NOTES; awaiting user verification. Part B (normalization helpers) no
 
 ## In progress
 
-**PR-03 — Part A (ingestion core)** — ready for PR, awaiting user verification (scope split recorded in `docs/PR_PLAN.md` → PR-03 „Podział”; acceptance criteria 1–4):
+**PR-03 — Part A (ingestion core)** — merged in PR #4; the owner-review follow-up round is in
+a follow-up PR (Code & Safety re-review PASS, Quality Review ACCEPT WITH NOTES); awaiting owner
+verification of that PR (scope split
+recorded in `docs/PR_PLAN.md` → PR-03 „Podział”; acceptance criteria 1–4):
 
 - `src/ingestion/fingerprint.ts` (D-016): `fingerprint` = SHA-256 of
   `JSON.stringify([sourceId, "external", externalId])`, or `[sourceId, "url", sourceUrl]`
@@ -123,8 +129,9 @@ ACCEPT WITH NOTES; awaiting user verification. Part B (normalization helpers) no
   `failed`/`no_adapter` (D-020); each run stored in `ingestion_runs` and logged.
 - CLI `ingest [sourceId...] [--date YYYY-MM-DD] [--limit N]` (default yesterday UTC, 1000 per
   notice type, max 1000) under a session advisory lock on a dedicated connection (D-019);
-  busy → exit 1 without fetching; no auto-migrate (missing table → exit 1); JSON summary on
-  stdout; exit 0 when all sources `succeeded`/`incomplete`, 1 otherwise, 2 for usage errors.
+  busy → `status: "skipped"`, exit 0, nothing fetched (owner review change, was exit 1); no
+  auto-migrate (any pending migration → exit 1); JSON summary on stdout; exit 0 when all
+  sources `succeeded`/`incomplete`, 1 otherwise, 2 for usage errors.
 - Tests: fingerprint/contentHash and ingest CLI unit tests, BZP streaming tests, integration
   tests on PostgreSQL (two runs → no duplicates / all unchanged; changed deadline/title →
   updated with id and `first_seen_at` kept; failing source isolated; lock held / concurrent
@@ -157,6 +164,39 @@ ACCEPT WITH NOTES; awaiting user verification. Part B (normalization helpers) no
   = normalization helpers only), R2 (this status) and notes N1–N6 applied (README re-run with
   `--date`, `ingest.log`, enabling sources; `content_hash` change only affects re-fetched rows;
   PR-03B/04/05 notes below).
+- **Owner review of 6263cd8 (PR #4): PASS with doc asks + suggestions.** The owner queried the
+  live API once via proxy (2026-10-28; facts below and in D-015). Follow-up round:
+  - Taken into this PR:
+    - docs: live facts in D-015, STATE, PR_PLAN (PR-03B scope/AC, AC2 caveat, PR-05 caveat),
+      ARCHITECTURE;
+    - `tenderId` stored: domain field (`text(200)`, nullable), BZP mapping (missing / blank /
+      non-string / too long / malformed Unicode / control characters → `null`, record kept), migration `0003_opportunities_tender_id`
+      (nullable `tender_id text`, non-unique partial index `(source_id, tender_id)`), appended
+      to the end of the `content_hash` field list (D-016; fingerprint unchanged);
+    - lock busy is not an error: `{"status":"skipped","reason":"lock_busy",…,"runs":[]}`,
+      exit 0, no `ingestion_runs` row, `ingest lock busy` warn kept; lock lost stays exit 1
+      (D-019);
+    - `health` checks migrations: field `schema` (`ok` / `error` + `not_migrated` + `pending`
+      names / `not_checked` when the database itself failed), overall `error` if either check
+      fails. Shared with `ingest`: `pendingMigrations` reads the `kysely_migration` ledger
+      (read-only; no ledger created, no migration lock) instead of
+      `to_regclass('ingestion_runs')` — the old check would have let a database at `0002` (no
+      `tender_id`) through (D-020).
+  - Planned, not in this PR: `NoticeUpdateNotice` handling (PR-03B); catching up missed days
+    (`--from/--to` or automatic since the last `succeeded` run) — candidate in PR_PLAN PR-03B,
+    to be confirmed by the owner.
+- Review of the owner-review follow-up round:
+  - Code & Safety Review: PASS with 2 Low, both fixed: L1 a `tenderId` with a control
+    character (e.g. NUL, which PostgreSQL rejects in `text`) → `null` instead of a rejected
+    notice (+ test values `\u0000`, `\u0007`, `\u007f`); L2 the read-only `health` test also
+    asserts that `kysely_migration_lock` is not created. Re-review: PASS.
+  - Quality Review: ACCEPT WITH NOTES; doc round applied: R1–R3 PR-03B in `docs/PR_PLAN.md`
+    (a deadline taken from a `NoticeUpdateNotice` survives re-ingesting the original; update
+    notices are not stored as their own offers; the latest published update wins, and the
+    row to update when several share `(source_id, tender_id)` is an explicit open decision),
+    N1 (this status), N2 (`tenderId` → `null` cases), N3/N5 (README: `ingest` exit 1 cases;
+    monitor freshness by the newest `succeeded` run), N6 (cancellation notices, open question
+    below).
 
 ## Blockers
 
@@ -195,26 +235,38 @@ on `node:https` with pinned lookup, no HTTP library) accepted in PR-02 Part A; D
 source: BZP through the official API) in PR-02 Part B; PR-03 Part A: D-016 (fingerprint and
 `content_hash` format), D-017 (`unchanged` writes nothing, no `last_seen_at`), D-018 (ingest
 limit 1000 per notice type, 10-min source timeout, streaming), D-019 (advisory lock), D-020
-(source selection and configuration errors).
+(source selection and configuration errors). The PR-03A owner-review round amended D-015
+(notice-update limitation, `tenderId` mapping), D-016 (`tenderId` in `content_hash`), D-019
+(lock busy → skipped, exit 0) and D-020 (readiness = no pending migrations) without new IDs.
 
 ## Next action
 
-1. User verifies PR-03 Part A and opens the PR.
+1. Owner verifies the PR-03A follow-up PR (owner-review round after PR #4 was merged; Code &
+   Safety re-review PASS, Quality Review ACCEPT WITH NOTES).
 2. Owner verifies PR-02 AC1 outside the container (command and checklist under Blockers); a
    first live `ingest bzp --date <past weekday>` on the same machine is a useful follow-up
    check (exit 0, `inserted` > 0, a second run all `unchanged`).
-3. PR-03 Part B — normalization helpers (`docs/PR_PLAN.md` → PR-03 „Podział”): whitespace,
+3. PR-03 Part B — BZP notice updates (`NoticeUpdateNotice` linked by `tender_id`, new
+   deadline from `htmlBody`, never guessed; see the notes below and `docs/PR_PLAN.md`) and
+   normalization helpers (`docs/PR_PLAN.md` → PR-03 „Podział”): whitespace,
    HTML → text from `htmlBody` (description, contact, value), dates in Europe/Warsaw,
    voivodeships/counties, category dictionary (CPV → MVP categories), invalid published e-mail
    → `contact.raw` instead of rejecting the notice, pseudonymised HTML fixtures. Note: adding
    description/contact/value changes `content_hash`, but only rows fetched again become
    `updated` (D-016). The daily cron fetches only yesterday, so older rows are neither marked
    nor enriched: Part B must document a backfill step (`ingest --date …` for every publication
-   day whose notices still have open deadlines).
+   day whose notices still have open deadlines). Backfill re-ingests the originals with their
+   original `submittingOffersDate`, so it must not undo a deadline already taken from a later
+   `NoticeUpdateNotice` (PR-03B AC4), and it must also cover the update notices of those days
+   (the latest published update wins, AC5).
 4. Open points carried from D-015/PR-02 for PR-03: whether the API's publication-day boundary
    is UTC or Polish time (cron at ~06:00 Europe/Warsaw ingests yesterday UTC; overlapping days
    are harmless thanks to dedup) — verify on the first live runs.
-5. Deferred in Part A: fingerprint variant for sources with neither an external id nor a
+5. Open question for PR-03B/PR-05 (Quality Review N6): BZP cancellation notices (a tender
+   withdrawn → status `cancelled`) have no plan item yet. Without one the digest may show
+   cancelled tenders as open; decide in PR-03B whether to fetch and apply them like
+   `NoticeUpdateNotice` (by `tenderId`), or record the limitation for PR-05.
+6. Deferred in Part A: fingerprint variant for sources with neither an external id nor a
    stable URL (D-016; with the first such source); `last_seen_at` (D-017; when a feature needs
    it, e.g. detecting withdrawn notices).
 
@@ -223,15 +275,18 @@ Notes from the Part A Code & Safety Review (for the Quality Review and later):
 - `status` is part of `content_hash` and BZP derives it from `fetchedAt` (deadline passed →
   `closed`), so re-ingesting a notice after its deadline reports `updated` once. Intended: the
   stored state of the offer changed (D-016, D-017).
-- **Open product question (not in PR-03A scope) — decide before PR-05, ideally while planning
-  PR-03B:** on live BZP, changes to a published notice (e.g. a moved deadline, cancellation)
-  are published as separate notice types (amendments/corrections), which `ingest` does not
-  fetch yet. `updated` only arises from re-fetching the same notice, and with the daily
-  "yesterday" cron a notice is effectively never re-fetched — so moved deadlines and
-  cancellations will not reach the user until amendments are handled. Related: `externalId` =
-  `noticeNumber`, which includes a version suffix (e.g. `…/01`); if BZP publishes a new version
-  as `…/02`, it would be stored as a separate opportunity. Decide the key together with the
-  amendments question (not verifiable offline, D-014).
+- **BZP notice updates (owner's live query, 2026-10-28; D-015):** changes to a published
+  notice come as a separate notice type, `NoticeUpdateNotice`, which `ingest` does not fetch.
+  At least 100 that day (`PageSize=100` returned a full page; 331 `ContractNotice` the same
+  day); in 96 of 100 the `htmlBody` concerns the offer submission deadline. An update notice
+  has its own `noticeNumber` and links to the original only through `tenderId`
+  (`ocds-148610-…`, present in 100/100); its `submittingOffersDate` is `null` — the new
+  deadline is only in `htmlBody`. All 100 had the suffix `/01`; the risk of a new version of
+  the original as `…/02` is not confirmed.
+  - **PR-03A AC2** (change detected as `updated`) is met mechanically, but for BZP it will not
+    happen in production — it depends on PR-03B (scope and AC in `docs/PR_PLAN.md`).
+  - **PR-05 must not rely on the stored `deadline` for BZP before PR-03B lands:** "skip
+    notices past their deadline" would drop tenders whose deadline was extended.
 - **PR-04/05:** the stored `status` stays `open` after the deadline for rows that are never
   re-fetched, so matching and the digest must decide "still open" from `deadline` vs now, not
   from the stored `status`.
@@ -278,8 +333,8 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - A missing `openssl` CLI makes the transport test fail in `beforeAll` (documented in README).
 
 - From PR-01 Quality Review:
-  - `health` reports `ok` on a reachable but un-migrated DB — consider reporting pending
-    migrations (PR-07 ops or next time `health` is touched).
+  - ~~`health` reports `ok` on a reachable but un-migrated DB~~ — closed in PR-03A (owner
+    review follow-up): `health` reports pending migrations in `schema` and exits 1.
   - A failed `migrate` writes only to stderr; consider a JSON error report on stdout like
     `health`, and document `migrate` failure output in README.
   - README "Szybki start": add a one-line pointer to "Baza danych" (create role/DB) before
@@ -315,6 +370,20 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-10-30, PR-03 Part A owner-review follow-up (docs, `tender_id`, lock busy → skipped,
+`health` schema check; Node 22.22.0, pnpm 10.28.0, PostgreSQL 16):
+`TEST_DATABASE_URL=… REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 625/625
+tests passed (21 files; before: 614). After the Code & Safety Review L1/L2 fixes (control
+characters in `tenderId` → `null`; `health` creates no `kysely_migration_lock`) and the
+Quality Review doc round (docs/README only): still 625/625. `pnpm build` clean; built
+`health` on a database migrated only to `0001` → `schema` `not_migrated` with the pending names, exit 1. No
+dependency changes. Existing tests changed only where the contract changed on purpose:
+busy-lock assertions (exit 0 + skipped report), exact migration lists (+ `0003`), health
+reports (+ `schema`), the BZP mapped-field allowlist (+ `tenderId`), the `runIngestion`
+"schema not ready" setup (migrate only 0001 / 0001–0002 instead of dropping `ingestion_runs`
+— the ledger check trusts the ledger) and the base-database health tests (now on a migrated
+per-file schema, since `radar_test` itself is not fully migrated).
 
 2026-10-30, PR-03 Part A doc round (R1, R2, N1–N6; docs/README only):
 `TEST_DATABASE_URL=… REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 614/614

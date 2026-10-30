@@ -1,4 +1,4 @@
-import { sql, type Kysely } from "kysely";
+import type { Kysely } from "kysely";
 import { DomainError } from "../domain/errors.js";
 import {
   calendarDateSchema,
@@ -7,6 +7,7 @@ import {
   type IngestionRunSummary,
 } from "../domain/ingestion-run.js";
 import { opportunityCandidateSchema } from "../domain/opportunity.js";
+import { pendingMigrations } from "../infrastructure/db/database.js";
 import { describeDatabaseFailure } from "../infrastructure/db/errors.js";
 import { recordIngestionRun } from "../infrastructure/db/ingestion-runs-repository.js";
 import { ingestOpportunity } from "../infrastructure/db/opportunities-repository.js";
@@ -65,12 +66,12 @@ export class IngestionRequestError extends Error {
   override readonly name = "IngestionRequestError";
 }
 
-/** `ingestion_runs` does not exist yet: `migrate` has not been run since 0002. */
+/** The database has pending migrations (pendingMigrations): `migrate` has not been run. */
 export class SchemaNotReadyError extends Error {
   override readonly name = "SchemaNotReadyError";
 
   constructor() {
-    super("Database schema is not up to date (no ingestion_runs table); run `migrate` first.");
+    super("Database schema is not up to date (pending migrations); run `migrate` first.");
   }
 }
 
@@ -297,12 +298,10 @@ export async function runIngestion(
   if (!Number.isInteger(request.maxRecords) || request.maxRecords < 1) {
     throw new IngestionRequestError("maxRecords must be a positive integer");
   }
-  // Checked before anything is fetched: without it every run record would
-  // fail only after the source had been read. `ingest` never migrates by itself.
-  const { rows } = await sql<{
-    relation: string | null;
-  }>`SELECT to_regclass('ingestion_runs')::text AS relation`.execute(deps.db);
-  if ((rows[0]?.relation ?? null) === null) throw new SchemaNotReadyError();
+  // Checked before anything is fetched: without it every write (or run record)
+  // would fail only after the source had been read. The same check as
+  // `health`; `ingest` never migrates by itself.
+  if ((await pendingMigrations(deps.db)).length > 0) throw new SchemaNotReadyError();
   const sourceIds = await selectSources(deps, request);
   if (sourceIds.length === 0) deps.logger.warn("no enabled sources to ingest");
 

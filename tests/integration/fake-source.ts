@@ -9,6 +9,7 @@ import type { FetchContext, RawDocument, SourceAdapter } from "../../src/sources
  */
 const fakeNoticeSchema = z.object({
   externalId: z.string().nullable(),
+  tenderId: z.string().nullable(),
   title: z.string(),
   deadline: z.string().nullable(),
   /** Makes normalize reject the record (reason names no values). */
@@ -29,6 +30,7 @@ export interface FakeSource extends SourceAdapter<FakeExtracted> {
 export function fakeNotice(n: number, overrides: Partial<FakeNotice> = {}): FakeNotice {
   return {
     externalId: `FAKE/${String(n).padStart(4, "0")}`,
+    tenderId: null,
     title: `Dostawa materiałów biurowych nr ${String(n)}`,
     deadline: "2026-11-20T09:00:00.000Z",
     invalid: false,
@@ -82,6 +84,7 @@ export function fakeSource(sourceId: string, script: readonly FakeStep[] = []): 
           notice.externalId ?? notice.title,
         )}`,
         externalId: notice.externalId,
+        tenderId: notice.tenderId,
         issuerName: "Gmina Przykładowa",
         title: notice.title,
         description: null,

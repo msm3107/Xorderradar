@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isWellFormedText } from "../../domain/common.js";
 import {
   opportunityCandidateSchema,
   type OpportunityLocation,
@@ -43,6 +44,11 @@ export const BZP_MAX_PAGES_PER_TYPE = 40;
 const MAX_RECORDS_PER_DOCUMENT = 500;
 /** Bound on every string read from a record, before any regular expression runs on it. */
 const MAX_FIELD_LENGTH = 20_000;
+/** Same bound as the domain's `tenderId` (and `externalId`). */
+const MAX_TENDER_ID_LENGTH = 200;
+/** C0 controls and DEL: never part of an identifier (NUL is also rejected by PostgreSQL text). */
+// eslint-disable-next-line no-control-regex -- matching control characters is the point.
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 
 /** Lower-case hex GUID; anything else is never put into a URL. */
 const OBJECT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -70,6 +76,9 @@ const bzpRecordSchema = z.object({
   organizationProvince: optionalField,
   cpvCode: optionalField,
   submittingOffersDate: optionalField,
+  // Optional link to later notices of the same procedure: an unusable value
+  // (not a string, too long) becomes null instead of rejecting the notice.
+  tenderId: optionalField.catch(null),
 });
 
 export type BzpRecord = z.output<typeof bzpRecordSchema>;
@@ -126,6 +135,22 @@ function stringProperty(item: unknown, key: string): string | null {
 function cursorOf(item: unknown): string | null {
   const objectId = stringProperty(item, "objectId");
   return objectId !== null && OBJECT_ID.test(objectId) ? objectId : null;
+}
+
+/**
+ * OCDS procedure id (`ocds-148610-…`), the only link between a notice and the
+ * notices that later change it (D-015). Trimmed; blank, too long, malformed
+ * Unicode or containing a control character → null (never a reason to reject
+ * the notice; PostgreSQL would refuse a NUL in text and fail the whole row).
+ */
+function tenderIdOf(record: BzpRecord): string | null {
+  const value = record.tenderId?.trim() ?? "";
+  return value.length > 0 &&
+    value.length <= MAX_TENDER_ID_LENGTH &&
+    isWellFormedText(value) &&
+    !CONTROL_CHARACTER.test(value)
+    ? value
+    : null;
 }
 
 /** Notice number of a record, if readable — for rejection logs only. */
@@ -354,6 +379,7 @@ function normalizeNotice(notice: BzpNotice): NormalizeResult {
     sourceId: BZP_SOURCE_ID,
     sourceUrl: `${DETAIL_URL}${record.objectId}`,
     externalId: record.noticeNumber,
+    tenderId: tenderIdOf(record),
     issuerName: collapseWhitespace(record.organizationName),
     title: collapseWhitespace(record.orderObject),
     description: null,

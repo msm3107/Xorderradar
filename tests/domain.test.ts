@@ -18,6 +18,7 @@ const validDraft: OpportunityDraft = {
   sourceId: "baza-konkurencyjnosci",
   sourceUrl: "https://bazakonkurencyjnosci.example.gov.pl/ogloszenie/1",
   externalId: null,
+  tenderId: null,
   issuerName: "Gmina Przykładowa",
   title: "Remont dachu świetlicy",
   description: null,
