@@ -67,7 +67,13 @@ Cały ruch wychodzący adapterów idzie przez `SafeHttpClient`:
 - Timeout połączenia (TCP + TLS) 10 s i całkowity timeout jednej wymiany (DNS, połączenie,
   nagłówki, cała treść) 30 s, przerwanie przez `AbortSignal` (PR-02). Wywołujący może podać
   własny `AbortSignal`, który przerywa też czekanie na rate limit i backoff.
-- Timeout całego przebiegu źródła, aby jedno źródło nie blokowało crona.
+- Timeout całego przebiegu źródła, aby jedno źródło nie blokowało crona: `source:preview`
+  5 min, `ingest` 10 min na źródło (D-018); po nim przebieg źródła jest `failed`
+  (`source_timeout`), a następne źródło startuje.
+- `ingest` nie nakłada się sam na siebie (advisory lock w PostgreSQL, D-019): drugie
+  uruchomienie nic nie pobiera, więc nakładające się crony nie podwajają ruchu do źródeł.
+  Utrata blokady w trakcie (zerwane połączenie) przerywa przebieg (`lock_lost`, kod 1) —
+  bez blokady `ingest` nie pobiera ani nie zapisuje dalej.
 
 ## 5. Response size limits _(od PR-02)_
 
@@ -153,6 +159,12 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
   użytkowników (najwyżej identyfikator profilu), pełnych odpowiedzi źródeł, URL-i pobieranych
   dokumentów (ścieżka/zapytanie mogą zawierać tokeny — `SafeHttpClient` loguje tylko host) ani
   nagłówków HTTP.
+- `ingest` (od PR-03A) loguje i zapisuje w `ingestion_runs` wyłącznie: `sourceId`,
+  identyfikatory (`runId`, `externalId` ogłoszenia — publiczny numer), statusy, liczniki,
+  czas, `incomplete` (`part`, `reason`), kod błędu (`errorCode`, w bazie tylko
+  `^[a-z][a-z0-9_]{0,63}$`), status HTTP i nazwę naruszonego constraintu. Nigdy treści
+  dokumentów, tytułów, danych kontaktowych z ogłoszeń, komunikatów błędów ani adresu bazy.
+  Powody odrzuceń z `normalize` to stałe teksty z nazwami pól (bez wartości).
 - Komunikaty błędów dla użytkownika są bezpieczne; szczegóły tylko w logu.
 - Błędy bazy danych (od PR-01): CLI pokazuje tylko stały powód + kod SQLSTATE/errno, nigdy
   komunikatu sterownika/serwera; repozytoria zamieniają naruszenia ograniczeń na

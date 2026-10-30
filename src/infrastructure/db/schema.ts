@@ -1,4 +1,5 @@
 import type { ColumnType, Generated } from "kysely";
+import type { IngestionRunStatus } from "../../domain/ingestion-run.js";
 import type { OpportunityStatus } from "../../domain/opportunity.js";
 
 /**
@@ -60,8 +61,31 @@ export interface CompanyProfilesTable {
   updated_at: Generated<Date>;
 }
 
+export interface IngestionRunsTable {
+  id: Generated<string>;
+  source_id: string;
+  /**
+   * Written as `YYYY-MM-DD`. `pg` reads `date` back as a Date at local
+   * midnight; select it as text (`publication_date::text`) to avoid that.
+   */
+  publication_date: ColumnType<Date, string, string>;
+  max_records: number;
+  started_at: Date;
+  finished_at: Date;
+  status: IngestionRunStatus;
+  documents: number;
+  extracted: number;
+  inserted: number;
+  updated: number;
+  unchanged: number;
+  rejected: number;
+  incomplete: Jsonb;
+  error_code: string | null;
+}
+
 export interface Database {
   sources: SourcesTable;
   opportunities: OpportunitiesTable;
   company_profiles: CompanyProfilesTable;
+  ingestion_runs: IngestionRunsTable;
 }

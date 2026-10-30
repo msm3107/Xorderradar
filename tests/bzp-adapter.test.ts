@@ -764,3 +764,67 @@ describe("bzpAdapter.fetch", () => {
     expect(http.urls).toEqual([]);
   });
 });
+
+describe("bzpAdapter.fetch with onDocument (streaming, used by ingest)", () => {
+  const serve = (url: URL) => {
+    if (url.searchParams.get("NoticeType") === "SmallContractNotice") return fixtureBytes(SMALL);
+    return url.searchParams.has("SearchAfter") ? fixtureBytes(PAGE2) : pageBytes(25, 1);
+  };
+
+  it("hands over each page before the next request and returns no documents", async () => {
+    const events: string[] = [];
+    const http = new FakeHttpClient((url) => {
+      events.push(`get ${String(http.urls.length)}`);
+      return serve(url);
+    });
+    const streamed: RawDocument[] = [];
+    const result = await bzpAdapter.fetch(
+      fetchContext(http, {
+        onDocument: async (doc) => {
+          await Promise.resolve();
+          events.push(`doc ${String(streamed.length + 1)}`);
+          streamed.push(doc);
+        },
+      }),
+    );
+    expect(events).toEqual(["get 1", "doc 1", "get 2", "doc 2", "get 3", "doc 3"]);
+    expect(result).toEqual({ documents: [], incomplete: [] });
+
+    // Same documents, in the same order, as the collecting (preview) mode.
+    const collected = await bzpAdapter.fetch(fetchContext(new FakeHttpClient(serve)));
+    expect(streamed).toEqual(collected.documents);
+  });
+
+  it("stops fetching when onDocument rejects and propagates the error unchanged", async () => {
+    const http = new FakeHttpClient(serve);
+    const failure = new Error("store failed");
+    const error = await fetchError(
+      bzpAdapter.fetch(fetchContext(http, { onDocument: () => Promise.reject(failure) })),
+    );
+    expect(error).toBe(failure);
+    expect(http.urls).toHaveLength(1);
+  });
+
+  it("still reports limits as incomplete in streaming mode", async () => {
+    const http = new FakeHttpClient((url, call) =>
+      url.searchParams.get("NoticeType") === "ContractNotice"
+        ? pageBytes(25, call * 100)
+        : fixtureBytes(EMPTY),
+    );
+    let documents = 0;
+    const result = await bzpAdapter.fetch(
+      fetchContext(http, {
+        maxRecords: 50,
+        onDocument: () => {
+          documents++;
+          return Promise.resolve();
+        },
+      }),
+    );
+    expect(documents).toBe(3);
+    expect(result).toEqual({
+      documents: [],
+      incomplete: [{ part: "ContractNotice", reason: "max_records" }],
+    });
+  });
+});

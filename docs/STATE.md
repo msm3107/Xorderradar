@@ -1,11 +1,9 @@
 # Current State
 
 Current phase: PHASE 1 — DATA PIPELINE
-Current PR: PR-02 — First Source Adapter
-Status: IN PROGRESS — Part A (SafeHttpClient) MERGED (PR #2, 5533384); Part B (BZP adapter +
-`source:preview`) implemented and reviewed (Code & Safety Review PASS ×2 rounds, Quality Review
-PASS, round-2 fixes applied; owner GitHub review of PR #3 (bf74ad9): code PASS, follow-up fixes
-applied); AC1 pending owner verification on a machine with direct egress — see Blockers
+Current PR: PR-03 — Ingestion, Normalization & Deduplication
+Status: Part A (ingestion core) READY FOR PR — Code & Safety Review PASS (round 3), Quality Review
+ACCEPT WITH NOTES; awaiting user verification. Part B (normalization helpers) not started.
 
 ## Completed
 
@@ -40,66 +38,125 @@ applied); AC1 pending owner verification on a machine with direct egress — see
     unexpected errors → fixed internal-error message, exit 1.
   - 199 tests (45 integration on real PostgreSQL via `TEST_DATABASE_URL`, per-file schema;
     skipped with a visible NOTICE when the variable is unset).
+- **PR-02 — First Source Adapter** (MERGED: Part A as PR #2, 5533384; Part B as PR #3, merge
+  commit 184d31a). AC1 (real notices through SafeHttpClient) is still pending owner
+  verification on a machine with direct egress (D-014) — see Blockers. Details:
+
+  - **Part A — SafeHttpClient (MERGED as PR #2, 5533384; Code & Safety Review PASS ×3, Quality
+    Review ACCEPT, owner review PASS).**
+    `src/infrastructure/http/` — the only network route for adapters (D-014, no new dependency):
+    - `node:https` with a pinned `lookup` (DNS resolved once, every address checked, connection to
+      the validated IP, SNI/Host = hostname); `HTTPS_PROXY` deliberately ignored.
+    - URL policy: https only, default port, no credentials, no IP literals, exact host allowlist.
+      Address policy: private/loopback/link-local/CGNAT/multicast/reserved IPv4 blocked;
+      IPv6 allow-only `2000::/3` minus special ranges; IPv4-mapped always blocked.
+    - Manual redirects (max 3, every hop revalidated); timeouts connect 10 s / total 30 s per
+      attempt + optional caller `signal`; 5 MB limit (streamed, also after gzip/deflate/br
+      decompression; an empty body is returned as-is whatever its Content-Encoding); per-host
+      min interval 2 s (floor 1 s, sequential queue, monotonic clock; the caller `signal` also
+      cancels the wait in the queue without letting later calls overtake the in-flight request);
+      retries max 2 only for timeouts/transient errnos/429/502/503/504 with jittered backoff and
+      `Retry-After` (cap 60 s, per-host deadline); error budget 10 attempts.
+    - User-Agent `RadarZamowien/0.1 (+<CRAWLER_CONTACT>)`; `CRAWLER_CONTACT` optional in config,
+      required to construct the client (README "Konfiguracja", `.env.example`).
+    - Test-only deps (resolver/transport/clock/limits) guarded by an ESLint rule in `src/**`.
+    - `engines` raised to Node ≥ 22.19 (tests use `tls.setDefaultCACertificates`); `openssl` CLI
+      needed for the real-TLS transport tests.
+    - AC3 met: timeout, size exceeded, host outside allowlist, private address, redirect outside
+      allowlist, retry only for transient errors — 241 new tests (440 total).
+    - Owner GitHub review of 11d8c4f: PASS (2 Low + Info + Nit), all addressed in a follow-up.
+  - **Part B — MERGED as PR #3 (184d31a); Code & Safety Review PASS (last: round 4 after the
+    owner review), Quality Review PASS, owner GitHub review addressed.**
+    - Step 0: D-015 — BZP through the official "API BZP (WebService)" of e-Zamówienia
+      (`GET /mo-board/api/v1/notice`, terms §11, licence, coverage incl. small contracts; robots.txt
+      and the terms are re-checked by the operator, not at runtime). Rejected: Baza
+      Konkurencyjności, the internal Board/Search endpoint.
+    - `src/sources/types.ts`: `SourceAdapter` contract, `FetchContext`, `FetchResult` (documents +
+      `incomplete` limits), `NormalizeResult`, `SourceFormatError`. `src/domain/opportunity.ts`:
+      new `OpportunityCandidate` (= draft without `fingerprint`/`contentHash`, computed in PR-03);
+      the draft schema is unchanged in behaviour.
+    - `src/sources/bzp/`: `ContractNotice` + `SmallContractNotice`, PageSize ≤ 25 with
+      `SearchAfter` keyset pagination; stops on empty/short page, 40 pages and the record limit per
+      notice type (so `ContractNotice` cannot starve `SmallContractNotice`; a run returns at most
+      2 × limit records), invalid or repeated cursor, aborted signal. Pure `extract` (only mapped fields kept,
+      `htmlBody` dropped) and `normalize` (strict UTC dates, CPV codes, buyer seat + static
+      province map, description/contact/value `null`).
+    - `src/sources/registry.ts`, `src/sources/preview.ts`; CLI
+      `source:preview <sourceId> [--date YYYY-MM-DD] [--limit N]` (default yesterday UTC / 20
+      records per notice type, max 500, run timeout 5 min, requires `CRAWLER_CONTACT`, never
+      opens the DB, JSON report on stdout, logs with sourceId/status/durationMs/counts). HTTP
+      client factory and adapters are injected via `CliDeps.sources`.
+    - Real fixtures (`tests/fixtures/bzp/`, captured 2026-10-30, byte-identical except
+      pseudonymised personal contact data in `htmlBody`, excluded from Prettier) + tests: exact
+      mapping, every record normalizes, province map = official glossary, mutated-record edge
+      cases, unusable documents, fetch loop with a fake client (exact URLs and every stop
+      condition), CLI tests, one smoke test (AC2, AC4).
+    - Part B to-dos from the Part A reviews resolved: run-level `AbortSignal` (CLI, 5 min);
+      page/record limits; GET with `Accept: */*` is enough for the JSON API (no D-014 amendment);
+      link pre-check not needed (no source links are fetched — detail URLs are stored only);
+      abort-vs-error-budget left unchanged and recorded in D-015 (one client per run, an abort ends
+      the run); `SafeHttpClient` is constructed once, in `defaultSourceDeps` in `src/cli.ts`, with
+      options only (for manual review). Not done (optional): gzip-only simplification.
 
 ## In progress
 
-**PR-02 — First Source Adapter**, split into two increments on the same PR line:
+**PR-03 — Part A (ingestion core)** — ready for PR, awaiting user verification (scope split recorded in `docs/PR_PLAN.md` → PR-03 „Podział”; acceptance criteria 1–4):
 
-- **Part A — SafeHttpClient (MERGED as PR #2, 5533384; Code & Safety Review PASS ×3, Quality
-  Review ACCEPT, owner review PASS).**
-  `src/infrastructure/http/` — the only network route for adapters (D-014, no new dependency):
-  - `node:https` with a pinned `lookup` (DNS resolved once, every address checked, connection to
-    the validated IP, SNI/Host = hostname); `HTTPS_PROXY` deliberately ignored.
-  - URL policy: https only, default port, no credentials, no IP literals, exact host allowlist.
-    Address policy: private/loopback/link-local/CGNAT/multicast/reserved IPv4 blocked;
-    IPv6 allow-only `2000::/3` minus special ranges; IPv4-mapped always blocked.
-  - Manual redirects (max 3, every hop revalidated); timeouts connect 10 s / total 30 s per
-    attempt + optional caller `signal`; 5 MB limit (streamed, also after gzip/deflate/br
-    decompression; an empty body is returned as-is whatever its Content-Encoding); per-host
-    min interval 2 s (floor 1 s, sequential queue, monotonic clock; the caller `signal` also
-    cancels the wait in the queue without letting later calls overtake the in-flight request);
-    retries max 2 only for timeouts/transient errnos/429/502/503/504 with jittered backoff and
-    `Retry-After` (cap 60 s, per-host deadline); error budget 10 attempts.
-  - User-Agent `RadarZamowien/0.1 (+<CRAWLER_CONTACT>)`; `CRAWLER_CONTACT` optional in config,
-    required to construct the client (README "Konfiguracja", `.env.example`).
-  - Test-only deps (resolver/transport/clock/limits) guarded by an ESLint rule in `src/**`.
-  - `engines` raised to Node ≥ 22.19 (tests use `tls.setDefaultCACertificates`); `openssl` CLI
-    needed for the real-TLS transport tests.
-  - AC3 met: timeout, size exceeded, host outside allowlist, private address, redirect outside
-    allowlist, retry only for transient errors — 241 new tests (440 total).
-  - Owner GitHub review of 11d8c4f: PASS (2 Low + Info + Nit), all addressed in a follow-up.
-- **Part B — implemented; Code & Safety Review PASS (2 rounds), Quality Review PASS, fixes from
-  both rounds applied.**
-  - Step 0: D-015 — BZP through the official "API BZP (WebService)" of e-Zamówienia
-    (`GET /mo-board/api/v1/notice`, terms §11, licence, coverage incl. small contracts; robots.txt
-    and the terms are re-checked by the operator, not at runtime). Rejected: Baza
-    Konkurencyjności, the internal Board/Search endpoint.
-  - `src/sources/types.ts`: `SourceAdapter` contract, `FetchContext`, `FetchResult` (documents +
-    `incomplete` limits), `NormalizeResult`, `SourceFormatError`. `src/domain/opportunity.ts`:
-    new `OpportunityCandidate` (= draft without `fingerprint`/`contentHash`, computed in PR-03);
-    the draft schema is unchanged in behaviour.
-  - `src/sources/bzp/`: `ContractNotice` + `SmallContractNotice`, PageSize ≤ 25 with
-    `SearchAfter` keyset pagination; stops on empty/short page, 40 pages and the record limit per
-    notice type (so `ContractNotice` cannot starve `SmallContractNotice`; a run returns at most
-    2 × limit records), invalid or repeated cursor, aborted signal. Pure `extract` (only mapped fields kept,
-    `htmlBody` dropped) and `normalize` (strict UTC dates, CPV codes, buyer seat + static
-    province map, description/contact/value `null`).
-  - `src/sources/registry.ts`, `src/sources/preview.ts`; CLI
-    `source:preview <sourceId> [--date YYYY-MM-DD] [--limit N]` (default yesterday UTC / 20
-    records per notice type, max 500, run timeout 5 min, requires `CRAWLER_CONTACT`, never
-    opens the DB, JSON report on stdout, logs with sourceId/status/durationMs/counts). HTTP
-    client factory and adapters are injected via `CliDeps.sources`.
-  - Real fixtures (`tests/fixtures/bzp/`, captured 2026-10-30, byte-identical except
-    pseudonymised personal contact data in `htmlBody`, excluded from Prettier) + tests: exact
-    mapping, every record normalizes, province map = official glossary, mutated-record edge
-    cases, unusable documents, fetch loop with a fake client (exact URLs and every stop
-    condition), CLI tests, one smoke test (AC2, AC4).
-  - Part B to-dos from the Part A reviews resolved: run-level `AbortSignal` (CLI, 5 min);
-    page/record limits; GET with `Accept: */*` is enough for the JSON API (no D-014 amendment);
-    link pre-check not needed (no source links are fetched — detail URLs are stored only);
-    abort-vs-error-budget left unchanged and recorded in D-015 (one client per run, an abort ends
-    the run); `SafeHttpClient` is constructed once, in `defaultSourceDeps` in `src/cli.ts`, with
-    options only (for manual review). Not done (optional): gzip-only simplification.
+- `src/ingestion/fingerprint.ts` (D-016): `fingerprint` = SHA-256 of
+  `JSON.stringify([sourceId, "external", externalId])`, or `[sourceId, "url", sourceUrl]`
+  without an external id; `contentHash` = SHA-256 of `[field, value]` pairs in a fixed order
+  (dates ISO, nested keys sorted, `null`/`""`/absent distinct; no `fetchedAt`/`sourceId`).
+  Deferred: the variant for sources with neither an id nor a stable URL.
+- `ingestOpportunity` (`opportunities-repository.ts`, D-017): conditional
+  `ON CONFLICT … DO UPDATE … WHERE same source AND content_hash IS DISTINCT FROM`, then a
+  `SELECT` → `inserted`/`updated`/`unchanged` (no write; `fetched_at`/`updated_at` not
+  refreshed, no `last_seen_at`) or `DomainError duplicate` for another source.
+  `upsertOpportunity` unchanged in behaviour.
+- Migration `0002_ingestion_runs`: table with named CHECKs, FK, index
+  `(source_id, started_at DESC)`; seeds `bzp` with `ON CONFLICT DO NOTHING`.
+  `recordIngestionRun` repository; `IngestionRunSummary` schema in `src/domain/ingestion-run.ts`.
+- `runIngestion` (`src/ingestion/run.ts`): enabled DB sources × registry; sequential, isolated
+  per source; streaming via the new optional `FetchContext.onDocument` (BZP adapter streams
+  pages, bounded memory, D-008); per-record rejections (normalize or `DomainError`) counted and
+  logged, other write errors fail the source; records stored before a failure stay; per-source
+  timeout 10 min combined with the run signal (D-018); enabled source without adapter →
+  `failed`/`no_adapter` (D-020); each run stored in `ingestion_runs` and logged.
+- CLI `ingest [sourceId...] [--date YYYY-MM-DD] [--limit N]` (default yesterday UTC, 1000 per
+  notice type, max 1000) under a session advisory lock on a dedicated connection (D-019);
+  busy → exit 1 without fetching; no auto-migrate (missing table → exit 1); JSON summary on
+  stdout; exit 0 when all sources `succeeded`/`incomplete`, 1 otherwise, 2 for usage errors.
+- Tests: fingerprint/contentHash and ingest CLI unit tests, BZP streaming tests, integration
+  tests on PostgreSQL (two runs → no duplicates / all unchanged; changed deadline/title →
+  updated with id and `first_seen_at` kept; failing source isolated; lock held / concurrent
+  runs; run summary stored and logged; per-record `DomainError`; fetch error and timeout after
+  stored records; BZP end-to-end on fixtures with a fake HTTP client; migration 0002 idempotent,
+  seed does not overwrite, CHECKs enforced).
+- Docs: ARCHITECTURE (header, §2, §4.1, §4.3, §5, §6, §7), DECISIONS D-016…D-020, README
+  (`ingest`, cron), SECURITY (§4, §12).
+- Code & Safety Review: PASS with findings; fix round 1 done (awaiting re-review):
+  - M1: every pooled connection gets an `error` listener (+ TCP keepalive), so a terminated
+    lock connection no longer crashes the process; the lock connection is checked every 5 s
+    and a failed check aborts the run (`lock_lost`, exit 1, JSON summary still printed,
+    remaining sources not started); a failed unlock is logged and keeps the result (D-019).
+  - M2: concurrent `ingestOpportunity` of one fingerprint tested (identical → inserted +
+    unchanged; different hashes → inserted + updated; one row). The test exposed a real race:
+    the concurrent INSERT can hit `UNIQUE (source_id, external_id)` instead of the
+    `ON CONFLICT` arbiter; `ingestOpportunity` now retries once in that case (D-017).
+    `upsertOpportunity` (PR-01, not used by ingest) has the same race; left unchanged.
+  - L1–L3: no polling in the concurrency test (`started` promise, gate released in `finally`);
+    run-not-recorded path tested (log carries the SQLSTATE code only); DB CHECK
+    `ingestion_runs_error_code_status_check` in 0002. L4 and the cron-line nit: docs only.
+- Code & Safety re-review: PASS; fix round 2 (optional Lows): L5 JSDoc moved onto
+  `fingerprintOfOtherSource`; L6 deterministic test of the `ingestOpportunity` retry (a
+  test-only trigger raises the `(source_id, external_id)` unique violation on the first
+  attempt only). An open blocking transaction cannot force that path: the fingerprint arbiter
+  precheck waits for it and takes the conflict path.
+- Code & Safety Review round 3: PASS, no findings (fingerprints matched; `pnpm check` 614/614;
+  ingestion integration files 52/52 ×5).
+- Quality Review: ACCEPT WITH NOTES (AC1–AC4 met). Doc round: R1 (ARCHITECTURE header: Part B
+  = normalization helpers only), R2 (this status) and notes N1–N6 applied (README re-run with
+  `--date`, `ingest.log`, enabling sources; `content_hash` change only affects re-fetched rows;
+  PR-03B/04/05 notes below).
 
 ## Blockers
 
@@ -110,8 +167,8 @@ applied); AC1 pending owner verification on a machine with direct egress — see
   SafeHttpClient ignores the proxy by design (D-014). Owner runs, on a machine with direct
   outbound HTTPS, with a real, monitored contact of the operator and a past weekday:
   `CRAWLER_CONTACT=<twój-monitorowany-kontakt> DATABASE_URL=postgres://… pnpm dev source:preview bzp --date 2026-10-29 --limit 25 | jq .`
-  and records "AC1 verified by owner outside the container" with the counts. PR-02 is not READY
-  before that.
+  and records "AC1 verified by owner outside the container" with the counts. PR-02 was merged
+  with AC1 still open; it stays open until the owner records it.
 
   **Expected result / what to check:**
   - Exit code 0 (`echo $?`). stdout is one line of JSON — pipe it to `jq .` or
@@ -127,32 +184,57 @@ applied); AC1 pending owner verification on a machine with direct egress — see
     with the page. Deadlines are printed in UTC (e.g. `08:00Z` = 09:00 CET on the page), so a
     1–2 h difference is not a bug.
 
-- Open owner question (affects PR-07, not Part B): will the production cron host have direct
-  outbound HTTPS? If production is proxy-only too, CONNECT-proxy support needs a D-014 revision.
+- Open owner question (affects the `ingest` cron and PR-07): will the production cron host have
+  direct outbound HTTPS? If production is proxy-only too, CONNECT-proxy support needs a D-014
+  revision. The same applies to running `ingest` against the live API.
 
 ## Decisions made
 
-See `docs/DECISIONS.md` (D-001 … D-015). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
+See `docs/DECISIONS.md` (D-001 … D-020). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
 on `node:https` with pinned lookup, no HTTP library) accepted in PR-02 Part A; D-015 (first
-source: BZP through the official API) in PR-02 Part B.
+source: BZP through the official API) in PR-02 Part B; PR-03 Part A: D-016 (fingerprint and
+`content_hash` format), D-017 (`unchanged` writes nothing, no `last_seen_at`), D-018 (ingest
+limit 1000 per notice type, 10-min source timeout, streaming), D-019 (advisory lock), D-020
+(source selection and configuration errors).
 
 ## Next action
 
-1. Owner verifies AC1 outside the container (command and checklist under Blockers) and
-   reviews the PR.
-2. PR-03 — ingestion: fingerprint/`contentHash` from the validated candidate, storage,
-   `ingestion_runs`. Open points from D-015 for PR-03: whether the API's publication-day
-   boundary is UTC or Polish time (overlapping days + dedup make it harmless); scheduling of the
-   run per day. The ingestion run budget must not starve either notice type (keep the
-   per-notice-type limit of `source:preview`, or an equivalent). Size the ingestion limit and
-   run timeout together (Code & Safety re-review, Low): with `maxRecords` > 1000 a run can reach
-   80 pages (≥ 158 s of rate-limit gaps alone), so the 5-min timeout could abort a busy day
-   all-or-nothing — use timeout ≥ pages × (2 s + latency), or keep pages fetched before the
-   timeout and mark the run `incomplete`. Run extract → normalize per page (per document) and
-   drop the document `body` right after extraction instead of keeping every page until the end
-   of the run: `htmlBody` is ≈ 95% of the bytes (~70 MB per source at 1000 records per type),
-   so streaming per document keeps D-008 (raw data only in memory) with constant memory per
-   page.
+1. User verifies PR-03 Part A and opens the PR.
+2. Owner verifies PR-02 AC1 outside the container (command and checklist under Blockers); a
+   first live `ingest bzp --date <past weekday>` on the same machine is a useful follow-up
+   check (exit 0, `inserted` > 0, a second run all `unchanged`).
+3. PR-03 Part B — normalization helpers (`docs/PR_PLAN.md` → PR-03 „Podział”): whitespace,
+   HTML → text from `htmlBody` (description, contact, value), dates in Europe/Warsaw,
+   voivodeships/counties, category dictionary (CPV → MVP categories), invalid published e-mail
+   → `contact.raw` instead of rejecting the notice, pseudonymised HTML fixtures. Note: adding
+   description/contact/value changes `content_hash`, but only rows fetched again become
+   `updated` (D-016). The daily cron fetches only yesterday, so older rows are neither marked
+   nor enriched: Part B must document a backfill step (`ingest --date …` for every publication
+   day whose notices still have open deadlines).
+4. Open points carried from D-015/PR-02 for PR-03: whether the API's publication-day boundary
+   is UTC or Polish time (cron at ~06:00 Europe/Warsaw ingests yesterday UTC; overlapping days
+   are harmless thanks to dedup) — verify on the first live runs.
+5. Deferred in Part A: fingerprint variant for sources with neither an external id nor a
+   stable URL (D-016; with the first such source); `last_seen_at` (D-017; when a feature needs
+   it, e.g. detecting withdrawn notices).
+
+Notes from the Part A Code & Safety Review (for the Quality Review and later):
+
+- `status` is part of `content_hash` and BZP derives it from `fetchedAt` (deadline passed →
+  `closed`), so re-ingesting a notice after its deadline reports `updated` once. Intended: the
+  stored state of the offer changed (D-016, D-017).
+- **Open product question (not in PR-03A scope) — decide before PR-05, ideally while planning
+  PR-03B:** on live BZP, changes to a published notice (e.g. a moved deadline, cancellation)
+  are published as separate notice types (amendments/corrections), which `ingest` does not
+  fetch yet. `updated` only arises from re-fetching the same notice, and with the daily
+  "yesterday" cron a notice is effectively never re-fetched — so moved deadlines and
+  cancellations will not reach the user until amendments are handled. Related: `externalId` =
+  `noticeNumber`, which includes a version suffix (e.g. `…/01`); if BZP publishes a new version
+  as `…/02`, it would be stored as a separate opportunity. Decide the key together with the
+  amendments question (not verifiable offline, D-014).
+- **PR-04/05:** the stored `status` stays `open` after the deadline for rows that are never
+  re-fetched, so matching and the digest must decide "still open" from `deadline` vs now, not
+  from the stored `status`.
 
 Notes from Part B (for later PRs):
 
@@ -169,9 +251,10 @@ Notes from Part B (for later PRs):
   `Jan Kowalski` (none present); string-level replacement, everything else byte-identical. The
   same rule applies to future fixtures, including the PR-03 HTML fixtures
   (`tests/fixtures/bzp/README.md`, ARCHITECTURE §2). The unredacted files remain in the history
-  of the already pushed commit bf74ad9; the owner decided against a history rewrite (fix as a
-  new commit; a squash merge keeps bf74ad9 out of the base branch, but it stays visible in
-  PR #3's history on GitHub).
+  of commit bf74ad9 (pseudonymised later in 22744c7). PR #3 was merged with a merge commit
+  (184d31a), so bf74ad9 **is part of the base branch history**, not only of PR #3. Removing it
+  would need a history rewrite, which requires the owner's explicit consent; the owner chose
+  "no rewrite, only a new commit".
 - Known coverage limitation (D-015): BZP has few small contracts (2026-10-28: 331
   `ContractNotice` vs 7 `SmallContractNotice` nationwide, all 7 with empty `cpvCode`, 3 without a
   deadline). A second source is a condition of product value for small firms (ROADMAP), and
@@ -232,6 +315,40 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-10-30, PR-03 Part A doc round (R1, R2, N1–N6; docs/README only):
+`TEST_DATABASE_URL=… REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 614/614
+tests passed (21 files).
+
+2026-10-30, PR-03 Part A fix round 2 (L5, L6): `TEST_DATABASE_URL=… REQUIRE_DB_TESTS=1 pnpm
+check` — format, lint, typecheck clean; 614/614 tests passed (21 files; 1 new).
+`ingestion.test.ts` run 3 more times: 42/42 each. With the retry temporarily removed, the new
+test fails with `duplicate` on `opportunities_source_external_id_key`; retry restored.
+
+2026-10-30, PR-03 Part A fix round 1 (Code & Safety Review findings; Node 22.22.0, pnpm
+10.28.0, PostgreSQL 16):
+
+- `TEST_DATABASE_URL=… REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean;
+  613/613 tests passed (21 files; 9 new). `pnpm build` clean. No dependency changes.
+- `tests/integration/ingest-cli.test.ts` and `ingestion.test.ts` run 3 more times, then the
+  full suite once more: all passed. With the pool's client `error` listener temporarily
+  removed, the lock-loss test reports an unhandled `57P01` error, so the test covers the crash.
+- Changed tests written in this PR (not merged anywhere): the `ingestion_runs_error_code_check`
+  case now uses `status: "failed"`, so it still isolates that constraint after the new
+  status/code CHECK; the concurrency test waits on a `started` promise instead of polling.
+
+2026-10-30, PR-03 Part A Coder session (Node 22.22.0, pnpm 10.28.0, PostgreSQL 16):
+
+- `TEST_DATABASE_URL=… REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean;
+  604/604 tests passed (21 files; before: 512 in 17 files; 92 new). Full suite run 3 more
+  times without a failure (timeout and concurrency tests). `pnpm build` clean. No dependency
+  changes.
+- Existing tests changed only where the contract changed on purpose: the exact migration lists
+  in `tests/integration/migrations.test.ts` and `tests/integration/cli-database.test.ts` now
+  include `0002_ingestion_runs` (and the table list `ingestion_runs`).
+- Built CLI: `ingest --limit 0` → exit 2 with usage; `ingest` on an un-migrated database →
+  `Ingest failed: Database schema is not up to date …`, exit 1, nothing fetched. No live
+  network calls (all ingestion tests use fake sources or captured fixtures).
 
 2026-10-30, PR-02 Part B owner-review follow-up (Node 22.22.0, pnpm 10.28.0, PostgreSQL 16):
 

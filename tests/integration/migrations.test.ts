@@ -26,9 +26,10 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
   });
 
   it("applies every migration on an empty database", async () => {
-    expect(await migrateToLatest(schema.db)).toEqual(["0001_core_schema"]);
+    expect(await migrateToLatest(schema.db)).toEqual(["0001_core_schema", "0002_ingestion_runs"]);
     expect(await tablesInSchema()).toEqual([
       "company_profiles",
+      "ingestion_runs",
       "kysely_migration",
       "kysely_migration_lock",
       "opportunities",
@@ -42,7 +43,7 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
     const { rows } = await sql<{ name: string }>`SELECT name FROM kysely_migration`.execute(
       schema.db,
     );
-    expect(rows.map((row) => row.name)).toEqual(["0001_core_schema"]);
+    expect(rows.map((row) => row.name)).toEqual(["0001_core_schema", "0002_ingestion_runs"]);
   });
 
   it("creates the integrity constraints from ARCHITECTURE §5", async () => {
@@ -82,6 +83,6 @@ describe.skipIf(skipWithoutDatabase)("migrations: concurrent runs (PostgreSQL)",
 
   it("apply each migration exactly once", async () => {
     const runs = await Promise.all([migrateToLatest(schema.db), migrateToLatest(schema.db)]);
-    expect(runs.flat()).toEqual(["0001_core_schema"]);
+    expect(runs.flat()).toEqual(["0001_core_schema", "0002_ingestion_runs"]);
   });
 });

@@ -268,3 +268,128 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
   - dzień publikacji jest przekazywany do API jako data `YYYY-MM-DD`; domyślnie „wczoraj” wg
     UTC. Czy API liczy granice dnia w UTC, czy w czasie polskim — niezweryfikowane (do
     sprawdzenia przy cronie w PR-03).
+
+## D-016 — Fingerprint i `content_hash`: SHA-256 z kanonicznego JSON-a
+
+- **Status:** Accepted (PR-03A)
+- **Kontekst:** deduplikacja w obrębie źródła i wykrywanie zmian treści muszą być
+  deterministyczne, niezależne od kolejności kluczy i odporne na niejednoznaczne sklejanie
+  części. Adapter nie zna tych reguł (D-015, ARCHITECTURE §4.1).
+- **Decyzja:** `src/ingestion/fingerprint.ts`, tylko `node:crypto`.
+  - `fingerprint` = SHA-256 (hex) z `JSON.stringify([sourceId, "external", externalId])`, a
+    bez `externalId` — z `[sourceId, "url", sourceUrl]` (URL już kanoniczny). Tablica JSON
+    zamiast separatora: brak „przesunięć” między częściami, identyfikator nigdy nie zrówna się
+    z URL-em o tym samym tekście.
+  - `contentHash` = SHA-256 (hex) z JSON-a par `[pole, wartość]` w stałej kolejności
+    (`issuerName`, `title`, `description`, `location`, `publishedAt`, `deadline`,
+    `estimatedValue`, `currency`, `categories`, `contact`, `status`, `sourceUrl`,
+    `externalId`); daty jako ISO 8601 UTC, obiekty z posortowanymi kluczami, tablice w
+    kolejności źródła; `null`, `""` i brak pola rozróżnione. Bez `fetchedAt` i `sourceId`.
+  - Oba liczone z kandydata po ponownej walidacji schematem domenowym.
+- **Odłożone:** wariant fingerprintu dla źródeł bez identyfikatora i bez stabilnego URL-a,
+  `(sourceId, issuerName, title, publishedAt)` (ARCHITECTURE §5 przed PR-03). Żadne obecne
+  źródło go nie potrzebuje (BZP ma `noticeNumber`); powstanie z pierwszym takim adapterem,
+  który będzie musiał jawnie zadeklarować, że jego URL nie jest stabilny.
+- **Konsekwencje:** zmiana listy pól lub kodowania `contentHash` zmienia hash każdego wiersza,
+  ale jako `updated` (jednorazowo; bez utraty danych) zapisane zostaną tylko wiersze pobrane
+  ponownie. Codzienny cron pobiera tylko wczorajszy dzień, więc starsze wiersze nie są ani
+  oznaczane, ani uzupełniane, dopóki operator nie uruchomi `ingest --date …` dla tych dni.
+  Zmiana formatu fingerprintu jest poważniejsza (nowe wiersze obok starych; `UNIQUE
+(source_id, external_id)` odrzuci je jako `duplicate`) i wymaga migracji danych.
+  `status` jest częścią `contentHash`, a BZP wylicza go z `fetchedAt` (termin minął →
+  `closed`): ponowne pobranie ogłoszenia po upływie terminu da jednorazowo `updated`. To
+  zamierzone — zmienił się zapisany stan oferty.
+
+## D-017 — `unchanged` nie zapisuje niczego; brak `last_seen_at`
+
+- **Status:** Accepted (PR-03A)
+- **Kontekst:** codzienny `ingest` będzie wielokrotnie widział te same ogłoszenia. Nadpisanie
+  niezmienionego wiersza tylko po to, by odświeżyć `fetched_at`, oznacza martwe krotki i WAL
+  przy każdym przebiegu, a `updated_at` przestaje znaczyć „treść się zmieniła”.
+- **Decyzja:** `ingestOpportunity` to `INSERT … ON CONFLICT (fingerprint) DO UPDATE … WHERE
+opportunities.source_id = excluded.source_id AND opportunities.content_hash IS DISTINCT FROM
+excluded.content_hash RETURNING (xmax = 0)`; brak zwróconego wiersza rozstrzyga `SELECT` po
+  fingerprincie (to samo źródło → `unchanged`, inne → `DomainError duplicate`, brak wiersza →
+  błąd — równoległe usunięcie). `upsertOpportunity` (PR-01) zostaje bez zmian.
+- **Konsekwencje:** przy `unchanged` `fetched_at` i `updated_at` się nie zmieniają —
+  `fetched_at` to pobranie, przy którym treść ostatnio zapisano. „Kiedy ostatnio widziany”
+  wynika z `ingestion_runs`; kolumnę `last_seen_at` dodamy, gdy będzie jej potrzebować
+  konkretna funkcja (np. wykrywanie ogłoszeń, które zniknęły ze źródła). Zmiana samego
+  `status` (np. `closed` po terminie, D-016) to zmiana treści, więc zapisuje wiersz jako
+  `updated` — zamierzenie, nie wyjątek od reguły.
+  Równoległe zapisy tego samego fingerprintu (AC3) dają jeden wiersz i wyniki `inserted` +
+  `unchanged`/`updated`: `ON CONFLICT` rozstrzyga konflikt tylko na swoim indeksie
+  (`fingerprint`), więc gdy równoległy `INSERT` trafi najpierw na `UNIQUE (source_id,
+external_id)` (błąd po zatwierdzeniu tamtego zapisu), `ingestOpportunity` ponawia zapis
+  jeden raz i wchodzi w ścieżkę konfliktu. Prawdziwy konflikt (ten sam `externalId` pod innym
+  fingerprintem) kończy się tym samym `duplicate` także po ponowieniu.
+
+## D-018 — `ingest`: limit 1000 rekordów na typ, timeout 10 min na źródło, przetwarzanie strumieniowe
+
+- **Status:** Accepted (PR-03A)
+- **Kontekst:** cron musi się kończyć w przewidywalnym czasie i pamięci, nawet gdy źródło
+  zwalnia; jeden wolny/zawieszony przebieg nie może zablokować pozostałych źródeł ani
+  kolejnego dnia.
+- **Decyzja:** `--limit` domyślnie i maks. 1000 rekordów na typ ogłoszenia. Dla BZP to
+  1000 / 25 = 40 stron na typ — tyle samo co `BZP_MAX_PAGES_PER_TYPE` — czyli najwyżej 80
+  żądań. Przy odstępie 2 s (`DEFAULT_MIN_INTERVAL_MS`) to ≥ 160 s samych przerw; timeout źródła
+  10 min (`INGEST_SOURCE_TIMEOUT_MS`) daje średnio ~7 s na żądanie (odstęp + odpowiedź), z
+  zapasem na pojedyncze ponowienia, a jednocześnie ogranicza najgorszy przypadek (30 s timeout
+  żądania × ponowienia). Timeout to `AbortSignal.timeout` połączony z sygnałem całego
+  przebiegu; po nim przebieg źródła jest `failed` (`source_timeout`), zapisane rekordy
+  zostają, następne źródło startuje. `source:preview` zachowuje 5 min (D-015). Dokumenty są
+  przetwarzane strumieniowo (`FetchContext.onDocument`): w pamięci jest najwyżej jedna strona.
+  Timeout źródła nie przerywa trwającego zapisu do bazy: pojedynczy zapis w `onDocument`
+  ogranicza `statement_timeout` (30 s) i timeout klienta `pg` (35 s). Po przerwaniu sygnału
+  `runIngestion` nie zaczyna kolejnego zapisu, a adapter sprawdza sygnał przed kolejnym
+  żądaniem — przekroczenie timeoutu źródła jest więc ograniczone do jednego zapisu.
+- **Konsekwencje:** dzień z > 1000 ogłoszeniami jednego typu daje przebieg `incomplete`
+  (`max_records`) — widoczny w JSON-ie, logu i `ingestion_runs`, kod wyjścia 0. Podniesienie
+  limitu wymaga przeliczenia timeoutu.
+
+## D-019 — Jedno `ingest` naraz: sesyjny advisory lock PostgreSQL
+
+- **Status:** Accepted (PR-03A)
+- **Kontekst:** cron, ręczne uruchomienie albo przeciągnięty przebieg mogą się nałożyć. Bez
+  zewnętrznego lockera (D-001).
+- **Decyzja:** `withIngestLock` (`src/ingestion/lock.ts`): `pg_try_advisory_lock(7206120309001)`
+  na jednym połączeniu z puli trzymanym przez cały przebieg (`db.connection().execute`),
+  `pg_advisory_unlock` w `finally`. Blokada sesyjna, nie transakcyjna — przebieg nie jest
+  jedną transakcją (każdy rekord zapisywany osobno, żeby błąd nie cofał zapisanych). Zajęta
+  blokada → kod 1, komunikat i log `ingest lock busy`, nic nie jest pobierane.
+  - **Utrata blokady:** zerwane połączenie (zakończona sesja, restart serwera, awaria sieci)
+    zwalnia blokadę po stronie serwera, więc przebieg nie może po cichu trwać dalej. Każde
+    połączenie z puli ma listener `error` (`createDatabase`), więc zerwanie nie zabija
+    procesu, a połączenie z blokadą jest sprawdzane co 5 s (`SELECT 1`,
+    `INGEST_LOCK_HEARTBEAT_MS`; przy zawieszonej sieci najpóźniej po timeoucie zapytania,
+    35 s). Nieudane sprawdzenie → log `ingest lock lost` (tylko kod), przerwanie sygnału
+    przebiegu: bieżące źródło kończy się `failed` z kodem `lock_lost` (bez kolejnego żądania
+    ani zapisu; zapis w toku ogranicza timeout zapytania), kolejne źródła nie startują. CLI
+    wypisuje podsumowanie JSON ze statusem `failed`, komunikat „Ingest aborted: the ingest
+    lock was lost during the run (lock_lost).” i kończy się kodem 1 — także gdy utratę
+    wykryto dopiero po ostatnim źródle. Pula ma TCP keepalive.
+  - **Błąd zwolnienia:** nieudany `pg_advisory_unlock` jest logowany (`ingest lock release
+failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pula zamyka
+    połączenie (koniec komendy albo 10 s bezczynności), a serwer zwalnia wtedy blokadę.
+- **Konsekwencje:** advisory locki są wspólne dla całej bazy (nie dla schematu) — dwa
+  środowiska na jednej bazie blokują się wzajemnie, a testy biorące tę blokadę są w jednym
+  pliku (`tests/integration/ingest-cli.test.ts`). Pula ma 5 połączeń: jedno trzyma blokadę,
+  zapisy idą pozostałymi.
+
+## D-020 — `ingest`: wybór źródeł i błędy konfiguracji
+
+- **Status:** Accepted (PR-03A)
+- **Kontekst:** lista źródeł jest w bazie (`sources.enabled`), adaptery — w kodzie
+  (`src/sources/registry.ts`); obie strony mogą się rozjechać.
+- **Decyzja:**
+  - bez argumentów: wszystkie źródła włączone w bazie; włączone bez adaptera → przebieg
+    `failed` z kodem `no_adapter` (zapisany i zalogowany, kod wyjścia 1), pozostałe źródła
+    działają — błąd konfiguracji jest widoczny, ale nie blokuje reszty;
+  - jawne `sourceId`: nieznany adapter → kod 2 już przy parsowaniu argumentów; źródło
+    niewłączone w bazie → kod 2 po odczycie bazy, przed pobraniem;
+  - brak tabeli `ingestion_runs` → kod 1 z komunikatem „run `migrate` first”; `ingest` nigdy
+    nie migruje sam (migracja to świadoma operacja wdrożeniowa);
+  - migracja `0002_ingestion_runs` dodaje `bzp` (`ON CONFLICT (id) DO NOTHING`), żeby świeża
+    instalacja działała po `migrate` bez ręcznego SQL; istniejący wiersz (np. wyłączony) nie
+    jest nadpisywany.
+- **Konsekwencje:** wyłączenie źródła = `UPDATE sources SET enabled = false` (bez wdrożenia).

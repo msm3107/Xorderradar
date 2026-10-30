@@ -8,12 +8,12 @@ i informuje firmę tylko o tych, które faktycznie do niej pasują.
 źródła → pobranie → normalizacja → deduplikacja → dopasowanie → alert
 ```
 
-> Status: **PR-02 (HTTP Client & First Source Adapter)**. Repozytorium zawiera szkielet
+> Status: **PR-03 część A (Ingestion core) — w toku**. Repozytorium zawiera szkielet
 > projektu, model domenowy (`Source`, `Opportunity`, `CompanyProfile`), schemat PostgreSQL z
 > migracjami, repozytoria, bezpieczny klient HTTP, pierwszy adapter źródła (BZP przez oficjalne
-> API platformy e-Zamówienia) oraz komendy CLI `health`, `migrate` i `source:preview`.
-> Pozostałe funkcje produktu (zapis ogłoszeń/ingestion, matching, e-mail) powstają w kolejnych
-> PR-ach — patrz
+> API platformy e-Zamówienia), zapis ogłoszeń z deduplikacją i wykrywaniem zmian oraz komendy
+> CLI `health`, `migrate`, `source:preview` i `ingest`. Pozostałe funkcje produktu (matching,
+> e-mail, UI) powstają w kolejnych PR-ach — patrz
 > [`docs/PR_PLAN.md`](docs/PR_PLAN.md) i [`docs/STATE.md`](docs/STATE.md).
 
 ## Wymagania
@@ -30,7 +30,7 @@ i informuje firmę tylko o tych, które faktycznie do niej pasują.
 corepack enable          # jednorazowo, udostępnia przypiętą wersję pnpm
 pnpm install
 cp .env.example .env     # zawiera DATABASE_URL dla lokalnej bazy radar_dev (patrz „Baza danych”)
-pnpm dev migrate         # {"status":"ok","applied":["0001_core_schema"]}; kolejne uruchomienie: "applied":[]
+pnpm dev migrate         # {"status":"ok","applied":["0001_core_schema","0002_ingestion_runs"]}; kolejne: "applied":[]
 pnpm health              # {"status":"ok",...,"database":{"status":"ok"}}
 TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test pnpm check
 ```
@@ -42,6 +42,7 @@ pnpm build
 DATABASE_URL=postgres://… node dist/main.js migrate
 DATABASE_URL=postgres://… node dist/main.js health
 DATABASE_URL=postgres://… CRAWLER_CONTACT=<twój-monitorowany-kontakt> node dist/main.js source:preview bzp --date 2026-10-29 --limit 25 | jq .
+DATABASE_URL=postgres://… CRAWLER_CONTACT=<twój-monitorowany-kontakt> node dist/main.js ingest | jq .
 ```
 
 Sprawdzenie `source:preview` (AC1): kod wyjścia 0, `normalized` > 0, a w logach
@@ -50,14 +51,46 @@ Sprawdzenie `source:preview` (AC1): kod wyjścia 0, `normalized` > 0, a w logach
 
 ### Komendy CLI
 
-| Komenda                                                     | Co robi                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `health`                                                    | Raport JSON na stdout: konfiguracja + połączenie z bazą (`select 1`, ograniczone timeoutem). Baza niedostępna → `"status":"error"`, kod `1`.                                                                                                                                                                                                                                                                                                                               |
-| `migrate`                                                   | Stosuje oczekujące migracje i wypisuje ich nazwy (`{"status":"ok","applied":[...]}`). Ponowne uruchomienie jest bezpieczne: `"applied":[]`, 0.                                                                                                                                                                                                                                                                                                                             |
-| `source:preview <sourceId> [--date YYYY-MM-DD] [--limit N]` | Pobiera ogłoszenia źródła opublikowane jednego dnia (domyślnie wczoraj według UTC) i wypisuje je znormalizowane jako JSON (liczniki, odrzucenia z powodami, `incomplete` przy osiągniętym limicie). Nic nie zapisuje i nie łączy się z bazą (`DATABASE_URL` musi jednak być ustawiony — wspólna walidacja konfiguracji). `--limit`: maks. rekordów na typ ogłoszenia (BZP: zwykłe i małe zamówienia osobno), 1–500, domyślnie 20. Wymaga `CRAWLER_CONTACT`. Źródła: `bzp`. |
+| Komenda                                                     | Co robi                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `health`                                                    | Raport JSON na stdout: konfiguracja + połączenie z bazą (`select 1`, ograniczone timeoutem). Baza niedostępna → `"status":"error"`, kod `1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `migrate`                                                   | Stosuje oczekujące migracje i wypisuje ich nazwy (`{"status":"ok","applied":[...]}`). Ponowne uruchomienie jest bezpieczne: `"applied":[]`, 0.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `source:preview <sourceId> [--date YYYY-MM-DD] [--limit N]` | Pobiera ogłoszenia źródła opublikowane jednego dnia (domyślnie wczoraj według UTC) i wypisuje je znormalizowane jako JSON (liczniki, odrzucenia z powodami, `incomplete` przy osiągniętym limicie). Nic nie zapisuje i nie łączy się z bazą (`DATABASE_URL` musi jednak być ustawiony — wspólna walidacja konfiguracji). `--limit`: maks. rekordów na typ ogłoszenia (BZP: zwykłe i małe zamówienia osobno), 1–500, domyślnie 20. Wymaga `CRAWLER_CONTACT`. Źródła: `bzp`.                                                                                                                                                                                                                                                                                                         |
+| `ingest [sourceId...] [--date YYYY-MM-DD] [--limit N]`      | Pobiera ogłoszenia z dnia publikacji (domyślnie wczoraj według UTC) i zapisuje je w bazie: nowe → `inserted`, zmienione → `updated`, bez zmian → `unchanged` (bez zapisu), błędne → `rejected`. Bez `sourceId` — wszystkie źródła włączone w tabeli `sources` (migracja dodaje `bzp`). `--limit`: maks. rekordów na typ ogłoszenia, 1–1000, domyślnie 1000; timeout 10 min na źródło. Źródła działają po kolei i niezależnie; każdy przebieg trafia do tabeli `ingestion_runs`. Wynik: JSON (`status` + przebiegi z licznikami) na stdout, linia logu na źródło. Kod `0`, gdy wszystkie źródła `succeeded` lub `incomplete` (limit); `1`, gdy któreś `failed` albo trwa inny `ingest` (blokada w bazie — nic nie jest pobierane). Wymaga `CRAWLER_CONTACT` i wykonanego `migrate`. |
 
 Kody wyjścia: `0` — OK, `1` — błąd konfiguracji/wykonania (np. baza niedostępna), `2` — błędne
-użycie (komenda i argumenty są sprawdzane przed konfiguracją, więc błędne użycie zawsze daje `2`).
+użycie (komenda i argumenty są sprawdzane przed konfiguracją, więc błędne użycie zawsze daje `2`;
+wyjątek: `ingest` ze źródłem niewłączonym w bazie daje `2` dopiero po odczycie bazy).
+
+### Cron
+
+`ingest` uruchamiamy raz dziennie ok. **06:00 czasu polskiego** — domyślny dzień publikacji to
+wczoraj (UTC), więc jest już zamknięty. Przykład (crontab z obsługą `CRON_TZ`, np. cronie;
+zmienne środowiskowe ustawione w crontabie lub w skrypcie opakowującym, nie w `.env`):
+
+```cron
+CRON_TZ=Europe/Warsaw
+0 6 * * * cd /opt/radar-zamowien && node dist/main.js ingest >>/var/log/radar/ingest.log 2>&1
+```
+
+Plik `ingest.log` miesza JSON ze stdout z liniami logu i komunikatami tekstowymi ze stderr —
+to nie są czyste linie JSON.
+
+Nakładające się uruchomienia są bezpieczne: drugie kończy się kodem `1` z komunikatem
+`Another ingest run holds the lock; nothing was fetched.` Gdy blokada zostanie utracona w
+trakcie (np. restart bazy), przebieg jest przerywany: kod `1`, `errorCode` `lock_lost` i
+komunikat `Ingest aborted: the ingest lock was lost during the run (lock_lost).` — wystarczy
+uruchomić `ingest` ponownie (zapisane rekordy zostaną rozpoznane jako `unchanged`). Wynik każdego przebiegu: tabela
+`ingestion_runs` (np. `SELECT * FROM ingestion_runs ORDER BY started_at DESC LIMIT 10`).
+Po nieudanym przebiegu uruchom `ingest --date <publicationDate z raportu>` — ponowienie jest
+bezpieczne dzięki deduplikacji. Domyślna data to „wczoraj według UTC”, więc ponowienie po
+północy UTC wymaga jawnego `--date`.
+Włączanie/wyłączanie źródła (bez wdrożenia, D-020):
+`UPDATE sources SET enabled = false WHERE id = 'bzp';` (`true` — ponowne włączenie). Gdy żadne
+źródło nie jest włączone, `ingest` kończy się `status` `succeeded` z pustym `runs` i kodem `0`
+(tylko ostrzeżenie w logu).
+Ruch do źródeł idzie bezpośrednio, bez proxy (D-014) — host crona musi mieć bezpośrednie
+wyjście HTTPS.
 
 Gdy baza nie odpowiada, `health` wypisuje na stdout raport z przyczyną, a na stderr jedną linię
 dla operatora, np.:

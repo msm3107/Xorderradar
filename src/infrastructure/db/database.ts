@@ -25,6 +25,8 @@ const STATEMENT_TIMEOUT_MS = 30_000;
  * also covers a server or network that stops responding entirely.
  */
 const QUERY_TIMEOUT_MS = STATEMENT_TIMEOUT_MS + 5_000;
+/** Idle time before the first TCP keepalive probe on an open connection. */
+const KEEPALIVE_INITIAL_DELAY_MS = 10_000;
 
 /**
  * Creates the query builder over a small connection pool. Nothing connects
@@ -40,12 +42,24 @@ export function createDatabase(databaseUrl: string): Kysely<Database> {
     statement_timeout: STATEMENT_TIMEOUT_MS,
     query_timeout: QUERY_TIMEOUT_MS,
     application_name: "radar-zamowien",
+    // TCP keepalive, so a connection held for a long run (the ingest lock)
+    // notices a dead peer even while no query is in flight.
+    keepAlive: true,
+    keepAliveInitialDelayMillis: KEEPALIVE_INITIAL_DELAY_MS,
   });
   // An idle pooled connection can fail (e.g. server restart). Without a
   // listener `pg` re-emits that as an uncaught 'error' event and kills the
   // process; the broken client is already discarded by the pool and the next
   // query reports its own error, so there is nothing else to do here.
   pool.on("error", () => undefined);
+  // The same for a checked-out connection: pg-pool removes its idle listener
+  // while a client is in use, and Kysely adds none, so a connection held
+  // between queries (the ingest lock) that is terminated by the server would
+  // otherwise crash the process. Its next query rejects instead, and that
+  // caller reports the failure (withIngestLock: `lock_lost`).
+  pool.on("connect", (client) => {
+    client.on("error", () => undefined);
+  });
   return new Kysely<Database>({ dialect: new PostgresDialect({ pool }) });
 }
 

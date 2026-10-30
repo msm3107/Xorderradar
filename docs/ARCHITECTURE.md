@@ -6,7 +6,10 @@
 > repozytoria; komendy `health` z kontrolą bazy i `migrate`). PR-02 dodał `SafeHttpClient`
 > (`src/infrastructure/http/`, część A) oraz kontrakt adaptera, pierwszy adapter — BZP przez
 > oficjalne API (`src/sources/`, D-015) — i komendę `source:preview` (część B), bez zapisu do
-> bazy (zapis: PR-03). Wszystko poniżej oznaczone
+> bazy. PR-03 część A dodaje zapis: `src/ingestion/` (fingerprint, `content_hash`, przebieg
+> `runIngestion`, blokada), tabelę `ingestion_runs` (migracja `0002_ingestion_runs`) i komendę
+> `ingest`; część B — później: tylko helpery normalizacji (białe znaki, HTML → tekst, daty
+> Europe/Warsaw, województwa/powiaty, CPV → kategorie, fallback kontaktu do `contact.raw`). Wszystko poniżej oznaczone
 > _(plan, PR-xx)_ to projekt docelowy — kontrakty mogą zostać doprecyzowane w danym PR, a
 > zmiana musi trafić do tego dokumentu i do `docs/DECISIONS.md`.
 
@@ -49,7 +52,7 @@ src/
 │   └── http/               # SafeHttpClient: polityka URL/IP, retry, limity      [PR-02]
 ├── domain/                 # typy + schematy zod: Source, Opportunity, CompanyProfile [PR-01]
 ├── sources/                # kontrakt adaptera, rejestr, podgląd; bzp/ = BZP    [PR-02]
-├── ingestion/              # normalizacja wspólna, fingerprint, dedup, job     (plan, PR-03)
+├── ingestion/              # fingerprint, content_hash, runIngestion, blokada ingest [PR-03A]
 ├── matching/               # scoring + wyjaśnienie                             (plan, PR-04)
 ├── notifications/          # digest, szablon, wysyłka, idempotencja            (plan, PR-05)
 └── web/                    # minimalny UI renderowany po stronie serwera       (plan, PR-06)
@@ -87,7 +90,9 @@ składają zależności (proste wstrzykiwanie przez parametry, bez kontenera DI)
   (zawierają wartości). Listy mają limit (domyślnie 100, max 1000).
 - Repozytoria w PR-01: `sources` (upsert, get, lista włączonych), `opportunities` (atomowy
   upsert po `fingerprint`, zwraca `inserted`/`updated`; get), `company_profiles`
-  (create/get/update/delete).
+  (create/get/update/delete). PR-03A: `opportunities.ingestOpportunity` (upsert z wykrywaniem
+  zmian, zwraca `inserted`/`updated`/`unchanged`, §5) i `ingestion-runs.recordIngestionRun`
+  (zapis podsumowania przebiegu, §5).
 
 ## 3. Przepływ danych (pierwszy vertical slice)
 
@@ -122,10 +127,14 @@ interface SourceAdapter<TNotice = unknown> {
 }
 ```
 
-- `FetchContext` = `{ http, signal, publicationDate, maxRecords, now, logger }` — `http` to
-  wąski interfejs `get` (`SourceHttpClient`); w produkcji zawsze `SafeHttpClient`, w testach
-  skryptowany fake. `signal` ogranicza cały przebieg (timeout przebiegu), `maxRecords` —
-  liczbę rekordów.
+- `FetchContext` = `{ http, signal, publicationDate, maxRecords, now, logger, onDocument? }` —
+  `http` to wąski interfejs `get` (`SourceHttpClient`); w produkcji zawsze `SafeHttpClient`, w
+  testach skryptowany fake. `signal` ogranicza cały przebieg (timeout przebiegu), `maxRecords` —
+  liczbę rekordów. `onDocument` (PR-03A, tryb strumieniowy `ingest`): gdy jest ustawiony,
+  adapter przekazuje każdy pobrany dokument do tego callbacku, czeka na niego przed kolejnym
+  żądaniem i nie przechowuje dokumentu (`FetchResult.documents` jest wtedy puste) — pamięć
+  ograniczona do jednej strony (D-008); odrzucenie callbacku przerywa `fetch` i jest
+  propagowane bez zmian. Bez `onDocument` (`source:preview`) dokumenty są zbierane i zwracane.
 - `FetchResult` = `{ documents: RawDocument[], incomplete: { part, reason }[] }`. Osiągnięcie
   limitu (`max_records`, `max_pages`) albo niemożność bezpiecznej kontynuacji paginacji
   (`invalid_cursor`, `repeated_cursor`) nigdy nie jest ciche: trafia do `incomplete` i do
@@ -239,15 +248,50 @@ import przestrzeni nazw `ns.SafeHttpClient` — oraz importu pod inną nazwą; t
 (`const C = SafeHttpClient`, `Reflect.construct`), wyłapuje review. Limity w seamie można
 tylko zaostrzyć.
 
-### 4.3 Ingestion (PR-03)
+### 4.3 Ingestion (PR-03A, zaimplementowany)
+
+`src/ingestion/run.ts`:
 
 ```ts
-type IngestOutcome = "inserted" | "updated" | "unchanged" | "rejected";
-runIngestion(deps, sourceIds?): Promise<IngestionRunSummary>;
+runIngestion(deps: IngestionDeps, request: IngestionRequest): Promise<IngestionRunResult[]>;
+interface IngestionDeps {
+  db; adapters; createHttpClient(adapter); now; logger; sourceTimeoutMs; signal?;
+}
+interface IngestionRequest { sourceIds?: string[]; publicationDate: string; maxRecords: number }
+// IngestionRunResult = IngestionRunSummary (src/domain/ingestion-run.ts) + runId (null = nie zapisano)
 ```
 
-Jeden przebieg na źródło, sekwencyjnie. Błąd jednego źródła nie przerywa pozostałych.
-Każdy przebieg zapisany w `ingestion_runs` (licznik nowych/zmienionych/odrzuconych, błąd).
+- **Wybór źródeł:** bez `sourceIds` — wszystkie źródła włączone w bazie (`sources.enabled`);
+  włączone źródło bez adaptera w tej wersji programu → przebieg `failed` z kodem `no_adapter`
+  (zapisany i zalogowany, pozostałe źródła działają; D-020). Jawne `sourceIds` muszą być
+  włączone w bazie **i** mieć adapter, inaczej `IngestionRequestError` przed jakimkolwiek
+  pobraniem (CLI: kod 2). Brak tabeli `ingestion_runs` → `SchemaNotReadyError` przed
+  pobraniem (ingest nie migruje sam; CLI: kod 1).
+- **Przebieg źródła** (sekwencyjnie, każde izolowane): nowy klient HTTP, `signal` =
+  timeout źródła (`AbortSignal.timeout`, CLI: 10 min, D-018) połączony z sygnałem całego
+  przebiegu (CLI: sygnał blokady ingest, przerywany przy jej utracie, D-019); `adapter.fetch`
+  w trybie `onDocument`, każdy dokument od razu: `extract` → `normalize` → ponowna walidacja
+  kandydata → `fingerprint`/`contentHash` → `ingestOpportunity`. Po przerwaniu sygnału nie
+  startuje kolejny zapis; zapis w toku ogranicza timeout zapytania (30/35 s). Przerwany sygnał
+  całego przebiegu → kolejne źródła nie startują (log `ingestion aborted, sources not run`).
+- **Wyniki rekordu:** `inserted` / `updated` / `unchanged` / `rejected`. Odrzucenie przez
+  `normalize` lub `DomainError` repozytorium (np. `duplicate`, `invalid_input`) → `rejected`,
+  log warn z kodem i nazwą constraintu, przebieg trwa dalej. Inny błąd zapisu (połączenie,
+  timeout) → przebieg źródła `failed` (`database_error`).
+- **Status przebiegu:** `failed` gdy błąd (`error_code`: kod `HttpClientError`,
+  `invalid_document`, `source_timeout`, `lock_lost`, `database_error`, `no_adapter`,
+  `internal_error`);
+  rekordy zapisane przed błędem zostają. `incomplete` gdy adapter zgłosił `incomplete`
+  (limit rekordów/stron, przerwana paginacja). W pozostałych przypadkach `succeeded`.
+- Każdy przebieg trafia do `ingestion_runs` (`recordIngestionRun`) i do jednej linii logu
+  `source ingestion finished`; nieudany zapis podsumowania → `runId: null`, log error
+  `ingestion run not recorded` (z kodem SQLSTATE, bez komunikatu), a całość liczy się jako
+  `failed` (CLI: `run_not_recorded` na stderr, kod 1).
+- `overallStatus(results)`: `failed`, gdy któreś źródło `failed` lub niezapisane; inaczej
+  `incomplete`, gdy któreś `incomplete`; inaczej `succeeded`.
+
+`src/ingestion/fingerprint.ts` — `fingerprint` i `contentHash` (reguły w §5).
+`src/ingestion/lock.ts` — `withIngestLock` (§6).
 
 ### 4.4 Matching (PR-04)
 
@@ -279,7 +323,8 @@ wysyłce wg strategii opisanej w PR-05.
 
 ## 5. Model danych
 
-Stan zgodny z migracją `0001_core_schema` (`src/infrastructure/db/migrations.ts`) — źródłem
+Stan zgodny z migracjami `0001_core_schema` i `0002_ingestion_runs`
+(`src/infrastructure/db/migrations.ts`) — źródłem
 prawdy są migracje. Wszystkie kolumny czasu to `timestamptz`; `id` typu uuid generuje
 `gen_random_uuid()`. Statusy to `text` + `CHECK` (a nie typ `enum` PostgreSQL): dodanie
 wartości to zwykła zmiana constraintu w migracji, bez `ALTER TYPE`. Nazwy constraintów są
@@ -314,7 +359,7 @@ jawne, bo trafiają do `DomainError.constraint`.
 | `currency`        | char(3)           | tak  | wymagana, gdy `estimated_value` nie jest null                            |
 | `categories`      | text[]            | nie  | może być pusta tablica (domyślnie `'{}'`)                                |
 | `contact`         | jsonb             | tak  | tylko dane kontaktowe opublikowane przy zamówieniu                       |
-| `fetched_at`      | timestamptz       | nie  | ostatnie pobranie (z draftu)                                             |
+| `fetched_at`      | timestamptz       | nie  | pobranie, przy którym treść ostatnio zapisano (nie przy `unchanged`)     |
 | `first_seen_at`   | timestamptz       | nie  | `now()` przy pierwszym zapisie; upsert go nie zmienia                    |
 | `updated_at`      | timestamptz       | nie  | `now()` przy każdym zapisie (insert i update)                            |
 | `fingerprint`     | text              | nie  | klucz deduplikacji (patrz niżej)                                         |
@@ -344,10 +389,40 @@ zmienia `id`, `first_seen_at` ani `source_id` (ten sam fingerprint z innego źr�
 `DomainError duplicate`). Wynik `inserted`/`updated` rozpoznawany po `xmax = 0`. Decyzja
 „czy treść się zmieniła” (`unchanged`) należy do ingestion (PR-03).
 
-**Fingerprint (PR-03):** jeśli istnieje `external_id` — hash `(source_id, external_id)`;
-w przeciwnym razie hash znormalizowanych `(source_id, source_url)`, a gdy URL nie jest
-stabilny — `(source_id, issuer_name, title, published_at)`. `content_hash` = hash pól
-merytorycznych; zmiana → `updated`. Deduplikacja między różnymi źródłami — poza MVP.
+**Fingerprint (PR-03A, D-016):** SHA-256 (hex) z `JSON.stringify([source_id, "external",
+external_id])`, a gdy źródło nie podaje identyfikatora — z `[source_id, "url", source_url]`
+(`source_url` jest już kanoniczny, §2). Tablica JSON zamiast sklejania z separatorem: części
+nie mogą się „przesunąć”, a identyfikator nigdy nie zrówna się z URL-em o tym samym tekście.
+Liczony z kandydata po walidacji. **Odłożone:** wariant dla źródeł bez stabilnego
+identyfikatora i URL-a — `(source_id, issuer_name, title, published_at)` — powstanie razem z
+pierwszym takim źródłem (żadne obecne go nie potrzebuje; D-016).
+
+**`content_hash` (PR-03A, D-016):** SHA-256 (hex) z JSON-a par `[nazwa, wartość]` w stałej
+kolejności pól: `issuerName`, `title`, `description`, `location`, `publishedAt`, `deadline`,
+`estimatedValue`, `currency`, `categories`, `contact`, `status`, `sourceUrl`, `externalId`.
+Daty jako ISO 8601 (UTC), obiekty zagnieżdżone z posortowanymi kluczami, tablice w kolejności
+źródła. `null`, `""` i brak pola dają różne hashe (brak = para pominięta). Nie obejmuje
+`fetchedAt` (kiedy patrzyliśmy to nie treść) ani `sourceId` (jest w fingerprincie). Zmiana
+listy pól lub kodowania zmienia hash każdego wiersza, ale `updated` dostaną tylko wiersze
+pobrane ponownie. Codzienny cron pobiera tylko wczorajszy dzień, więc starsze wiersze nie są
+ani oznaczane jako `updated`, ani uzupełniane, dopóki operator nie uruchomi
+`ingest --date …` dla tych dni. To akceptowalne, ale wymaga wpisu w DECISIONS.
+
+**Wykrywanie zmian (PR-03A, D-017):** `ingestOpportunity` = ten sam `INSERT … ON CONFLICT
+(fingerprint) DO UPDATE`, ale z warunkiem `WHERE opportunities.source_id = excluded.source_id
+AND opportunities.content_hash IS DISTINCT FROM excluded.content_hash … RETURNING (xmax = 0)`.
+Zwrócony wiersz → `inserted`/`updated`; brak wiersza → `SELECT` po fingerprincie: to samo
+źródło → `unchanged` (nic nie zapisano), inne źródło → `DomainError duplicate`. `unchanged`
+**nie odświeża** `fetched_at` ani `updated_at`: brak zapisu = brak martwych krotek i WAL przy
+codziennym ponownym pobieraniu tych samych ogłoszeń, a `updated_at` znaczy „treść się
+zmieniła”. Równoległe zapisy tego samego fingerprintu dają jeden wiersz (`inserted` +
+`unchanged`/`updated`); konflikt zgłoszony przez drugi indeks unikalny `(source_id,
+external_id)` zamiast `fingerprint` jest ponawiany jeden raz (D-017). `status` wchodzi do
+`content_hash`, więc ogłoszenie pobrane ponownie po terminie (`closed`) jest raz `updated`
+(zamierzone). Kiedy rekord był ostatnio widziany, wynika z `ingestion_runs`; kolumna
+`last_seen_at` powstanie dopiero, gdy coś będzie jej potrzebować (np. wygaszanie zniknięć).
+`upsertOpportunity` (PR-01) działa bez zmian (zawsze nadpisuje). Deduplikacja między różnymi
+źródłami — poza MVP.
 
 ### `company_profiles` (= subskrypcja)
 
@@ -367,9 +442,23 @@ wszystkie oczekujące migracje w jednej transakcji, blokada advisory lock, stan 
 `kysely_migration`/`kysely_migration_lock` w bieżącym schemacie (`current_schema()`). Brak
 migracji w dół. Zmieniamy schemat wyłącznie nową migracją.
 
+### `ingestion_runs` (PR-03A, migracja `0002_ingestion_runs`)
+
+Jeden wiersz na przebieg jednego źródła: `id uuid` (PK), `source_id` (FK →
+`sources`, `ingestion_runs_source_id_fkey`), `publication_date date`, `max_records int`
+(`> 0`), `started_at`/`finished_at timestamptz` (`finished_at >= started_at`), `status`
+(`succeeded`/`incomplete`/`failed`), liczniki `documents`, `extracted`, `inserted`, `updated`,
+`unchanged`, `rejected` (`int >= 0`), `incomplete jsonb` (tablica `{part, reason}`, domyślnie
+`[]`), `error_code text` (tylko kod `^[a-z][a-z0-9_]{0,63}$`, nigdy komunikat). Wszystko
+`NOT NULL` poza `error_code`. Constrainty nazwane `ingestion_runs_*_check`; indeks
+`ingestion_runs_source_started_idx (source_id, started_at DESC)` pod „ostatnie przebiegi
+źródła”. Spójność „`failed` ⇔ jest `error_code`” pilnuje schemat domenowy
+(`src/domain/ingestion-run.ts`) i sama baza (`ingestion_runs_error_code_status_check`). Migracja dodaje też źródło `bzp` (`INSERT … ON CONFLICT (id)
+DO NOTHING` — istniejący wiersz, np. wyłączony przez operatora, zostaje bez zmian).
+
 ### Później
 
-`ingestion_runs` (PR-03), `deliveries` (PR-05). Żadnych tabel analitycznych w MVP.
+`deliveries` (PR-05). Żadnych tabel analitycznych w MVP.
 
 ## 6. Uruchamianie
 
@@ -390,18 +479,43 @@ migracji w dół. Zmieniamy schemat wyłącznie nową migracją.
   Lokalnie skrypty `pnpm dev|health|start` dodają `--env-file-if-exists=.env` (Node), przy
   czym prawdziwe zmienne środowiskowe mają pierwszeństwo; bezpośrednie `node dist/main.js`
   (produkcja, cron) `.env` nie czyta — zmienne eksportuje środowisko.
-- Cron (PR-03/05): np. `ingest` co 2–4 h, `digest` raz dziennie rano.
-- Nakładające się uruchomienia tej samej komendy blokowane przez PostgreSQL advisory lock
-  (PR-03) — bez zewnętrznego lockera.
+- `ingest [sourceId...] [--date YYYY-MM-DD] [--limit N]` (PR-03A) — pobiera i zapisuje
+  ogłoszenia z dnia publikacji (domyślnie wczoraj według UTC) wybranych źródeł (domyślnie
+  wszystkich włączonych w bazie), do N rekordów na typ ogłoszenia (domyślnie i maks. 1000),
+  timeout 10 min na źródło (D-018). Kolejność kontroli: argumenty (kod 2) → konfiguracja (w
+  tym `CRAWLER_CONTACT`, kod 1) → baza. Nie migruje sama (brak tabeli → kod 1). Wynik: JSON na
+  stdout (`status`, przebiegi z licznikami, `runId`, `errorCode`) + linia logu na źródło.
+  Kod 0, gdy każde źródło `succeeded` lub `incomplete`; 1, gdy któreś `failed`, podsumowania
+  nie zapisano, blokada jest zajęta lub utracona w trakcie (`lock_lost`) albo baza
+  niedostępna; 2 — błąd użycia (także źródło niewłączone w bazie).
+- **Blokada ingest (D-019):** `pg_try_advisory_lock(7206120309001)` na sesji jednego,
+  dedykowanego połączenia z puli (`db.connection().execute`), zwalniana w `finally`
+  (`pg_advisory_unlock`); zerwane połączenie zwalnia ją samo. Zajęta → komunikat na stderr,
+  log `ingest lock busy`, kod 1, bez pobierania. Połączenie z blokadą jest sprawdzane co 5 s;
+  utrata → przerwanie przebiegu (`lock_lost`, log `ingest lock lost`, komunikat
+  „Ingest aborted: …”, kod 1). Nieudane zwolnienie jest tylko logowane (`ingest lock release
+failed`) — wynik zostaje, a blokada znika z końcem sesji. Każde połączenie puli ma listener
+  `error` i TCP keepalive, więc zerwane połączenie nie zabija procesu. Klucz (`INGEST_LOCK_KEY` w
+  `src/ingestion/lock.ts`) jest wspólny dla całej bazy (advisory locki nie znają schematów),
+  inny niż blokada Migratora Kysely; nowy klucz dla innej komendy = nowa stała tutaj.
+- Planowany harmonogram (przykład w README; ten PR nie dodaje artefaktu cron/wdrożenia):
+  `ingest` raz dziennie ok. 06:00 Europe/Warsaw (dzień publikacji = wczoraj UTC, więc dzień
+  jest już zamknięty); `digest` (PR-05) — rano, po `ingest`.
 
 ## 7. Obserwowalność
 
 JSON-lines na stderr (`infrastructure/logger.ts`), stdout zarezerwowany na wynik komendy.
 Serializacja pól nie rzuca (`Error` → `{name, message}`, `bigint` → string, cykle →
 `"[Circular]"`); logger nie redaguje pól (`docs/SECURITY.md` §12).
-Błędy bazy w CLI (`health`, `migrate`) są raportowane jako stały powód + kod SQLSTATE/errno,
+Błędy bazy w CLI (`health`, `migrate`, `ingest`) są raportowane jako stały powód + kod SQLSTATE/errno,
 nigdy jako komunikat sterownika/serwera.
 Każdy wpis `SafeHttpClient` zawiera `sourceId` i host (PR-02); `source:preview` loguje
 koniec przebiegu (`sourceId`, `status`, `durationMs`, liczniki, `incomplete`), każde
-odrzucenie (`sourceId`, `externalId`, powód) i przerwane listingi; _(plan, PR-03)_ podsumowanie
-przebiegu w `ingestion_runs`. Alerting/deployment: PR-07.
+odrzucenie (`sourceId`, `externalId`, powód) i przerwane listingi. `ingest` (PR-03A) loguje: koniec przebiegu źródła
+(`source ingestion finished`: `sourceId`, `runId`, `status`, `durationMs`, liczniki,
+`incomplete`, `errorCode`), błąd źródła (`sourceId`, `errorCode`, `httpStatus`), odrzucenia
+(`sourceId`, `externalId`, powód albo `errorCode` + `constraint`), niezapisane podsumowanie
+(`sourceId`, `errorCode` = SQLSTATE), zajętą, utraconą i niezwolnioną blokadę (`lockKey`,
+`errorCode`) oraz pominięte po przerwaniu źródła (`sourceIds`) — bez treści
+dokumentów, tytułów, danych kontaktowych i adresu bazy. Podsumowanie każdego przebiegu jest w
+`ingestion_runs`. Alerting/deployment: PR-07.
