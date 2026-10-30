@@ -1,10 +1,21 @@
 # BZP fixtures
 
 Real responses of the official "API BZP (WebService)" of the e-Zamówienia platform
-(`docs/DECISIONS.md` D-015), captured on **2026-10-30** and stored **unmodified, byte for byte**
-(the JSON files are excluded from Prettier for that reason). The data are public notices of the
-Biuletyn Zamówień Publicznych; `htmlBody` contains the full published notice, including the
-contact details the buyer published with it — nothing else.
+(`docs/DECISIONS.md` D-015), captured on **2026-10-30** and stored byte for byte as received
+(the JSON files are excluded from Prettier for that reason) — **except** personal contact data
+inside `htmlBody` values, pseudonymised by a string-level replacement on the raw file text (no
+JSON re-serialisation; owner decision, PR #3 review):
+
+- every e-mail address → `kontakt@example.invalid` (including `mailto:` links);
+- every phone/fax number → `000 000 000` (labels such as `tel.` kept; NIP/REGON/KRS, postal
+  codes, notice numbers, amounts, dates and CPV codes untouched);
+- names of natural persons (contact persons, signatories) → `Jan Kowalski`; institution names and
+  addresses stay (no such names were present in these captures).
+
+All other fields are unchanged; the data are public notices of the Biuletyn Zamówień
+Publicznych. **Rule for future fixtures** (including the PR-03 HTML fixtures): pseudonymise the
+same way before committing, keep no unredacted copy in the repository, and record the
+substitutions here.
 
 | File                                    | Request                                                                                                                                                                                          |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

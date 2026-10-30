@@ -55,9 +55,16 @@ src/
 └── web/                    # minimalny UI renderowany po stronie serwera       (plan, PR-06)
 tests/
 ├── *.test.ts               # unit / smoke                                           [PR-00]
-├── fixtures/<source>/      # prawdziwe odpowiedzi źródeł, bajt w bajt (+README)    [PR-02]
+├── fixtures/<source>/      # prawdziwe odpowiedzi źródeł + README (pseudonimizacja) [PR-02]
 └── integration/            # testy z prawdziwym PostgreSQL (TEST_DATABASE_URL)      [PR-01]
 ```
+
+Fixture'y źródeł to prawdziwe odpowiedzi, zapisane bajt w bajt **z wyjątkiem** danych
+kontaktowych osób w wartościach `htmlBody`, pseudonimizowanych zamianą tekstu na surowym pliku
+(bez ponownej serializacji JSON): każdy e-mail → `kontakt@example.invalid`, każdy numer
+telefonu/faksu → `000 000 000`, imię i nazwisko osoby fizycznej → `Jan Kowalski` (nazwy i
+adresy instytucji zostają). Ta sama zasada obowiązuje przyszłe fixture'y (m.in. HTML w PR-03);
+lista zamian — w `tests/fixtures/<source>/README.md`.
 
 Zasada zależności: `domain` nie importuje niczego z innych modułów. `sources` zależy od
 `domain` i `infrastructure/http`. `matching` zależy tylko od `domain` (czyste funkcje).

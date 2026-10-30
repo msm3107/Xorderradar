@@ -4,8 +4,8 @@ Current phase: PHASE 1 — DATA PIPELINE
 Current PR: PR-02 — First Source Adapter
 Status: IN PROGRESS — Part A (SafeHttpClient) MERGED (PR #2, 5533384); Part B (BZP adapter +
 `source:preview`) implemented and reviewed (Code & Safety Review PASS ×2 rounds, Quality Review
-PASS, round-2 fixes applied); AC1 pending owner verification on a machine with direct egress —
-see Blockers
+PASS, round-2 fixes applied; owner GitHub review of PR #3 (bf74ad9): code PASS, follow-up fixes
+applied); AC1 pending owner verification on a machine with direct egress — see Blockers
 
 ## Completed
 
@@ -86,13 +86,14 @@ see Blockers
     province map, description/contact/value `null`).
   - `src/sources/registry.ts`, `src/sources/preview.ts`; CLI
     `source:preview <sourceId> [--date YYYY-MM-DD] [--limit N]` (default yesterday UTC / 20
-    records per notice type, max 500, run timeout 5 min, requires `CRAWLER_CONTACT`, never opens the DB, JSON report on
-    stdout, logs with sourceId/status/durationMs/counts). HTTP client factory and adapters are
-    injected via `CliDeps.sources`.
-  - Real fixtures (`tests/fixtures/bzp/`, captured 2026-10-30, byte-identical, excluded from
-    Prettier) + tests: exact mapping, every record normalizes, province map = official glossary,
-    mutated-record edge cases, unusable documents, fetch loop with a fake client (exact URLs and
-    every stop condition), CLI tests, one smoke test (AC2, AC4).
+    records per notice type, max 500, run timeout 5 min, requires `CRAWLER_CONTACT`, never
+    opens the DB, JSON report on stdout, logs with sourceId/status/durationMs/counts). HTTP
+    client factory and adapters are injected via `CliDeps.sources`.
+  - Real fixtures (`tests/fixtures/bzp/`, captured 2026-10-30, byte-identical except
+    pseudonymised personal contact data in `htmlBody`, excluded from Prettier) + tests: exact
+    mapping, every record normalizes, province map = official glossary, mutated-record edge
+    cases, unusable documents, fetch loop with a fake client (exact URLs and every stop
+    condition), CLI tests, one smoke test (AC2, AC4).
   - Part B to-dos from the Part A reviews resolved: run-level `AbortSignal` (CLI, 5 min);
     page/record limits; GET with `Accept: */*` is enough for the JSON API (no D-014 amendment);
     link pre-check not needed (no source links are fetched — detail URLs are stored only);
@@ -102,10 +103,12 @@ see Blockers
 
 ## Blockers
 
-- **AC1 (real notices via `source:preview`) cannot be verified in the session container:** it
-  has proxy-only egress and SafeHttpClient ignores the proxy by design (D-014). Owner runs, on a
-  machine with direct outbound HTTPS, with a real, monitored contact of the operator and a past
-  weekday:
+- **AC1 (real notices via `source:preview`) cannot be verified in the session container:**
+  the owner already verified the adapter loop against the live API through the container proxy
+  (2026-10-28: 15 requests, 338 records, 0 rejected, `incomplete` `[]`), but AC1 still needs the
+  SafeHttpClient run itself, outside the container. The container has proxy-only egress and
+  SafeHttpClient ignores the proxy by design (D-014). Owner runs, on a machine with direct
+  outbound HTTPS, with a real, monitored contact of the operator and a past weekday:
   `CRAWLER_CONTACT=<twój-monitorowany-kontakt> DATABASE_URL=postgres://… pnpm dev source:preview bzp --date 2026-10-29 --limit 25 | jq .`
   and records "AC1 verified by owner outside the container" with the counts. PR-02 is not READY
   before that.
@@ -145,7 +148,11 @@ source: BZP through the official API) in PR-02 Part B.
    run timeout together (Code & Safety re-review, Low): with `maxRecords` > 1000 a run can reach
    80 pages (≥ 158 s of rate-limit gaps alone), so the 5-min timeout could abort a busy day
    all-or-nothing — use timeout ≥ pages × (2 s + latency), or keep pages fetched before the
-   timeout and mark the run `incomplete`.
+   timeout and mark the run `incomplete`. Run extract → normalize per page (per document) and
+   drop the document `body` right after extraction instead of keeping every page until the end
+   of the run: `htmlBody` is ≈ 95% of the bytes (~70 MB per source at 1000 records per type),
+   so streaming per document keeps D-008 (raw data only in memory) with constant memory per
+   page.
 
 Notes from Part B (for later PRs):
 
@@ -157,6 +164,18 @@ Notes from Part B (for later PRs):
   config schema, existing config tests); revisit if a DB-less deployment of preview is needed,
   and improve the resulting error message (it should say the variable is required by the shared
   configuration even for preview) together with the `DATABASE_URL` message follow-up below.
+- Fixtures pseudonymised (owner decision, PR #3 review): in `htmlBody` every e-mail →
+  `kontakt@example.invalid`, every phone/fax → `000 000 000`, natural-person names →
+  `Jan Kowalski` (none present); string-level replacement, everything else byte-identical. The
+  same rule applies to future fixtures, including the PR-03 HTML fixtures
+  (`tests/fixtures/bzp/README.md`, ARCHITECTURE §2). The unredacted files remain in the history
+  of the already pushed commit bf74ad9; the owner decided against a history rewrite (fix as a
+  new commit; a squash merge keeps bf74ad9 out of the base branch, but it stays visible in
+  PR #3's history on GitHub).
+- Known coverage limitation (D-015): BZP has few small contracts (2026-10-28: 331
+  `ContractNotice` vs 7 `SmallContractNotice` nationwide, all 7 with empty `cpvCode`, 3 without a
+  deadline). A second source is a condition of product value for small firms (ROADMAP), and
+  PR-04 matching must use title keywords (see the CPV gap below).
 - Gaps handed to later PRs (Quality Review of Part B):
   - `htmlBody` (dropped in Part B) contains the buyer's contact e-mail and sometimes the order
     value (e.g. "Wartość zamówienia: 181300 PLN") — candidate for the PR-03 "HTML → text" step
@@ -213,6 +232,16 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-10-30, PR-02 Part B owner-review follow-up (Node 22.22.0, pnpm 10.28.0, PostgreSQL 16):
+
+- Fixtures pseudonymised: 15 e-mails and 7 phone/fax numbers replaced (0 names); each file
+  parses, every record deep-equals the capture except `htmlBody`, and the raw text outside the
+  `htmlBody` values is unchanged.
+- Code & Safety Review round 4: PASS; its one Low (page-size margin overstated as ~5×; worst case
+  25 × 95.6 KB ≈ 2.4 MB, i.e. ~2× under 5 MB) fixed in the `BZP_PAGE_SIZE` comment and D-015.
+- `TEST_DATABASE_URL=… REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean;
+  512/512 tests passed (17 files), no test changed. No dependency changes.
 
 2026-10-30, PR-02 Part B session (Node 22.22.0, pnpm 10.28.0, PostgreSQL 16):
 

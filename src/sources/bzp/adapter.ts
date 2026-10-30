@@ -31,7 +31,11 @@ const DETAIL_URL = `https://${BZP_HOST}/mo-client-board/bzp/notice-details/id/`;
 export const BZP_NOTICE_TYPES = ["ContractNotice", "SmallContractNotice"] as const;
 export type BzpNoticeType = (typeof BZP_NOTICE_TYPES)[number];
 
-/** Records per request: `htmlBody` is up to ~45 KB, so a page stays far below the 5 MB limit. */
+/**
+ * Records per request: a record is typically ~31 KB (median) and up to ~100 KB (max 95.6 KB
+ * measured on 2026-10-28), so a typical page is < 1 MB and the worst case ~2.4 MB — about 2x
+ * under the 5 MB response limit. Re-check this margin before raising the page size.
+ */
 export const BZP_PAGE_SIZE = 25;
 /** Per notice type and run; ~1000 records, above the few hundred published per day. */
 export const BZP_MAX_PAGES_PER_TYPE = 40;

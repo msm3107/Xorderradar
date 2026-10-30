@@ -213,6 +213,11 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
     `SmallContractNotice` („Ogłoszenie dotyczące zamówienia, dla którego nie ma obowiązku
     stosowania ustawy Pzp” — małe zamówienia, które zamawiający dobrowolnie publikują w BZP).
     Planowany przebieg: raz dziennie (cron w kolejnym PR), dzień publikacji = wczoraj.
+  - **Znane ograniczenie pokrycia:** 2026-10-28 w całym kraju było 331 `ContractNotice`, ale
+    tylko 7 `SmallContractNotice` — wszystkie z pustym `cpvCode`, 3 bez terminu składania
+    ofert. Większość małych zamówień (< 130 000 zł) nie trafia do BZP, więc drugie źródło jest
+    warunkiem wartości produktu dla małych firm (`docs/ROADMAP.md`), a dopasowanie w PR-04 musi
+    korzystać ze słów kluczowych w tytule, nie tylko z CPV (`docs/STATE.md`).
 - **API (zweryfikowane prawdziwymi zapytaniami):**
   `GET https://ezamowienia.gov.pl/mo-board/api/v1/notice?NoticeType=…&PublicationDateFrom=YYYY-MM-DD&PublicationDateTo=YYYY-MM-DD&PageSize=N[&SearchAfter=<objectId>]`.
   Wymagane: `PageSize` (1–500), `NoticeType`, obie daty; błędy to 400
@@ -244,12 +249,13 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
   regulaminie, Keycloak; kandydat na kolejne źródło. Wewnętrzny endpoint e-Zamówień
   `Board/Search` — nieudokumentowany, a jego rekordy zawierają `userId`.
 - **Konsekwencje:**
-  - jedno żądanie na stronę (25 rekordów, `htmlBody` ma ~5–45 KB, więc odpowiedź jest daleko
-    poniżej limitu 5 MB), max 40 stron i limit rekordów — oba **osobno dla każdego typu
-    ogłoszenia**, żeby liczne `ContractNotice` nie wyparły małych zamówień
-    (`SmallContractNotice` pobierane jako drugie); przebieg zwraca więc najwyżej 2 × limit
-    rekordów. Osiągnięcie limitu jest raportowane, nie ciche. Przebieg ma limit czasu (`AbortSignal`,
-    `source:preview`: 5 min);
+  - jedno żądanie na stronę (25 rekordów): rekord ma do ~100 KB (pomiar 2026-10-28: maks.
+    95,6 KB, p99 75,7 KB, mediana 31 KB), więc typowa strona ma < 1 MB, a najgorszy przypadek
+    ~2,4 MB, czyli ~2× zapasu względem limitu 5 MB (nie zwiększać `PageSize` bez ponownego
+    sprawdzenia); max 40 stron i limit rekordów — oba **osobno dla każdego typu ogłoszenia**,
+    żeby liczne `ContractNotice` nie wyparły małych zamówień (`SmallContractNotice` pobierane
+    jako drugie); przebieg zwraca więc najwyżej 2 × limit rekordów. Osiągnięcie limitu jest
+    raportowane, nie ciche. Przebieg ma limit czasu (`AbortSignal`, `source:preview`: 5 min);
   - przerwanie przebiegu w trakcie żądania zużywa jednostkę budżetu błędów SafeHttpClient, a
     przerwanie w kolejce/czekaniu — nie. Zostawiamy bez zmian: klient = jeden przebieg, a
     przerwanie kończy przebieg, więc budżet po nim nie ma znaczenia;
