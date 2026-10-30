@@ -218,6 +218,18 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
     ofert. Większość małych zamówień (< 130 000 zł) nie trafia do BZP, więc drugie źródło jest
     warunkiem wartości produktu dla małych firm (`docs/ROADMAP.md`), a dopasowanie w PR-04 musi
     korzystać ze słów kluczowych w tytule, nie tylko z CPV (`docs/STATE.md`).
+  - **Znane ograniczenie — zmiany ogłoszeń** (źródło: przegląd właściciela, zapytanie na żywo
+    2026-10-28): zmiany publikowane są jako osobny typ `NoticeUpdateNotice`, którego `ingest`
+    nie pobiera. Tego dnia było ich co najmniej 100 (`PageSize=100` zwróciło pełną stronę; dla
+    porównania 331 `ContractNotice`); w 96 ze 100 `htmlBody` dotyczy terminu składania ofert.
+    Ogłoszenie o zmianie ma własny `noticeNumber` i łączy się z pierwotnym ogłoszeniem tylko
+    przez `tenderId` (`ocds-148610-…`, obecny w 100/100); jego `submittingOffersDate` jest
+    `null` — nowy termin jest tylko w `htmlBody`. Wszystkie 100 miały sufiks `/01`, więc
+    ryzyko nowej wersji pierwotnego ogłoszenia jako `…/02` (osobny wiersz) nie jest
+    potwierdzone. Skutek: zapisany `deadline` ogłoszenia BZP może być nieaktualny (zwykle za
+    wczesny), a ponowne pobranie pierwotnego ogłoszenia go nie poprawi. Obsługa zmian →
+    PR-03B (`docs/PR_PLAN.md`); do tego czasu nic, co filtruje po terminie, nie może na nim
+    polegać dla BZP.
 - **API (zweryfikowane prawdziwymi zapytaniami):**
   `GET https://ezamowienia.gov.pl/mo-board/api/v1/notice?NoticeType=…&PublicationDateFrom=YYYY-MM-DD&PublicationDateTo=YYYY-MM-DD&PageSize=N[&SearchAfter=<objectId>]`.
   Wymagane: `PageSize` (1–500), `NoticeType`, obie daty; błędy to 400
@@ -227,7 +239,10 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
   (`application/json; charset=utf-8`, bez kompresji, z `Content-Length`) — działa ze stałymi
   nagłówkami SafeHttpClient (`Accept: */*`, GET), więc D-014 nie wymaga zmian.
 - **Mapowanie** (`src/sources/bzp/adapter.ts`):
-  `externalId` = `noticeNumber` (np. `2026/BZP 00507107/01`); `sourceUrl` = strona ogłoszenia
+  `externalId` = `noticeNumber` (np. `2026/BZP 00507107/01`); `tenderId` = `tenderId`
+  (identyfikator OCDS całego postępowania, `ocds-148610-…`; brak, pusty, nie-tekst, dłuższy
+  niż 200 znaków, z niepoprawnym Unicode albo ze znakami sterującymi (np. NUL) → `null`, bez
+  odrzucania rekordu — dodane w PR-03A, kolumna `tender_id`, migracja `0003`); `sourceUrl` = strona ogłoszenia
   `https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/id/{objectId}` (`objectId` to
   identyfikator ogłoszenia — zweryfikowane `Board/GetNoticeDetailsById`; walidowany wyrażeniem
   `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`); `title` = `orderObject`
@@ -283,9 +298,12 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
   - `contentHash` = SHA-256 (hex) z JSON-a par `[pole, wartość]` w stałej kolejności
     (`issuerName`, `title`, `description`, `location`, `publishedAt`, `deadline`,
     `estimatedValue`, `currency`, `categories`, `contact`, `status`, `sourceUrl`,
-    `externalId`); daty jako ISO 8601 UTC, obiekty z posortowanymi kluczami, tablice w
+    `externalId`, `tenderId`); daty jako ISO 8601 UTC, obiekty z posortowanymi kluczami, tablice w
     kolejności źródła; `null`, `""` i brak pola rozróżnione. Bez `fetchedAt` i `sourceId`.
   - Oba liczone z kandydata po ponownej walidacji schematem domenowym.
+  - `tenderId` (D-015) dopisany na końcu listy `contentHash` jeszcze w PR-03A, przed pierwszym
+    wdrożeniem — żaden zapisany hash nie istnieje, więc nie ma jednorazowej fali `updated`.
+    Fingerprint się nie zmienia: kluczem deduplikacji pozostaje `externalId`.
 - **Odłożone:** wariant fingerprintu dla źródeł bez identyfikatora i bez stabilnego URL-a,
   `(sourceId, issuerName, title, publishedAt)` (ARCHITECTURE §5 przed PR-03). Żadne obecne
   źródło go nie potrzebuje (BZP ma `noticeNumber`); powstanie z pierwszym takim adapterem,
@@ -356,7 +374,13 @@ external_id)` (błąd po zatwierdzeniu tamtego zapisu), `ingestOpportunity` pona
   na jednym połączeniu z puli trzymanym przez cały przebieg (`db.connection().execute`),
   `pg_advisory_unlock` w `finally`. Blokada sesyjna, nie transakcyjna — przebieg nie jest
   jedną transakcją (każdy rekord zapisywany osobno, żeby błąd nie cofał zapisanych). Zajęta
-  blokada → kod 1, komunikat i log `ingest lock busy`, nic nie jest pobierane.
+  blokada → nic nie jest pobierane ani zapisywane (bez wiersza w `ingestion_runs`), log
+  `ingest lock busy` (warn), na stdout
+  `{"status":"skipped","reason":"lock_busy","publicationDate":…,"limit":…,"runs":[]}`, na
+  stderr „Ingest skipped: another ingest run holds the lock; nothing was fetched.” i **kod 0**.
+  Zmiana po przeglądzie właściciela (PR-03A; wcześniej kod 1): nałożenie się crona na trwający
+  przebieg to oczekiwany stan, nie awaria — kod 1 dawałby fałszywe alarmy monitoringu.
+  Utrata blokady w trakcie przebiegu pozostaje błędem (kod 1, niżej).
   - **Utrata blokady:** zerwane połączenie (zakończona sesja, restart serwera, awaria sieci)
     zwalnia blokadę po stronie serwera, więc przebieg nie może po cichu trwać dalej. Każde
     połączenie z puli ma listener `error` (`createDatabase`), więc zerwanie nie zabija
@@ -387,8 +411,13 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     działają — błąd konfiguracji jest widoczny, ale nie blokuje reszty;
   - jawne `sourceId`: nieznany adapter → kod 2 już przy parsowaniu argumentów; źródło
     niewłączone w bazie → kod 2 po odczycie bazy, przed pobraniem;
-  - brak tabeli `ingestion_runs` → kod 1 z komunikatem „run `migrate` first”; `ingest` nigdy
-    nie migruje sam (migracja to świadoma operacja wdrożeniowa);
+  - niewykonana którakolwiek migracja (wg rejestru `kysely_migration`, `pendingMigrations` —
+    odczyt bez tworzenia tabel i bez blokady migracji) → kod 1 z komunikatem „run `migrate`
+    first”, przed pobraniem; `ingest` nigdy nie migruje sam (migracja to świadoma operacja
+    wdrożeniowa). Ten sam test gotowości wykonuje `health` (pole `schema`). Wcześniej
+    sprawdzana była tylko obecność tabeli `ingestion_runs` — po `0003` przepuściłaby bazę bez
+    kolumny `tender_id`. Ręcznie usunięta tabela przy wpisie w rejestrze nie jest wykrywana
+    (rejestr jest źródłem prawdy, jak dla `migrate`);
   - migracja `0002_ingestion_runs` dodaje `bzp` (`ON CONFLICT (id) DO NOTHING`), żeby świeża
     instalacja działała po `migrate` bez ręcznego SQL; istniejący wiersz (np. wyłączony) nie
     jest nadpisywany.

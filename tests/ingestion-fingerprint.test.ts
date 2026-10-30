@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   opportunityCandidateSchema,
@@ -10,6 +11,7 @@ function candidate(overrides: Partial<OpportunityCandidate> = {}): OpportunityCa
     sourceId: "bzp",
     sourceUrl: "https://ezamowienia.gov.pl/notice/1",
     externalId: "2026/BZP 00000001/01",
+    tenderId: "ocds-148610-00000000-0000-4000-8000-000000000001",
     issuerName: "Gmina Przykładowa",
     title: "Remont drogi gminnej",
     description: "Opis zamówienia",
@@ -39,6 +41,14 @@ describe("fingerprint", () => {
     const base = fingerprint(candidate());
     expect(fingerprint(candidate({ externalId: "2026/BZP 00000002/01" }))).not.toBe(base);
     expect(fingerprint({ ...candidate(), sourceId: "inne-zrodlo" })).not.toBe(base);
+  });
+
+  it("does not depend on the tender id (a procedure has several notices)", () => {
+    const base = fingerprint(candidate());
+    expect(fingerprint(candidate({ tenderId: null }))).toBe(base);
+    expect(
+      fingerprint(candidate({ tenderId: "ocds-148610-00000000-0000-4000-8000-000000000002" })),
+    ).toBe(base);
   });
 
   it("falls back to the source URL when the notice has no external id", () => {
@@ -96,8 +106,32 @@ describe("contentHash", () => {
     ["contact", { contact: { name: "Jan Kowalski" } }],
     ["sourceUrl", { sourceUrl: "https://ezamowienia.gov.pl/notice/9" }],
     ["publishedAt", { publishedAt: new Date("2026-10-29T08:00:00.001Z") }],
+    ["tenderId", { tenderId: "ocds-148610-00000000-0000-4000-8000-000000000002" }],
+    ["tenderId (to null)", { tenderId: null }],
   ])("changes when %s changes", (_field, overrides) => {
     expect(contentHash(candidate(overrides))).not.toBe(contentHash(candidate()));
+  });
+
+  it("hashes the fixed field list in D-016 order, ending with tenderId", () => {
+    const value = candidate();
+    const pairs = [
+      ["issuerName", value.issuerName],
+      ["title", value.title],
+      ["description", value.description],
+      ["location", { city: "Przykładowo", voivodeship: "mazowieckie" }],
+      ["publishedAt", "2026-10-29T08:00:00.000Z"],
+      ["deadline", "2026-11-12T09:00:00.000Z"],
+      ["estimatedValue", value.estimatedValue],
+      ["currency", value.currency],
+      ["categories", value.categories],
+      ["contact", { email: "kontakt@example.invalid", name: "Jan Kowalski", phone: "000 000 000" }],
+      ["status", value.status],
+      ["sourceUrl", value.sourceUrl],
+      ["externalId", value.externalId],
+      ["tenderId", value.tenderId],
+    ];
+    const expected = createHash("sha256").update(JSON.stringify(pairs), "utf8").digest("hex");
+    expect(contentHash(value)).toBe(expected);
   });
 
   it("does not change when only fetchedAt changes (when we looked is not content)", () => {

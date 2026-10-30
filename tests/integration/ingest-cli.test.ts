@@ -184,6 +184,29 @@ describe.skipIf(skipWithoutDatabase)("ingest command (PostgreSQL, fake network)"
       }),
     ]);
     expect(await count(schema, "opportunities")).toBe(5);
+    // The procedure id is stored for contract notices; small contracts carry none (null).
+    const tenderIds = await schema.db
+      .selectFrom("opportunities")
+      .select(["external_id", "tender_id"])
+      .where("source_id", "=", "bzp")
+      .orderBy("external_id")
+      .execute();
+    expect(tenderIds).toEqual([
+      {
+        external_id: "2026/BZP 00507107/01",
+        tender_id: "ocds-148610-28a28ecf-bf58-4c1b-b2ba-e2adefdc2140",
+      },
+      {
+        external_id: "2026/BZP 00507109/01",
+        tender_id: "ocds-148610-9cec87d4-1681-41f4-804b-fdbf3064de08",
+      },
+      {
+        external_id: "2026/BZP 00507112/01",
+        tender_id: "ocds-148610-447a9c97-a3df-42ae-b8d1-c396e629ee81",
+      },
+      { external_id: "2026/BZP 00507754/01", tender_id: null },
+      { external_id: "2026/BZP 00507787/01", tender_id: null },
+    ]);
 
     const second = await run(["ingest", "bzp", "--date", "2026-10-29"], schema);
     expect(second.code).toBe(ExitCode.Ok);
@@ -277,7 +300,7 @@ describe.skipIf(skipWithoutDatabase)("ingest command (PostgreSQL, fake network)"
     expect(await count(schema, "ingestion_runs")).toBe(before);
   });
 
-  it("exits 1 without fetching or writing anything while another run holds the lock", async () => {
+  it("reports skipped and exits 0 without fetching or writing anything while another run holds the lock", async () => {
     const opportunities = await count(schema, "opportunities");
     const runs = await count(schema, "ingestion_runs");
     const http = new FixtureHttpClient();
@@ -292,9 +315,18 @@ describe.skipIf(skipWithoutDatabase)("ingest command (PostgreSQL, fake network)"
         await sql`SELECT pg_advisory_unlock(${INGEST_LOCK_KEY}::bigint)`.execute(connection);
       }
     });
-    expect(result.code).toBe(ExitCode.Failure);
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toContain("Another ingest run holds the lock; nothing was fetched.\n");
+    // Busy is the expected outcome of an overlapping cron run, not a failure (D-019).
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(JSON.parse(result.stdout)).toEqual({
+      status: "skipped",
+      reason: "lock_busy",
+      publicationDate: "2026-10-28",
+      limit: 1000,
+      runs: [],
+    });
+    expect(result.stderr).toContain(
+      "Ingest skipped: another ingest run holds the lock; nothing was fetched.\n",
+    );
     expect(logLines(result.stderr)).toContainEqual(
       expect.objectContaining({ level: "warn", message: "ingest lock busy" }),
     );
@@ -318,8 +350,11 @@ describe.skipIf(skipWithoutDatabase)("ingest command (PostgreSQL, fake network)"
 
       const idle = new FixtureHttpClient();
       const second = await run(["ingest", "bzp", "--date", "2026-10-27"], schema, { http: idle });
-      expect(second.code).toBe(ExitCode.Failure);
-      expect(second.stderr).toContain("Another ingest run holds the lock; nothing was fetched.\n");
+      expect(second.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(second.stdout)).toMatchObject({ status: "skipped", reason: "lock_busy" });
+      expect(second.stderr).toContain(
+        "Ingest skipped: another ingest run holds the lock; nothing was fetched.\n",
+      );
       expect(idle.urls).toEqual([]);
     } finally {
       // Never leave the database-wide lock held by a failed assertion.

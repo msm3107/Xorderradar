@@ -7,8 +7,9 @@
 > (`src/infrastructure/http/`, część A) oraz kontrakt adaptera, pierwszy adapter — BZP przez
 > oficjalne API (`src/sources/`, D-015) — i komendę `source:preview` (część B), bez zapisu do
 > bazy. PR-03 część A dodaje zapis: `src/ingestion/` (fingerprint, `content_hash`, przebieg
-> `runIngestion`, blokada), tabelę `ingestion_runs` (migracja `0002_ingestion_runs`) i komendę
-> `ingest`; część B — później: tylko helpery normalizacji (białe znaki, HTML → tekst, daty
+> `runIngestion`, blokada), tabelę `ingestion_runs` (migracja `0002_ingestion_runs`), kolumnę
+> `opportunities.tender_id` (migracja `0003`) i komendę `ingest`; część B — później: obsługa
+> zmian ogłoszeń BZP (`NoticeUpdateNotice`, D-015) i helpery normalizacji (białe znaki, HTML → tekst, daty
 > Europe/Warsaw, województwa/powiaty, CPV → kategorie, fallback kontaktu do `contact.raw`). Wszystko poniżej oznaczone
 > _(plan, PR-xx)_ to projekt docelowy — kontrakty mogą zostać doprecyzowane w danym PR, a
 > zmiana musi trafić do tego dokumentu i do `docs/DECISIONS.md`.
@@ -44,7 +45,7 @@ Katalog powstaje dopiero razem z kodem, który go wypełnia.
 src/
 ├── main.ts                 # granica procesu (process.argv/env/exitCode)          [PR-00]
 ├── cli.ts                  # routing komend, wstrzykiwana baza; bez procesu        [PR-00/01]
-├── health.ts               # raport health (+ połączenie z bazą)                   [PR-00/01]
+├── health.ts               # raport health (+ połączenie z bazą, migracje)         [PR-00/01]
 ├── infrastructure/
 │   ├── config.ts           # walidacja env (zod)                                    [PR-00]
 │   ├── logger.ts           # JSON-lines logger na stderr                            [PR-00]
@@ -164,12 +165,18 @@ kursorem powtarza zebrane rekordy, więc jest odrzucana), przerwany `signal`. St
 dłuższa niż żądany `PageSize` → `SourceFormatError`. Ekstrakcja waliduje tylko używane pola
 (każde ≤ 20 000 znaków), resztę — w tym `htmlBody` — odrzuca. Mapowanie: `sourceUrl` = strona
 ogłoszenia (`/mo-client-board/bzp/notice-details/id/{objectId}`), `externalId` =
-`noticeNumber`, daty tylko w ścisłym formacie UTC (niepoprawna data publikacji lub terminu →
+`noticeNumber`, `tenderId` = identyfikator OCDS postępowania (brak, pusty, nie-tekst, dłuższy
+niż 200 znaków, z niepoprawnym Unicode albo ze znakami sterującymi → `null`, bez odrzucania
+rekordu), daty tylko w ścisłym formacie UTC (niepoprawna data publikacji lub terminu →
 odrzucenie), lokalizacja = siedziba zamawiającego (miasto + województwo ze statycznej mapy
 kodów `PLxx`, nieznany kod → brak województwa), kategorie = kody CPV w kolejności publikacji
 bez duplikatów, `status` = `open`/`closed` względem `fetchedAt` albo `unknown` bez terminu;
 opis, kontakt i wartość — `null` (brak pól strukturalnych; kontakt, a czasem wartość, bywają
 tylko w odrzucanym `htmlBody` — kandydat na „HTML → tekst” w PR-03).
+**Zmiany ogłoszeń BZP nie są jeszcze wykrywane:** BZP publikuje je jako osobne
+`NoticeUpdateNotice` (własny `noticeNumber`, powiązanie z pierwotnym ogłoszeniem tylko przez
+`tenderId`, nowy termin tylko w `htmlBody`), których adapter nie pobiera, więc `updated` dla
+BZP w praktyce nie wystąpi, a zapisany `deadline` może być nieaktualny — do PR-03B (D-015).
 
 ### 4.2 SafeHttpClient (PR-02, zaimplementowany)
 
@@ -265,8 +272,9 @@ interface IngestionRequest { sourceIds?: string[]; publicationDate: string; maxR
   włączone źródło bez adaptera w tej wersji programu → przebieg `failed` z kodem `no_adapter`
   (zapisany i zalogowany, pozostałe źródła działają; D-020). Jawne `sourceIds` muszą być
   włączone w bazie **i** mieć adapter, inaczej `IngestionRequestError` przed jakimkolwiek
-  pobraniem (CLI: kod 2). Brak tabeli `ingestion_runs` → `SchemaNotReadyError` przed
-  pobraniem (ingest nie migruje sam; CLI: kod 1).
+  pobraniem (CLI: kod 2). Niewykonana którakolwiek migracja (`pendingMigrations`, odczyt
+  rejestru `kysely_migration`) → `SchemaNotReadyError` przed pobraniem (ingest nie migruje
+  sam; CLI: kod 1; D-020).
 - **Przebieg źródła** (sekwencyjnie, każde izolowane): nowy klient HTTP, `signal` =
   timeout źródła (`AbortSignal.timeout`, CLI: 10 min, D-018) połączony z sygnałem całego
   przebiegu (CLI: sygnał blokady ingest, przerywany przy jej utracie, D-019); `adapter.fetch`
@@ -343,28 +351,29 @@ jawne, bo trafiają do `DomainError.constraint`.
 
 ### `opportunities`
 
-| Kolumna           | Typ               | Null | Uwagi                                                                    |
-| ----------------- | ----------------- | ---- | ------------------------------------------------------------------------ |
-| `id`              | uuid              | nie  | PK, `gen_random_uuid()`                                                  |
-| `source_id`       | text FK → sources | nie  |                                                                          |
-| `source_url`      | text              | nie  | link do oryginału; kanoniczny `href` (http/https)                        |
-| `external_id`     | text              | tak  | identyfikator nadany przez źródło                                        |
-| `issuer_name`     | text              | nie  | zamawiający                                                              |
-| `title`           | text              | nie  |                                                                          |
-| `description`     | text              | tak  | skrócony, tekst bez HTML                                                 |
-| `location`        | jsonb             | tak  | `{ voivodeship?, county?, city?, raw? }` — tylko to, co wynika ze źródła |
-| `published_at`    | timestamptz       | tak  |                                                                          |
-| `deadline`        | timestamptz       | tak  | termin składania ofert                                                   |
-| `estimated_value` | numeric           | tak  | **tylko jeśli podana**; nigdy domyślne 0; w kodzie string dziesiętny     |
-| `currency`        | char(3)           | tak  | wymagana, gdy `estimated_value` nie jest null                            |
-| `categories`      | text[]            | nie  | może być pusta tablica (domyślnie `'{}'`)                                |
-| `contact`         | jsonb             | tak  | tylko dane kontaktowe opublikowane przy zamówieniu                       |
-| `fetched_at`      | timestamptz       | nie  | pobranie, przy którym treść ostatnio zapisano (nie przy `unchanged`)     |
-| `first_seen_at`   | timestamptz       | nie  | `now()` przy pierwszym zapisie; upsert go nie zmienia                    |
-| `updated_at`      | timestamptz       | nie  | `now()` przy każdym zapisie (insert i update)                            |
-| `fingerprint`     | text              | nie  | klucz deduplikacji (patrz niżej)                                         |
-| `content_hash`    | text              | nie  | wykrywanie zmian treści                                                  |
-| `status`          | text + CHECK      | nie  | `open` / `closed` / `cancelled` / `unknown`; bez wartości domyślnej      |
+| Kolumna           | Typ               | Null | Uwagi                                                                     |
+| ----------------- | ----------------- | ---- | ------------------------------------------------------------------------- |
+| `id`              | uuid              | nie  | PK, `gen_random_uuid()`                                                   |
+| `source_id`       | text FK → sources | nie  |                                                                           |
+| `source_url`      | text              | nie  | link do oryginału; kanoniczny `href` (http/https)                         |
+| `external_id`     | text              | tak  | identyfikator nadany przez źródło                                         |
+| `tender_id`       | text              | tak  | identyfikator postępowania w źródle (BZP: OCDS `tenderId`); migracja 0003 |
+| `issuer_name`     | text              | nie  | zamawiający                                                               |
+| `title`           | text              | nie  |                                                                           |
+| `description`     | text              | tak  | skrócony, tekst bez HTML                                                  |
+| `location`        | jsonb             | tak  | `{ voivodeship?, county?, city?, raw? }` — tylko to, co wynika ze źródła  |
+| `published_at`    | timestamptz       | tak  |                                                                           |
+| `deadline`        | timestamptz       | tak  | termin składania ofert                                                    |
+| `estimated_value` | numeric           | tak  | **tylko jeśli podana**; nigdy domyślne 0; w kodzie string dziesiętny      |
+| `currency`        | char(3)           | tak  | wymagana, gdy `estimated_value` nie jest null                             |
+| `categories`      | text[]            | nie  | może być pusta tablica (domyślnie `'{}'`)                                 |
+| `contact`         | jsonb             | tak  | tylko dane kontaktowe opublikowane przy zamówieniu                        |
+| `fetched_at`      | timestamptz       | nie  | pobranie, przy którym treść ostatnio zapisano (nie przy `unchanged`)      |
+| `first_seen_at`   | timestamptz       | nie  | `now()` przy pierwszym zapisie; upsert go nie zmienia                     |
+| `updated_at`      | timestamptz       | nie  | `now()` przy każdym zapisie (insert i update)                             |
+| `fingerprint`     | text              | nie  | klucz deduplikacji (patrz niżej)                                          |
+| `content_hash`    | text              | nie  | wykrywanie zmian treści                                                   |
+| `status`          | text + CHECK      | nie  | `open` / `closed` / `cancelled` / `unknown`; bez wartości domyślnej       |
 
 Ograniczenia:
 
@@ -377,7 +386,10 @@ Ograniczenia:
 - `opportunities_value_currency_check` — `(estimated_value IS NULL) = (currency IS NULL)`,
 - `opportunities_currency_check` — `currency ~ '^[A-Z]{3}$'`,
 - `opportunities_status_check` — `status IN ('open','closed','cancelled','unknown')`,
-- `opportunities_location_check`, `opportunities_contact_check` — jsonb jest obiektem.
+- `opportunities_location_check`, `opportunities_contact_check` — jsonb jest obiektem,
+- `opportunities_source_tender_id_idx` — indeks częściowy (nieunikalny, jedno postępowanie ma
+  kilka ogłoszeń) `(source_id, tender_id) WHERE tender_id IS NOT NULL` (migracja 0003; pod
+  wyszukiwanie pierwotnego ogłoszenia w PR-03B).
 
 `location` i `contact` w kodzie mają jawne, ograniczone schematy (`src/domain/opportunity.ts`):
 tylko pola wymienione wyżej (`contact`: `name`, `email`, `phone`, `raw`), limity długości, co
@@ -399,8 +411,8 @@ pierwszym takim źródłem (żadne obecne go nie potrzebuje; D-016).
 
 **`content_hash` (PR-03A, D-016):** SHA-256 (hex) z JSON-a par `[nazwa, wartość]` w stałej
 kolejności pól: `issuerName`, `title`, `description`, `location`, `publishedAt`, `deadline`,
-`estimatedValue`, `currency`, `categories`, `contact`, `status`, `sourceUrl`, `externalId`.
-Daty jako ISO 8601 (UTC), obiekty zagnieżdżone z posortowanymi kluczami, tablice w kolejności
+`estimatedValue`, `currency`, `categories`, `contact`, `status`, `sourceUrl`, `externalId`,
+`tenderId`. Daty jako ISO 8601 (UTC), obiekty zagnieżdżone z posortowanymi kluczami, tablice w kolejności
 źródła. `null`, `""` i brak pola dają różne hashe (brak = para pominięta). Nie obejmuje
 `fetchedAt` (kiedy patrzyliśmy to nie treść) ani `sourceId` (jest w fingerprincie). Zmiana
 listy pól lub kodowania zmienia hash każdego wiersza, ale `updated` dostaną tylko wiersze
@@ -472,7 +484,9 @@ DO NOTHING` — istniejący wiersz, np. wyłączony przez operatora, zostaje bez
   zanim padnie jakiekolwiek żądanie). Nie otwiera bazy, ale `DATABASE_URL` jest walidowany jak
   przy każdej komendzie (wspólna konfiguracja). Adaptery i fabryka klienta HTTP są
   wstrzykiwane (`CliDeps.sources`), więc testy CLI działają bez sieci.
-- Komendy bazodanowe: `health` (konfiguracja + `select 1`), `migrate` (oczekujące migracje). Pula `pg`:
+- Komendy bazodanowe: `health` (konfiguracja + `select 1` + brak oczekujących migracji — pole
+  `schema`, ten sam test gotowości co `ingest`; kod 1, gdy któraś kontrola nie przejdzie),
+  `migrate` (oczekujące migracje). Pula `pg`:
   max 5 połączeń, 5 s na połączenie, `statement_timeout` 30 s (+ timeout po stronie klienta
   35 s), bezczynne połączenia zamykane po 10 s — stałe w `src/infrastructure/db/database.ts`.
 - Konfiguracja wyłącznie ze zmiennych środowiskowych; pusta wartość = wartość domyślna.
@@ -483,15 +497,18 @@ DO NOTHING` — istniejący wiersz, np. wyłączony przez operatora, zostaje bez
   ogłoszenia z dnia publikacji (domyślnie wczoraj według UTC) wybranych źródeł (domyślnie
   wszystkich włączonych w bazie), do N rekordów na typ ogłoszenia (domyślnie i maks. 1000),
   timeout 10 min na źródło (D-018). Kolejność kontroli: argumenty (kod 2) → konfiguracja (w
-  tym `CRAWLER_CONTACT`, kod 1) → baza. Nie migruje sama (brak tabeli → kod 1). Wynik: JSON na
-  stdout (`status`, przebiegi z licznikami, `runId`, `errorCode`) + linia logu na źródło.
-  Kod 0, gdy każde źródło `succeeded` lub `incomplete`; 1, gdy któreś `failed`, podsumowania
-  nie zapisano, blokada jest zajęta lub utracona w trakcie (`lock_lost`) albo baza
-  niedostępna; 2 — błąd użycia (także źródło niewłączone w bazie).
+  tym `CRAWLER_CONTACT`, kod 1) → baza. Nie migruje sama (oczekujące migracje → kod 1). Wynik:
+  JSON na stdout (`status`, przebiegi z licznikami, `runId`, `errorCode`) + linia logu na
+  źródło. Kod 0, gdy każde źródło `succeeded` lub `incomplete`, a także gdy blokada jest
+  zajęta (`status: "skipped"`, nic nie uruchomiono); 1, gdy któreś `failed`, podsumowania nie
+  zapisano, blokada została utracona w trakcie (`lock_lost`) albo baza niedostępna; 2 — błąd
+  użycia (także źródło niewłączone w bazie).
 - **Blokada ingest (D-019):** `pg_try_advisory_lock(7206120309001)` na sesji jednego,
   dedykowanego połączenia z puli (`db.connection().execute`), zwalniana w `finally`
-  (`pg_advisory_unlock`); zerwane połączenie zwalnia ją samo. Zajęta → komunikat na stderr,
-  log `ingest lock busy`, kod 1, bez pobierania. Połączenie z blokadą jest sprawdzane co 5 s;
+  (`pg_advisory_unlock`); zerwane połączenie zwalnia ją samo. Zajęta → stdout
+  `{"status":"skipped","reason":"lock_busy",…,"runs":[]}`, komunikat „Ingest skipped: …” na
+  stderr, log `ingest lock busy` (warn), kod 0, bez pobierania i bez wiersza w
+  `ingestion_runs`. Połączenie z blokadą jest sprawdzane co 5 s;
   utrata → przerwanie przebiegu (`lock_lost`, log `ingest lock lost`, komunikat
   „Ingest aborted: …”, kod 1). Nieudane zwolnienie jest tylko logowane (`ingest lock release
 failed`) — wynik zostaje, a blokada znika z końcem sesji. Każde połączenie puli ma listener

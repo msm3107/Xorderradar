@@ -84,32 +84,43 @@ export class MigrationError extends Error {
   }
 }
 
+/** The connection's current schema, or null when search_path names no existing schema. */
+async function currentSchema(db: Kysely<Database>): Promise<string | null> {
+  const { rows } = await sql<{ schema: string | null }>`select current_schema() as schema`.execute(
+    db,
+  );
+  return rows[0]?.schema ?? null;
+}
+
+/**
+ * The migrator over the static migration list. Its bookkeeping tables
+ * (`kysely_migration`, `kysely_migration_lock`) live in the connection's
+ * current schema, next to the tables they describe: without an explicit
+ * schema the migrator would accept a bookkeeping table found in *any* schema.
+ */
+function createMigrator(db: Kysely<Database>, schema: string): Migrator {
+  return new Migrator({
+    db,
+    provider: { getMigrations: () => Promise.resolve({ ...migrations }) },
+    migrationTableSchema: schema,
+  });
+}
+
 /**
  * Applies all pending migrations and returns the names applied by this run
  * (empty when the schema is already up to date, so re-running is a no-op).
  *
  * Kysely's Migrator serializes concurrent runs with a PostgreSQL advisory lock
- * and runs all pending migrations in one transaction. The bookkeeping tables
- * (`kysely_migration`, `kysely_migration_lock`) live in the connection's
- * current schema, next to the tables they describe: without an explicit
- * schema the migrator would accept a bookkeeping table found in *any* schema.
+ * and runs all pending migrations in one transaction.
  */
 export async function migrateToLatest(db: Kysely<Database>): Promise<string[]> {
-  const { rows } = await sql<{ schema: string | null }>`select current_schema() as schema`.execute(
-    db,
-  );
-  const schema = rows[0]?.schema ?? null;
+  const schema = await currentSchema(db);
   if (schema === null) {
     // search_path names no existing schema: nowhere to create the tables.
     throw new MigrationError(null, new NoCurrentSchemaError());
   }
 
-  const migrator = new Migrator({
-    db,
-    provider: { getMigrations: () => Promise.resolve({ ...migrations }) },
-    migrationTableSchema: schema,
-  });
-  const { error, results = [] } = await migrator.migrateToLatest();
+  const { error, results = [] } = await createMigrator(db, schema).migrateToLatest();
   if (error !== undefined) {
     const failed = results.find((result) => result.status === "Error");
     throw new MigrationError(failed?.migrationName ?? null, error);
@@ -117,4 +128,17 @@ export async function migrateToLatest(db: Kysely<Database>): Promise<string[]> {
   return results
     .filter((result) => result.status === "Success")
     .map((result) => result.migrationName);
+}
+
+/**
+ * Names of the migrations not yet applied in the connection's current schema
+ * (all of them when it has no migration ledger or search_path names no
+ * existing schema). Read-only: never creates the ledger or takes the
+ * migration lock. The schema-readiness check of `ingest` and `health`.
+ */
+export async function pendingMigrations(db: Kysely<Database>): Promise<string[]> {
+  const schema = await currentSchema(db);
+  if (schema === null) return Object.keys(migrations).sort();
+  const all = await createMigrator(db, schema).getMigrations();
+  return all.filter((migration) => migration.executedAt === undefined).map(({ name }) => name);
 }

@@ -62,6 +62,12 @@ const opportunityCandidateShape = {
   sourceId: sourceIdSchema,
   sourceUrl: httpUrlSchema,
   externalId: text(200).nullable(),
+  /**
+   * The source's identifier of the whole procedure, shared by a notice and the
+   * later notices that change it (BZP: OCDS `tenderId`, D-015). Not a
+   * deduplication key — `externalId` is.
+   */
+  tenderId: text(200).nullable(),
   issuerName: text(500),
   title: text(1000),
   description: text(10_000).nullable(),

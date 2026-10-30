@@ -10,6 +10,7 @@ function stubDatabase(overrides: Partial<CliDatabase> = {}) {
   const database: CliDatabase = {
     ping: () => Promise.resolve(),
     migrate: () => Promise.resolve([]),
+    pendingMigrations: () => Promise.resolve([]),
     close: () => {
       calls.closed += 1;
       return Promise.resolve();
@@ -57,6 +58,7 @@ describe("runCli", () => {
       service: "radar-zamowien",
       environment: "test",
       database: { status: "ok" },
+      schema: { status: "ok" },
     });
     expect(result.stderr).toBe("");
   });
@@ -143,9 +145,49 @@ describe("runCli", () => {
       service: "radar-zamowien",
       environment: "test",
       database: { status: "error", reason: "unreachable", code: "ECONNREFUSED" },
+      // Not checked: the database did not answer.
+      schema: { status: "not_checked" },
     });
     expect(result.stderr).toBe("Database check failed: unreachable (ECONNREFUSED)\n");
     expect(result.calls.closed).toBe(1);
+  });
+
+  it("health exits 1 when migrations are pending, naming them", async () => {
+    const stub = stubDatabase({
+      pendingMigrations: () => Promise.resolve(["0003_opportunities_tender_id"]),
+    });
+    const result = await run(["health"], { NODE_ENV: "test" }, stub);
+    expect(result.code).toBe(ExitCode.Failure);
+    expect(JSON.parse(result.stdout)).toEqual({
+      status: "error",
+      service: "radar-zamowien",
+      environment: "test",
+      database: { status: "ok" },
+      schema: {
+        status: "error",
+        reason: "not_migrated",
+        pending: ["0003_opportunities_tender_id"],
+      },
+    });
+    expect(result.stderr).toBe("Schema check failed: not migrated; run `migrate`\n");
+    expect(result.calls.closed).toBe(1);
+  });
+
+  it("health reports a failing migration check without the raw error", async () => {
+    const denied = Object.assign(new Error(`permission denied; url=${DATABASE_URL}`), {
+      code: "42501",
+    });
+    const stub = stubDatabase({ pendingMigrations: () => Promise.reject(denied) });
+    const result = await run(["health"], { NODE_ENV: "test" }, stub);
+    expect(result.code).toBe(ExitCode.Failure);
+    const report = JSON.parse(result.stdout) as Record<string, unknown>;
+    expect(report).toMatchObject({ status: "error", database: { status: "ok" } });
+    expect(report.schema).toMatchObject({ status: "error", code: "42501" });
+    expect(result.stderr).toMatch(/^Schema check failed: .*\(42501\)\n$/);
+    for (const output of [result.stdout, result.stderr]) {
+      expect(output).not.toContain("not-a-real-password");
+      expect(output).not.toContain("permission denied");
+    }
   });
 
   it("never prints the raw database error message (it may contain secrets)", async () => {

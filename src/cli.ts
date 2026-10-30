@@ -5,6 +5,7 @@ import {
   createDatabase,
   MigrationError,
   migrateToLatest,
+  pendingMigrations,
   pingDatabase,
 } from "./infrastructure/db/database.js";
 import { describeDatabaseFailure, formatDatabaseFailure } from "./infrastructure/db/errors.js";
@@ -39,6 +40,12 @@ export interface CliDatabase {
   ping(): Promise<void>;
   /** Applies pending migrations; resolves with the names applied by this run. */
   migrate(): Promise<string[]>;
+  /**
+   * Names of the migrations not applied yet (read-only; the readiness check
+   * shared with `ingest`). Optional only so that stubs for the other commands
+   * need not provide it.
+   */
+  pendingMigrations?(): Promise<string[]>;
   close(): Promise<void>;
   /**
    * Runs `task` with the pool while holding the ingest advisory lock
@@ -111,6 +118,7 @@ export function openCliDatabase(
   return {
     ping: () => pingDatabase(db),
     migrate: () => migrateToLatest(db),
+    pendingMigrations: () => pendingMigrations(db),
     close: () => db.destroy(),
     withIngestLock: (task, logger) =>
       withIngestLock(db, (signal) => task(db, signal), {
@@ -139,7 +147,8 @@ export const INGEST_MAX_LIMIT = 1000;
 const usage = `Usage: radar-zamowien <command> [arguments]
 
 Commands:
-  health    Print a JSON health report (incl. database connectivity); exit 0 when operational.
+  health    Print a JSON health report (database connectivity, no pending migrations); exit 0
+            when operational, 1 otherwise.
   migrate   Apply pending database migrations; prints the applied names (none when up to date).
   source:preview <sourceId> [--date YYYY-MM-DD] [--limit N]
             Fetch the notices a source published on one day and print them normalized as
@@ -150,8 +159,9 @@ Commands:
   ingest [sourceId...] [--date YYYY-MM-DD] [--limit N]
             Fetch and store the notices published on one day, with deduplication and change
             detection, from the given sources or all enabled ones; prints a JSON summary and
-            records each source run. One run at a time (lock). Requires CRAWLER_CONTACT and
-            an up-to-date schema (migrate). Exit 1 when any source failed.
+            records each source run. One run at a time (lock): while another run holds it,
+            prints status "skipped" and exits 0 without fetching. Requires CRAWLER_CONTACT
+            and an up-to-date schema (migrate). Exit 1 when any source failed.
             --date   publication day, default yesterday (UTC)
             --limit  max records per notice type, 1-${String(INGEST_MAX_LIMIT)}, default ${String(INGEST_DEFAULT_LIMIT)}
 `;
@@ -371,13 +381,24 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
 }
 
 async function runHealth(config: AppConfig, database: CliDatabase, io: CliIo): Promise<ExitCode> {
-  const report = await checkHealth(config, () => database.ping());
+  if (database.pendingMigrations === undefined) {
+    throw new Error("database cannot check migrations");
+  }
+  const report = await checkHealth(config, {
+    ping: () => database.ping(),
+    pendingMigrations: database.pendingMigrations.bind(database),
+  });
   io.stdout(`${JSON.stringify(report)}\n`);
   if (report.database.status === "error") {
     io.stderr(`Database check failed: ${formatDatabaseFailure(report.database)}\n`);
-    return ExitCode.Failure;
+  } else if (report.schema.status === "error") {
+    const why =
+      report.schema.reason === "not_migrated"
+        ? "not migrated; run `migrate`"
+        : formatDatabaseFailure(report.schema);
+    io.stderr(`Schema check failed: ${why}\n`);
   }
-  return ExitCode.Ok;
+  return report.status === "ok" ? ExitCode.Ok : ExitCode.Failure;
 }
 
 /**
@@ -505,9 +526,11 @@ async function runSourcePreview(
  * `ingest`: runs the sources under the ingest lock (one run at a time, D-019)
  * and prints a JSON summary on stdout. Each source's run is stored in
  * `ingestion_runs` and logged (sourceId, status, counters, duration) by
- * runIngestion. Exit 0 when every source succeeded or was incomplete; 1 when
- * any failed, a run could not be recorded, the lock is busy or was lost
- * during the run (the run is aborted, `lock_lost`), the schema is not
+ * runIngestion. Exit 0 when every source succeeded or was incomplete, and
+ * when another run holds the lock (status `skipped`, reason `lock_busy`:
+ * nothing fetched or recorded — an overlapping cron run is not an error,
+ * D-019); 1 when any source failed, a run could not be recorded, the lock was
+ * lost during the run (the run is aborted, `lock_lost`), the schema is not
  * migrated or the database is unavailable; 2 for a source that is not
  * enabled in the database (a usage error found once the database is read).
  */
@@ -573,8 +596,17 @@ async function runIngest(
 
   if (!locked.acquired) {
     logger.warn("ingest lock busy", { lockKey: String(INGEST_LOCK_KEY) });
-    io.stderr("Another ingest run holds the lock; nothing was fetched.\n");
-    return ExitCode.Failure;
+    // The normal report's fields plus `reason`; no ingestion_runs row (nothing ran).
+    const skipped = {
+      status: "skipped",
+      reason: "lock_busy",
+      publicationDate: args.publicationDate,
+      limit: args.limit,
+      runs: [],
+    };
+    io.stdout(`${JSON.stringify(skipped)}\n`);
+    io.stderr("Ingest skipped: another ingest run holds the lock; nothing was fetched.\n");
+    return ExitCode.Ok;
   }
   const runs = locked.value;
   // Without the lock another run may have started: never report success.

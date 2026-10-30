@@ -144,6 +144,25 @@ function only<T>(items: readonly T[]): T {
   return item;
 }
 
+/** Applies only the named migrations, as a database deployed by an earlier release. */
+async function migrateOnly(schema: TestSchema, names: readonly string[]): Promise<void> {
+  const selected = Object.fromEntries(
+    names.map((name) => {
+      const migration = migrations[name];
+      if (migration === undefined) throw new Error(`migration ${name} missing`);
+      return [name, migration];
+    }),
+  );
+  const { rows } = await sql<{ name: string }>`SELECT current_schema() AS name`.execute(schema.db);
+  const migrator = new Migrator({
+    db: schema.db,
+    provider: { getMigrations: () => Promise.resolve(selected) },
+    migrationTableSchema: only(rows).name,
+  });
+  const { error } = await migrator.migrateToLatest();
+  expect(error).toBeUndefined();
+}
+
 describe.skipIf(skipWithoutDatabase)("runIngestion (PostgreSQL, fake sources)", () => {
   let schema: TestSchema;
   beforeAll(async () => {
@@ -209,6 +228,33 @@ describe.skipIf(skipWithoutDatabase)("runIngestion (PostgreSQL, fake sources)", 
     expect(one?.content_hash).not.toBe(before[0]?.content_hash);
     expect(two?.title).toBe("Dostawa materiałów biurowych (zmiana)");
     expect(three).toEqual(before[2]);
+  });
+
+  it("stores the procedure id (tender_id); a changed one is detected as updated", async () => {
+    await registerSource(schema, "zrodlo-t");
+    const tenderId = "ocds-148610-00000000-0000-4000-8000-000000000001";
+    const source = fakeSource("zrodlo-t", [[fakeNotice(1, { tenderId }), fakeNotice(2)]]);
+    await ingest(schema, [source]);
+    const tenderIds = () =>
+      schema.db
+        .selectFrom("opportunities")
+        .select(["external_id", "tender_id"])
+        .where("source_id", "=", "zrodlo-t")
+        .orderBy("external_id")
+        .execute();
+    expect(await tenderIds()).toEqual([
+      { external_id: "FAKE/0001", tender_id: tenderId },
+      { external_id: "FAKE/0002", tender_id: null },
+    ]);
+
+    const other = "ocds-148610-00000000-0000-4000-8000-000000000002";
+    source.script = [[fakeNotice(1, { tenderId: other }), fakeNotice(2)]];
+    const result = only((await ingest(schema, [source])).results);
+    expect(result.counters).toMatchObject({ inserted: 0, updated: 1, unchanged: 1 });
+    expect(await tenderIds()).toEqual([
+      { external_id: "FAKE/0001", tender_id: other },
+      { external_id: "FAKE/0002", tender_id: null },
+    ]);
   });
 
   it("isolates a failing source: the others still run and every run is recorded", async () => {
@@ -305,6 +351,7 @@ describe.skipIf(skipWithoutDatabase)("runIngestion (PostgreSQL, fake sources)", 
       sourceId: "zrodlo-f",
       sourceUrl: "https://zamowienia.example.invalid/ogloszenie/stare",
       externalId: "FAKE/0002",
+      tenderId: null,
       issuerName: "Gmina Przykładowa",
       title: "Stary wpis",
       description: null,
@@ -564,23 +611,28 @@ describe.skipIf(skipWithoutDatabase)("runIngestion source selection (PostgreSQL)
   });
 });
 
-describe.skipIf(skipWithoutDatabase)("runIngestion without migration 0002 (PostgreSQL)", () => {
-  let schema: TestSchema;
-  beforeAll(async () => {
-    schema = await createTestSchema();
-    await migrateToLatest(schema.db);
-    await sql`DROP TABLE ingestion_runs`.execute(schema.db);
-  });
-  afterAll(async () => {
-    await schema.close();
-  });
-
-  it("fails clearly before fetching anything (ingest never migrates by itself)", async () => {
-    await registerSource(schema, "zrodlo-m");
-    const source = fakeSource("zrodlo-m", [[fakeNotice(1)]]);
-    await expect(ingest(schema, [source])).rejects.toThrow(SchemaNotReadyError);
-    expect(source.fetches).toBe(0);
-  });
+describe.skipIf(skipWithoutDatabase)("runIngestion with pending migrations (PostgreSQL)", () => {
+  // Before 0002 there is no ingestion_runs table; before 0003 no tender_id
+  // column, so every write would fail. Both must be refused up front.
+  it.each([[["0001_core_schema"]], [["0001_core_schema", "0002_ingestion_runs"]]])(
+    "fails clearly before fetching anything with only %j applied (ingest never migrates by itself)",
+    async (applied) => {
+      const schema = await createTestSchema();
+      try {
+        await migrateOnly(schema, applied);
+        await registerSource(schema, "zrodlo-m");
+        const source = fakeSource("zrodlo-m", [[fakeNotice(1)]]);
+        await expect(ingest(schema, [source])).rejects.toThrow(SchemaNotReadyError);
+        expect(source.fetches).toBe(0);
+        const { rows } = await sql<{ name: string }>`SELECT name FROM kysely_migration`.execute(
+          schema.db,
+        );
+        expect(rows.map((row) => row.name).sort()).toEqual(applied);
+      } finally {
+        await schema.close();
+      }
+    },
+  );
 });
 
 describe.skipIf(skipWithoutDatabase)("ingestOpportunity (PostgreSQL)", () => {
@@ -603,6 +655,7 @@ describe.skipIf(skipWithoutDatabase)("ingestOpportunity (PostgreSQL)", () => {
     };
     return {
       ...base,
+      tenderId: null,
       issuerName: "Gmina Przykładowa",
       title: "Koszenie trawy",
       description: null,
@@ -818,18 +871,7 @@ describe.skipIf(skipWithoutDatabase)("recordIngestionRun and migration 0002 (Pos
 
   it("seeds bzp without overwriting an existing row, and is idempotent", async () => {
     // Bring the schema to 0001 only, as a database deployed before PR-03.
-    const core = migrations["0001_core_schema"];
-    if (core === undefined) throw new Error("migration 0001 missing");
-    const { rows } = await sql<{ name: string }>`SELECT current_schema() AS name`.execute(
-      schema.db,
-    );
-    const migrator = new Migrator({
-      db: schema.db,
-      provider: { getMigrations: () => Promise.resolve({ "0001_core_schema": core }) },
-      migrationTableSchema: only(rows).name,
-    });
-    const first = await migrator.migrateToLatest();
-    expect(first.error).toBeUndefined();
+    await migrateOnly(schema, ["0001_core_schema"]);
     await upsertSource(schema.db, {
       id: "bzp",
       name: "BZP (wyłączone przez operatora)",
@@ -837,7 +879,10 @@ describe.skipIf(skipWithoutDatabase)("recordIngestionRun and migration 0002 (Pos
       enabled: false,
     });
 
-    expect(await migrateToLatest(schema.db)).toEqual(["0002_ingestion_runs"]);
+    expect(await migrateToLatest(schema.db)).toEqual([
+      "0002_ingestion_runs",
+      "0003_opportunities_tender_id",
+    ]);
     expect(await getSource(schema.db, "bzp")).toMatchObject({
       name: "BZP (wyłączone przez operatora)",
       baseUrl: "https://ezamowienia.gov.pl/inny/",
