@@ -12,6 +12,7 @@ import {
   type OpportunityStatus,
 } from "../../domain/opportunity.js";
 import { withDomainErrors } from "./errors.js";
+import { parseListLimit } from "./sources-repository.js";
 import type { Database, OpportunitiesTable } from "./schema.js";
 
 export type UpsertOutcome = "inserted" | "updated";
@@ -345,4 +346,50 @@ export async function getOpportunity(
     .where("id", "=", opportunityId)
     .executeTakeFirst();
   return row === undefined ? null : toOpportunity(row);
+}
+
+/** A stored row left out of a list because it no longer satisfies the domain schema. */
+export interface SkippedRow {
+  readonly id: string;
+  /** Field paths only, never values. */
+  readonly fields: readonly string[];
+}
+
+export interface MatchCandidates {
+  readonly offers: Opportunity[];
+  readonly skipped: SkippedRow[];
+}
+
+/**
+ * Stored offers to match against a profile (`match:preview`, PR-04): the most
+ * recently published first (unknown publication date last), then by id, so
+ * the list is deterministic; offers that are `closed` or `cancelled` are left
+ * out (`open` and `unknown` stay). At most `limit` rows (default 100, max
+ * 1000). Whether a deadline has passed is not decided here (the caller
+ * compares it with its clock). A row that fails the domain schema
+ * (`invalid_stored_row`) does not abort the list: it is returned in `skipped`
+ * with its id and field paths, so one inconsistent row costs one offer.
+ */
+export async function listMatchCandidates(
+  db: Kysely<Database>,
+  limit?: number,
+): Promise<MatchCandidates> {
+  const rows = await db
+    .selectFrom("opportunities")
+    .selectAll()
+    .where("status", "not in", ["closed", "cancelled"])
+    .orderBy(sql`published_at DESC NULLS LAST, id ASC`)
+    .limit(parseListLimit(limit))
+    .execute();
+  const offers: Opportunity[] = [];
+  const skipped: SkippedRow[] = [];
+  for (const row of rows) {
+    try {
+      offers.push(toOpportunity(row));
+    } catch (error: unknown) {
+      if (!(error instanceof DomainError) || error.code !== "invalid_stored_row") throw error;
+      skipped.push({ id: row.id, fields: error.fields });
+    }
+  }
+  return { offers, skipped };
 }

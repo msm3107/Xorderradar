@@ -65,6 +65,30 @@ export default defineConfig(
     },
   },
   {
+    // Matching is pure (D-023): it may import its own modules, the domain and
+    // the pure normalization helpers in src/sources/normalize/ — nothing else
+    // (no infrastructure, no source adapters, no Node built-ins, no packages).
+    // An allowlist of one-segment relative paths, so "../sources/normalize/../x"
+    // does not pass. Dynamic import() is left to code review. Pinned by
+    // tests/matching-dependency-guard.test.ts.
+    files: ["src/matching/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              regex:
+                "^(?!(?:\\./[\\w-]+|\\.\\./domain/[\\w-]+|\\.\\./sources/normalize/[\\w-]+)\\.js$)",
+              message:
+                "src/matching may import only ./*, ../domain/* and ../sources/normalize/* (D-023).",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     files: ["eslint.config.js"],
     extends: [tseslint.configs.disableTypeChecked],
   },

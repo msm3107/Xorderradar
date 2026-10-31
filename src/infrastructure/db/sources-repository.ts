@@ -17,7 +17,7 @@ export const MAX_LIST_LIMIT = 1000;
 const listLimitSchema = z.int().min(1).max(MAX_LIST_LIMIT);
 
 /** Validates a caller-provided list limit; out-of-range values are an input error. */
-function parseListLimit(limit: number | undefined): number {
+export function parseListLimit(limit: number | undefined): number {
   return limit === undefined ? DEFAULT_LIST_LIMIT : parseDomain(listLimitSchema, limit);
 }
 

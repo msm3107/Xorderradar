@@ -1,27 +1,10 @@
 import { isWellFormedText } from "../../domain/common.js";
+import { VOIVODESHIPS, type Voivodeship } from "../../domain/vocabulary.js";
 import { comparableText } from "./comparable.js";
 import { collapseWhitespace } from "./whitespace.js";
 
-/** The 16 voivodeships, canonical form: lower case, Polish letters (as stored in `location.voivodeship`). */
-export const VOIVODESHIPS = [
-  "dolnośląskie",
-  "kujawsko-pomorskie",
-  "lubelskie",
-  "lubuskie",
-  "łódzkie",
-  "małopolskie",
-  "mazowieckie",
-  "opolskie",
-  "podkarpackie",
-  "podlaskie",
-  "pomorskie",
-  "śląskie",
-  "świętokrzyskie",
-  "warmińsko-mazurskie",
-  "wielkopolskie",
-  "zachodniopomorskie",
-] as const;
-export type Voivodeship = (typeof VOIVODESHIPS)[number];
+// The list itself is in the domain (D-023), next to the profile schema that validates against it.
+export { VOIVODESHIPS, type Voivodeship };
 
 /** Comparable form (no diacritics, `ł` → `l`) → canonical name. */
 const BY_COMPARABLE = new Map<string, Voivodeship>(

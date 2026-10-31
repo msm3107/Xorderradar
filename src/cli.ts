@@ -1,4 +1,7 @@
 import type { Kysely } from "kysely";
+import { entityIdSchema } from "./domain/common.js";
+import type { CompanyProfile, CompanyProfileInput } from "./domain/company-profile.js";
+import { DomainError } from "./domain/errors.js";
 import type { NoticeUpdate } from "./domain/notice-update.js";
 import { checkHealth } from "./health.js";
 import { ConfigError, loadConfig, type AppConfig } from "./infrastructure/config.js";
@@ -16,7 +19,16 @@ import {
   SafeHttpClient,
   type SafeHttpClientOptions,
 } from "./infrastructure/http/safe-http-client.js";
+import {
+  createCompanyProfile,
+  getCompanyProfile,
+} from "./infrastructure/db/company-profiles-repository.js";
+import {
+  listMatchCandidates,
+  type MatchCandidates,
+} from "./infrastructure/db/opportunities-repository.js";
 import { createLogger, type Logger } from "./infrastructure/logger.js";
+import { MIN_INFLECTED_TOKEN_LENGTH } from "./matching/text.js";
 import {
   daySpan,
   INGEST_MAX_CONSECUTIVE_FAILED_DAYS,
@@ -35,6 +47,15 @@ import {
   type IngestionOutcome,
   type IngestionRequest,
 } from "./ingestion/run.js";
+import {
+  formatMatchPreview,
+  profileWarnings,
+  MATCH_PREVIEW_DEFAULT_LIMIT,
+  MATCH_PREVIEW_MAX_LIMIT,
+  PROFILE_FILE_MAX_BYTES,
+  readProfileFile,
+  showProfile,
+} from "./profile-commands.js";
 import { previewSource, type SourcePreview } from "./sources/preview.js";
 import { sourceAdapters } from "./sources/registry.js";
 import { SourceFormatError, type SourceAdapter, type SourceHttpClient } from "./sources/types.js";
@@ -67,6 +88,18 @@ export interface CliDatabase {
     task: (db: Kysely<Database>, signal: AbortSignal) => Promise<T>,
     logger: Logger,
   ): Promise<LockResult<T>>;
+  /**
+   * Company profiles and match candidates (repositories in
+   * src/infrastructure/db). Optional only so that stubs for the other
+   * commands need not provide them.
+   */
+  createCompanyProfile?(input: CompanyProfileInput): Promise<CompanyProfile>;
+  getCompanyProfile?(id: string): Promise<CompanyProfile | null>;
+  /**
+   * Offers not closed or cancelled, newest first, and the ids of invalid rows
+   * left out (listMatchCandidates).
+   */
+  listMatchCandidates?(limit: number): Promise<MatchCandidates>;
 }
 
 /** What commands that read sources need; injected so tests run without the network. */
@@ -137,6 +170,9 @@ export function openCliDatabase(
         logger,
         ...(options.lockHeartbeatMs === undefined ? {} : { heartbeatMs: options.lockHeartbeatMs }),
       }),
+    createCompanyProfile: (input) => createCompanyProfile(db, input),
+    getCompanyProfile: (id) => getCompanyProfile(db, id),
+    listMatchCandidates: (limit) => listMatchCandidates(db, limit),
   };
 }
 
@@ -187,10 +223,49 @@ Commands:
             --from, --to
                      a range of publication days, both included, at most ${String(INGEST_MAX_DAYS)} days
             --limit  max records per notice type and day, 1-${String(INGEST_MAX_LIMIT)}, default ${String(INGEST_DEFAULT_LIMIT)}
+  profile:create <file.json>
+            Create a company profile from a JSON file (at most ${String(PROFILE_FILE_MAX_BYTES / 1024)} KiB) with every field:
+            email, name, categories (at least one MVP category), includeKeywords,
+            excludeKeywords, voivodeships, counties, active. Prints the new profile's id.
+            Region: a known offer voivodeship outside the profile's voivodeships is out of
+            region, whatever the county (counties never widen such a profile). Within a
+            listed voivodeship the voivodeship decides; narrowing by county is not
+            implemented (no source gives counties yet). Counties take effect on their own
+            only when the offer gives no voivodeship or in a profile without voivodeships:
+            BZP gives no county, so a profile without voivodeships
+            gets BZP offers from the whole country as "unknown" (category + keyword, 70).
+            After creating, warns on stderr about counties without voivodeships, keywords
+            that only match their exact form (shorter than ${String(MIN_INFLECTED_TOKEN_LENGTH)} characters) and no keywords.
+            Exit 2 for an unreadable or invalid file, 1 when the e-mail is already used.
+  profile:show <profileId>
+            Print a company profile as JSON.
+  match:preview <profileId> [--limit N]
+            Match the newest offers that are not closed or cancelled against a profile and
+            print the matched ones (deadline first) with score and reasons, then
+            "dopasowane X z Y"; nothing is stored or sent. Works for inactive profiles too.
+            Offers past their deadline are listed last, marked "(po terminie)". A stored
+            offer row that is no longer valid is skipped with a warning on stderr (row id
+            and field names) and counted in the summary ("pominięto N ...").
+            --limit  offers to read, 1-${String(MATCH_PREVIEW_MAX_LIMIT)}, default ${String(MATCH_PREVIEW_DEFAULT_LIMIT)}
 `;
 
-type Command = "health" | "migrate" | "source:preview" | "ingest";
-const commands: readonly Command[] = ["health", "migrate", "source:preview", "ingest"];
+type Command =
+  | "health"
+  | "migrate"
+  | "source:preview"
+  | "ingest"
+  | "profile:create"
+  | "profile:show"
+  | "match:preview";
+const commands: readonly Command[] = [
+  "health",
+  "migrate",
+  "source:preview",
+  "ingest",
+  "profile:create",
+  "profile:show",
+  "match:preview",
+];
 
 function isCommand(value: string): value is Command {
   return (commands as readonly string[]).includes(value);
@@ -215,10 +290,18 @@ interface IngestArgs {
   readonly limit: number;
 }
 
+interface MatchPreviewArgs {
+  readonly profileId: string;
+  readonly limit: number;
+}
+
 type Invocation =
   | { readonly command: "health" | "migrate" }
   | { readonly command: "source:preview"; readonly preview: PreviewArgs }
-  | { readonly command: "ingest"; readonly ingest: IngestArgs };
+  | { readonly command: "ingest"; readonly ingest: IngestArgs }
+  | { readonly command: "profile:create"; readonly file: string }
+  | { readonly command: "profile:show"; readonly profileId: string }
+  | { readonly command: "match:preview"; readonly match: MatchPreviewArgs };
 
 /** A real calendar day as `YYYY-MM-DD` (2026-02-30 is rejected, not rolled over). */
 function isCalendarDate(value: string): boolean {
@@ -341,6 +424,32 @@ function parseIngestArgs(args: readonly string[], sources: CliSourceDeps): Inges
   return { sourceIds, days, limit: limit ?? INGEST_DEFAULT_LIMIT };
 }
 
+/** A profile id argument: a uuid (the id is not echoed back, it is operator input). */
+function parseProfileId(value: string | undefined): string | null {
+  if (value === undefined || value.startsWith("-")) return null;
+  return entityIdSchema.safeParse(value).success ? value : null;
+}
+
+/** `match:preview <profileId> [--limit N]`; returns the parsed arguments or a usage error. */
+function parseMatchPreviewArgs(args: readonly string[]): MatchPreviewArgs | string {
+  const [id, ...options] = args;
+  const profileId = parseProfileId(id);
+  if (profileId === null) return 'Command "match:preview" needs a profile id (uuid).';
+  let limit: number | null = null;
+  for (let index = 0; index < options.length; index += 2) {
+    const name = options[index] ?? "";
+    const value = options[index + 1];
+    if (name !== "--limit") return `Unexpected argument: ${JSON.stringify(name)}`;
+    if (value === undefined) return `Option ${name} needs a value.`;
+    if (limit !== null) return "Option --limit given twice.";
+    if (!/^[1-9]\d{0,3}$/.test(value) || Number(value) > MATCH_PREVIEW_MAX_LIMIT) {
+      return `--limit must be an integer from 1 to ${String(MATCH_PREVIEW_MAX_LIMIT)}.`;
+    }
+    limit = Number(value);
+  }
+  return { profileId, limit: limit ?? MATCH_PREVIEW_DEFAULT_LIMIT };
+}
+
 /** Returns the invocation or a usage error message. */
 function parseInvocation(
   command: Command,
@@ -354,6 +463,25 @@ function parseInvocation(
   if (command === "ingest") {
     const ingest = parseIngestArgs(rest, sources);
     return typeof ingest === "string" ? ingest : { command, ingest };
+  }
+  if (command === "profile:create") {
+    const [file, ...extra] = rest;
+    if (file === undefined || file.startsWith("-")) {
+      return 'Command "profile:create" needs a profile file (JSON).';
+    }
+    if (extra.length > 0) return `Unexpected argument: ${JSON.stringify(extra[0])}`;
+    return { command, file };
+  }
+  if (command === "profile:show") {
+    const [id, ...extra] = rest;
+    const profileId = parseProfileId(id);
+    if (profileId === null) return 'Command "profile:show" needs a profile id (uuid).';
+    if (extra.length > 0) return `Unexpected argument: ${JSON.stringify(extra[0])}`;
+    return { command, profileId };
+  }
+  if (command === "match:preview") {
+    const match = parseMatchPreviewArgs(rest);
+    return typeof match === "string" ? match : { command, match };
   }
   if (rest.length > 0) return `Command "${command}" takes no arguments.`;
   return { command };
@@ -406,6 +534,18 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
     return ExitCode.Usage;
   }
 
+  // The profile file is part of the invocation: an unreadable or invalid file
+  // is a usage error (exit 2), found before the configuration is loaded.
+  let profileInput: CompanyProfileInput | null = null;
+  if (invocation.command === "profile:create") {
+    const loaded = await readProfileFile(invocation.file);
+    if (typeof loaded === "string") {
+      io.stderr(`${loaded}\n`);
+      return ExitCode.Usage;
+    }
+    profileInput = loaded;
+  }
+
   let config: AppConfig;
   try {
     config = loadConfig(io.env);
@@ -432,6 +572,13 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
         return await runMigrate(database, io);
       case "ingest":
         return await runIngest(config, invocation.ingest, database, io, sources);
+      case "profile:create":
+        if (profileInput === null) throw new Error("profile input was not read");
+        return await runProfileCreate(profileInput, database, io);
+      case "profile:show":
+        return await runProfileShow(invocation.profileId, database, io);
+      case "match:preview":
+        return await runMatchPreview(config, invocation.match, database, io, sources);
     }
   } finally {
     await database.close();
@@ -738,4 +885,121 @@ async function runIngest(
     .map((run) => `${run.sourceId} (${run.errorCode ?? "run_not_recorded"})`);
   if (failed.length > 0) io.stderr(`Ingest failed for: ${failed.join(", ")}\n`);
   return ExitCode.Failure;
+}
+
+/**
+ * A refused profile read or write, or a database failure, as a fixed message
+ * (DomainError messages carry field paths and constraint names only); null
+ * for anything else, which is a bug and propagates.
+ */
+function profileFailure(error: unknown): string | null {
+  if (error instanceof DomainError) {
+    return error.code === "duplicate"
+      ? "a profile with this e-mail already exists"
+      : `${error.message} (${error.code})`;
+  }
+  const failure = describeDatabaseFailure(error);
+  return failure.reason === "unknown" ? null : `database ${formatDatabaseFailure(failure)}`;
+}
+
+/** `profile:create`: stores the validated profile and prints its id. */
+async function runProfileCreate(
+  input: CompanyProfileInput,
+  database: CliDatabase,
+  io: CliIo,
+): Promise<ExitCode> {
+  if (database.createCompanyProfile === undefined) {
+    throw new Error("database cannot create profiles");
+  }
+  let profile: CompanyProfile;
+  try {
+    profile = await database.createCompanyProfile(input);
+  } catch (error: unknown) {
+    const why = profileFailure(error);
+    if (why === null) throw error;
+    io.stderr(`Profile not created: ${why}\n`);
+    return ExitCode.Failure;
+  }
+  io.stdout(`${JSON.stringify({ status: "ok", id: profile.id })}\n`);
+  // Hints only (the profile is created): on stderr, so stdout stays one JSON line.
+  for (const warning of profileWarnings(input)) io.stderr(`${warning}\n`);
+  return ExitCode.Ok;
+}
+
+/** Reads one profile; prints why and returns null when it cannot be shown. */
+async function loadProfile(
+  profileId: string,
+  database: CliDatabase,
+  io: CliIo,
+): Promise<CompanyProfile | null> {
+  if (database.getCompanyProfile === undefined) throw new Error("database cannot read profiles");
+  try {
+    const profile = await database.getCompanyProfile(profileId);
+    if (profile === null) io.stderr("Profile not found.\n");
+    return profile;
+  } catch (error: unknown) {
+    const why = profileFailure(error);
+    if (why === null) throw error;
+    io.stderr(`Cannot read the profile: ${why}\n`);
+    return null;
+  }
+}
+
+/** `profile:show`: the stored profile as JSON; exit 1 when there is none. */
+async function runProfileShow(
+  profileId: string,
+  database: CliDatabase,
+  io: CliIo,
+): Promise<ExitCode> {
+  const profile = await loadProfile(profileId, database, io);
+  if (profile === null) return ExitCode.Failure;
+  io.stdout(showProfile(profile));
+  return ExitCode.Ok;
+}
+
+/**
+ * `match:preview`: the newest offers that are not closed or cancelled,
+ * matched against the profile (src/matching), printed as text. Read-only:
+ * nothing is stored or sent. Contact data is never printed. An invalid
+ * stored offer row is skipped (a warning with its id and field paths, never
+ * values; the summary counts it) and the exit code stays 0; an invalid
+ * profile row still fails the command.
+ */
+async function runMatchPreview(
+  config: AppConfig,
+  args: MatchPreviewArgs,
+  database: CliDatabase,
+  io: CliIo,
+  sources: CliSourceDeps,
+): Promise<ExitCode> {
+  if (database.listMatchCandidates === undefined) {
+    throw new Error("database cannot list match candidates");
+  }
+  const profile = await loadProfile(args.profileId, database, io);
+  if (profile === null) return ExitCode.Failure;
+  let candidates: MatchCandidates;
+  try {
+    candidates = await database.listMatchCandidates(args.limit);
+  } catch (error: unknown) {
+    const why = profileFailure(error);
+    if (why === null) throw error;
+    io.stderr(`Cannot read offers: ${why}\n`);
+    return ExitCode.Failure;
+  }
+  if (candidates.skipped.length > 0) {
+    const logger = createLogger(config.logLevel, io.stderr);
+    for (const row of candidates.skipped) {
+      logger.warn("match:preview skipped an invalid stored offer", {
+        rowId: row.id,
+        fields: row.fields,
+      });
+    }
+  }
+  io.stdout(
+    formatMatchPreview(profile, candidates.offers, {
+      now: sources.now(),
+      skipped: candidates.skipped.length,
+    }),
+  );
+  return ExitCode.Ok;
 }
