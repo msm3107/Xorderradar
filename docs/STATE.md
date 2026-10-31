@@ -7,8 +7,12 @@ f41b49c)** after the owner review (docs follow-up ad42ff5). PR-04 (deterministic
 company profile commands, `match:preview`) implemented: Code & Safety Review PASS with
 findings (M1, M2, L1–L5) → fix round → C&S re-review PASS (N1 Low) → N1 fix round → C&S
 PASS → Quality Review ACCEPT WITH NOTES (R1 STATE, O1–O6) → fix round → C&S PASS (L-a, L-b
-Low) → follow-up round → C&S PASS → Quality re-review; PR opened for the owner's review
-(not merged).
+Low) → follow-up round → C&S PASS → Quality re-review ACCEPT; PR #8 opened (head 183da77).
+Owner review of PR #8 (live BZP data, 586 offers × 6 profiles): PASS with one Medium (a county
+widened a profile to other voivodeships) → owner-review round (region order, `profile:create`
+warnings) → C&S PASS (M1 docs vs code) → fix → C&S PASS (L1 wording, fixed by coordinator) →
+Quality ACCEPT WITH NOTES (STATE, warning advice) → fixes; pushed to PR #8 for the owner's
+re-review (not merged).
 
 ## Completed
 
@@ -339,11 +343,15 @@ the owner's review (not merged). D-023 new (rules, profile schema, `match:previe
     category +40 (`mvpCategoriesForCpv` ∩ profile categories), first keyword +30, more than one
     keyword +10, region +20, each exclude −100. `matched` = score ≥ 50, no exclude, region not
     `mismatch`. Missing CPV → reason "brak CPV — kategoria niesprawdzalna" (AC6).
-  - Region is three-valued with OR semantics (voivodeships OR counties): `match` / `mismatch`
-    (every used part known and none matches) / `unknown` with an explicit reason, e.g.
-    "źródło nie podaje powiatu" (AC5) or "województwo śląskie poza profilem, źródło nie podaje
-    powiatu". No regions in the profile → +20 "bez ograniczeń". Missing location never matches
-    (AC3). Counties compared by `countyKey` (`comparableText(normalizeCounty(…))`, "m. st." /
+  - Region is three-valued (`match` / `mismatch` / `unknown` with an explicit reason), checked
+    in this order (D-023, changed 2026-10-31 after the owner's review): no regions in the
+    profile → +20 "bez ograniczeń"; no location → unknown (AC3); a known offer voivodeship
+    outside the profile's voivodeships → mismatch whatever the county (counties never widen a
+    profile with voivodeships); a known listed county → match; a listed voivodeship → match;
+    otherwise unknown (no offer voivodeship while the profile lists voivodeships, or "źródło nie podaje powiatu", AC5) or mismatch. Narrowing by county
+    inside a listed voivodeship is not implemented (no source gives counties yet); a
+    counties-only profile gets BZP offers from the whole country as unknown, and
+    `profile:create` warns about it. Counties compared by `countyKey` (`comparableText(normalizeCounty(…))`, "m. st." /
     "m.st." / "miasto stołeczne" / "(miasto na prawach powiatu)" variants; AC7).
   - `text.ts` — tokenizer and phrase search on `comparableText`: consecutive tokens; tokens
     ≥ 4 letters match by stem (one final vowel dropped) as prefix; number and short tokens
@@ -372,11 +380,19 @@ the owner's review (not merged). D-023 new (rules, profile schema, `match:previe
   → C&S PASS → Quality ACCEPT WITH NOTES (R1 STATE; O1 past deadlines; O2 per-row skip; O3
   error texts; O4 README example; O5/O6 docs) → fix round → C&S PASS (L-a zod `invalid_type`
   can print "Infinity"; L-b `--limit` counts skipped rows) → follow-up → C&S PASS → Quality
-  re-review.
-- Owner decisions to judge in the PR review (D-023): threshold 50; region `mismatch` rejects
-  whatever the score; OR semantics — adding a county **widens** results to other voivodeships
-  while BZP gives no county (e.g. "mazowieckie + powiat warszawski zachodni" gets a Katowice
-  offer at 70 as region unknown); stem rule (phrases need consecutive tokens; "auto" exclude
+  re-review ACCEPT → PR #8.
+- Owner review of PR #8 (2026-10-31): Medium — with "mazowieckie + powiat warszawski zachodni"
+  36 offers matched, 20 outside mazowieckie (region unknown, BZP gives no county) → fixed by
+  the region order above. QoL done: `profile:create` warns (stderr, exit 0) about counties
+  without voivodeships, keywords that only match their exact form (< 4 characters; advice: add
+  a longer stem next to the short word) and no include keywords (small contracts have no
+  CPV). Owner-round reviews: C&S PASS (M1: docs claimed narrowing the code did not do → code
+  now never widens, docs state the exact rule) → C&S PASS (L1 wording) → Quality ACCEPT WITH
+  NOTES (STATE lines; "replace" advice would lose noun forms) → fixes.
+- Owner decisions still open (D-023): threshold 50; region `mismatch` rejects whatever the
+  score; narrowing by county inside a listed voivodeship (decide when a source gives
+  counties); counties-only profiles match nationwide as unknown (warned) — confirm before
+  PR-05 e-mails; stem rule (phrases need consecutive tokens; "auto" exclude
   also removes "Automatyka"); validation on read; maximum-matching de-duplication (only affects
   the +10 bonus and reason lines, never `matched`).
 
@@ -429,8 +445,8 @@ region semantics, profile schema, `match:preview`).
 
 ## Next action
 
-1. Owner reviews the PR-04 pull request (decisions listed under In progress / D-023) and
-   merges it. Backfill still-open offers (PR #7 is merged) with
+1. Owner re-reviews PR #8 after the owner-review round (decisions listed under In progress /
+   D-023) and merges it. Backfill still-open offers (PR #7 is merged) with
    `ingest bzp --from … --to …` (≤ 31 days per call, README). Cosmetic nits left from Part B:
    over-wide `ingest` help lines in `src/cli.ts`; two test titles still say "200 000"
    (1 000 000 cases exist). Watch live runs for `too_large` on update pages
@@ -447,8 +463,13 @@ region semantics, profile schema, `match:preview`).
    - The digest must filter by deadline vs now (past deadlines out) and handle
      `invalid_stored_row` per row, as `match:preview` does; `--limit`-style caps count skipped
      rows.
-   - Owner decisions from the PR-04 review (threshold, region semantics) may change the
+   - Owner decisions from the PR-04 review (threshold, counties-only profiles) may change the
      scoring before the digest relies on it.
+   - Deferred from the owner's PR #8 review: tokenize each offer once per digest run instead
+     of once per pair (measure first); for pilot calibration, a "matched only by CPV" counter
+     in `match:preview` (category + unrestricted region = 60 matches 8–26 offers per profile
+     with no keyword; CPV prefix `4533` is broad) and a stem threshold of 3 for letter-only
+     words (needs false-positive calibration, e.g. "sad" → "sadzenie").
    - Optional from the PR-04 Quality Review: a `match:preview --all` mode that also prints
      non-matches with reasons (threshold calibration); a `profile:update` command (stored
      profiles breaking the new schema are fixed by hand today); "prefer single words" hint in
@@ -617,6 +638,13 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-10-31, PR-04 owner-review round of PR #8 (Node 22, pnpm 10.28.0, PostgreSQL 16):
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 1105/1105 tests passed in 32 files, DB tests included. C&S probes: region order (foreign voivodeship with
+a listed county → mismatch; listed voivodeship with another county → match; non-normalizing
+entries); warnings never print contact data, stdout stays one JSON line. Quality ran
+`match:preview` against radar_test (temporary rows removed afterwards).
 
 2026-10-31, PR-04 after the last fix round (Node 22, pnpm 10.28.0, PostgreSQL 16): C&S ran
 `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`

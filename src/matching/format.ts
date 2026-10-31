@@ -51,12 +51,8 @@ export function formatReason(reason: MatchReason): string {
       return `region: poza profilem (oferta: ${offer.join(", ")})`;
     }
     case "region_unknown": {
-      const outside = [
-        reason.offerVoivodeship === undefined
-          ? null
-          : `województwo ${reason.offerVoivodeship} poza profilem`,
-        reason.offerCounty === undefined ? null : `powiat ${reason.offerCounty} poza profilem`,
-      ].filter((part): part is string => part !== null);
+      const outside =
+        reason.offerCounty === undefined ? [] : [`powiat ${reason.offerCounty} poza profilem`];
       // ", " inside one reason: "; " separates reasons (formatReasons).
       return `region: nieznany — ${[...outside, MISSING_REGION[reason.missing]].join(", ")}`;
     }

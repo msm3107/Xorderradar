@@ -166,6 +166,62 @@ describe("profile:create", () => {
     expect(result.calls.closed).toBe(1);
   });
 
+  it("warns, on stderr, about a profile that will likely miss offers, and still creates it", async () => {
+    const file = await profileFile(
+      "warnings.json",
+      JSON.stringify({
+        ...validInput,
+        includeKeywords: [],
+        excludeKeywords: ["gaz", "BHP", "gaz 2", "co2", "110", "gazu", "a b"],
+        voivodeships: [],
+        counties: ["warszawski zachodni"],
+      }),
+    );
+    const result = await run(["profile:create", file]);
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(JSON.parse(result.stdout)).toEqual({ status: "ok", id: PROFILE_ID });
+    expect(result.calls.created).toHaveLength(1);
+    expect(result.stderr.split("\n")).toEqual([
+      "Uwaga: profil ma powiaty, ale nie ma województw. BZP nie podaje powiatu, więc taki " +
+        "profil dostaje oferty BZP z całego kraju (region „nieznany”: wystarczą kategoria i " +
+        "słowo kluczowe). Dodaj województwo.",
+      // "gaz 2" and "110" have a number token, "gazu" is long enough: not named.
+      "Uwaga: słowa krótsze niż 4 znaki pasują tylko w dokładnie tej formie (np. „gaz” nie " +
+        "znajdzie „gazowy” ani „gazu”): „gaz”, „BHP”, „co2”, „a b”. Jeśli słowo się odmienia, " +
+        "dodaj obok dłuższy temat (np. „gaz” + „gazow”).",
+      "Uwaga: profil nie ma słów kluczowych. Ogłoszenia małych zamówień BZP " +
+        "(SmallContractNotice) nie mają kodów CPV, więc bez słów kluczowych nigdy nie zostaną " +
+        "dopasowane.",
+      "",
+    ]);
+    expect(result.stderr).not.toContain("kontakt@example.invalid");
+  });
+
+  it("names at most five short keywords, cleaned", async () => {
+    const file = await profileFile(
+      "short-many.json",
+      JSON.stringify({
+        ...validInput,
+        includeKeywords: ["ab\u001b[2J", "bc", "cd", "de", "ef", "fg", "gh"],
+      }),
+    );
+    const result = await run(["profile:create", file]);
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(result.stderr).not.toContain("\u001b");
+    expect(result.stderr).toContain(": „ab [2J”, „bc”, „cd”, „de”, „ef” (+2 more). Jeśli");
+    expect(result.stderr.split("\n")).toHaveLength(2);
+  });
+
+  it("prints no warning for a profile with voivodeships and inflectable keywords", async () => {
+    const file = await profileFile(
+      "no-warnings.json",
+      JSON.stringify({ ...validInput, counties: ["warszawski zachodni"] }),
+    );
+    const result = await run(["profile:create", file]);
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(result.stderr).toBe("");
+  });
+
   it("accepts the example profile from the README as it is", async () => {
     const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
     const example = /### Przykładowy profil\n[\s\S]*?```json\n([\s\S]*?)```/u.exec(readme)?.[1];

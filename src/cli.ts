@@ -28,6 +28,7 @@ import {
   type MatchCandidates,
 } from "./infrastructure/db/opportunities-repository.js";
 import { createLogger, type Logger } from "./infrastructure/logger.js";
+import { MIN_INFLECTED_TOKEN_LENGTH } from "./matching/text.js";
 import {
   daySpan,
   INGEST_MAX_CONSECUTIVE_FAILED_DAYS,
@@ -48,6 +49,7 @@ import {
 } from "./ingestion/run.js";
 import {
   formatMatchPreview,
+  profileWarnings,
   MATCH_PREVIEW_DEFAULT_LIMIT,
   MATCH_PREVIEW_MAX_LIMIT,
   PROFILE_FILE_MAX_BYTES,
@@ -225,10 +227,15 @@ Commands:
             Create a company profile from a JSON file (at most ${String(PROFILE_FILE_MAX_BYTES / 1024)} KiB) with every field:
             email, name, categories (at least one MVP category), includeKeywords,
             excludeKeywords, voivodeships, counties, active. Prints the new profile's id.
-            Region: an offer matches when any listed voivodeship OR county matches; it is
-            out of region only when every list used is known for the offer. BZP gives no
-            county, so with counties listed a BZP offer from another voivodeship is
-            "unknown" (needs category + keyword, 70 points) instead of out of region.
+            Region: a known offer voivodeship outside the profile's voivodeships is out of
+            region, whatever the county (counties never widen such a profile). Within a
+            listed voivodeship the voivodeship decides; narrowing by county is not
+            implemented (no source gives counties yet). Counties take effect on their own
+            only when the offer gives no voivodeship or in a profile without voivodeships:
+            BZP gives no county, so a profile without voivodeships
+            gets BZP offers from the whole country as "unknown" (category + keyword, 70).
+            After creating, warns on stderr about counties without voivodeships, keywords
+            that only match their exact form (shorter than ${String(MIN_INFLECTED_TOKEN_LENGTH)} characters) and no keywords.
             Exit 2 for an unreadable or invalid file, 1 when the e-mail is already used.
   profile:show <profileId>
             Print a company profile as JSON.
@@ -914,6 +921,8 @@ async function runProfileCreate(
     return ExitCode.Failure;
   }
   io.stdout(`${JSON.stringify({ status: "ok", id: profile.id })}\n`);
+  // Hints only (the profile is created): on stderr, so stdout stays one JSON line.
+  for (const warning of profileWarnings(input)) io.stderr(`${warning}\n`);
   return ExitCode.Ok;
 }
 

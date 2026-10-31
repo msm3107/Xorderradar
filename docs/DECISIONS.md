@@ -842,22 +842,36 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     niesprawdzalna” albo „CPV spoza słownika (…) — kategoria niesprawdzalna” (0): o wyniku
     decydują słowa kluczowe (AC6).
   - **Region (trzy stany):** profil bez województw i powiatów → +20 „region: bez
-    ograniczeń”. Województwa i powiaty profilu łączy **LUB**: zgodny (+20), gdy którykolwiek
-    używany przez profil wymiar jest znany w ofercie i pasuje (powiat sprawdzany przed
-    województwem). Niezgodny (0, nigdy dopasowanie) tylko gdy **każdy** używany wymiar jest
-    w ofercie znany i żaden nie pasuje. Inaczej nieznany (0) z brakującą częścią: brak
-    `location` → „oferta nie podaje lokalizacji” (AC3); brak powiatu → „źródło nie podaje
-    powiatu” (AC5; BZP); brak województwa / obu. Używany wymiar, który oferta podaje, a który
-    nie pasuje, powód nieznanego regionu też wymienia, np. „region: nieznany — województwo
-    śląskie poza profilem, źródło nie podaje powiatu” (wewnątrz powodu przecinek, bo „; ”
-    rozdziela powody). **Konsekwencja dla BZP** (BZP nie podaje powiatu): w profilu z samymi
-    województwami oferta BZP spoza nich jest niezgodna;
-    po dodaniu choćby jednego powiatu ta sama oferta jest „nieznana” — nie odpada, tylko
-    potrzebuje kategorii i słowa (70 pkt). Województwo oferty przez `normalizeVoivodeship`;
-    nierozpoznany zapis liczy się jak niepodany. Wpis profilu, który się nie normalizuje
-    (stary wiersz), nigdy niczego nie dopasowuje, ale nadal liczy się jako używany wymiar:
-    profil nie staje się przez to „bez ograniczeń”, a oferta z podanym tym wymiarem nie
-    jest przez ten wpis zgodna.
+    ograniczeń”. Kolejność: (1) profil ma województwa, a znane województwo oferty jest
+    spoza nich → niezgodny (0, nigdy dopasowanie), **niezależnie od powiatu** — powiaty
+    nigdy nie poszerzają profilu z województwami („region: poza profilem (oferta:
+    śląskie)”); (2) znany powiat oferty na liście powiatów profilu → zgodny (+20) przez
+    powiat; (3) województwo oferty na liście → zgodny przez województwo. W obrębie
+    województwa z listy decyduje więc województwo: **zawężanie powiatem nie jest
+    zaimplementowane** (żadne źródło nie podaje jeszcze powiatu; decyzja właściciela, gdy
+    się pojawi) — powiat profilu działa sam tylko przy nieznanym województwie oferty albo w
+    profilu z samymi powiatami (wtedy znany powiat spoza listy → niezgodny). Inaczej
+    nieznany (0) z brakującą częścią: brak `location` → „oferta nie podaje lokalizacji”
+    (AC3); profil z samymi powiatami i oferta bez powiatu → „źródło nie podaje powiatu”
+    (AC5; BZP); profil z województwami i oferta bez województwa → „źródło nie podaje
+    województwa” (albo „… województwa ani powiatu”). Znany powiat spoza profilu przy
+    nieznanym województwie powód też wymienia: „region: nieznany — powiat gliwicki poza
+    profilem, źródło nie podaje województwa” (wewnątrz powodu przecinek, bo „; ” rozdziela
+    powody). **Konsekwencja dla BZP** (BZP nie podaje powiatu): profil z województwami (z
+    powiatami lub bez) dostaje tylko oferty BZP ze swoich województw; profil z samymi
+    powiatami dostaje oferty BZP z całego kraju jako „nieznane” (kategoria i słowo, 70 pkt,
+    wystarczą) — dlatego `profile:create` ostrzega przed takim profilem. Województwo oferty
+    przez `normalizeVoivodeship`; nierozpoznany zapis liczy się jak niepodany. Wpis profilu,
+    który się nie normalizuje (stary wiersz), nigdy niczego nie dopasowuje, ale nadal liczy
+    się jako używany wymiar: profil nie staje się przez to „bez ograniczeń”, a oferta z
+    podanym tym wymiarem nie jest przez ten wpis zgodna.
+    **Zmiana 2026-10-31** (przegląd właściciela na żywych danych BZP: 586 ofert × 6
+    profili): wcześniej województwa i powiaty łączyło czyste **LUB**, a znane województwo
+    spoza profilu przy braku powiatu dawało „nieznany”. Dodanie jednego powiatu poszerzało
+    więc profil na cały kraj (mazowieckie + powiat warszawski zachodni: 36 dopasowań, w tym
+    20 spoza mazowieckiego, wobec 16/0 dla samego mazowieckiego). Decyzja właściciela:
+    znane województwo spoza profilu → niezgodny niezależnie od powiatu. Bez danych powiat →
+    województwo (żadne źródło nie podaje dziś powiatu).
   - **Powiaty (AC7):** po obu stronach `countyKey(x)` = `comparableText(normalizeCounty(x))`,
     następnie spacje po kropce usunięte („m. st.” = „m.st.”), prefiks „m.st.” / „miasto
     stołeczne” i sufiks „(miasto na prawach powiatu)” usunięte. Czyli „m. st. Warszawa” =
@@ -879,7 +893,15 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
       komunikaty schematu — nigdy z wartościami; nieznany klucz → „unknown field” z nazwą
       klucza (z pliku operatora; przez `cleanText`, ≤ 40 znaków, najwyżej 5 kluczy) i listą
       dozwolonych pól; e-mail już użyty → exit 1; błąd bazy →
-      stały powód. Wypisuje `{"status":"ok","id":…}`.
+      stały powód. Wypisuje `{"status":"ok","id":…}`. Po utworzeniu (kod 0, profil
+      zapisany) ostrzeżenia po polsku na stderr (stdout zostaje jedną linią JSON;
+      `profileWarnings`, od 2026-10-31 po przeglądzie właściciela): powiaty bez województw
+      (BZP nie podaje powiatu → oferty z całego kraju; dodaj województwo); słowa, których
+      wszystkie tokeny to słowa krótsze niż `MIN_INFLECTED_TOKEN_LENGTH` (4) — pasuje tylko
+      dokładna forma („gaz” ≠ „gazowy”/„gazu”; rada: jeśli słowo się odmienia, dodać obok
+      dłuższy temat, „gaz” + „gazow”), wymienione przez `cleanText`, ≤ 40 znaków,
+      najwyżej 5; brak słów kluczowych (małe zamówienia BZP bez CPV nigdy nie pasują). Reguła
+      tematu bez zmian (najpierw kalibracja).
     - `profile:show <id>`: profil jako JSON; nieznany id → exit 1.
     - `match:preview <profileId> [--limit N]`: oferty nie `closed`/`cancelled`, od
       najnowszych (`published_at DESC NULLS LAST, id`; domyślnie 100, maks. 1000,

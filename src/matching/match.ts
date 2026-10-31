@@ -100,8 +100,11 @@ export type MatchReason =
       readonly value: string;
     }
   /**
-   * Every region part the profile uses is known for the offer and none
-   * matches: never a match. The offer's known parts are given.
+   * Outside the profile's region: never a match. Either the offer's
+   * voivodeship is known and not among the profile's voivodeships, whatever
+   * its county (profile counties never widen a profile that has
+   * voivodeships), or the profile has counties only and the offer's known
+   * county is none of them. The offer's known parts are given.
    */
   | {
       readonly kind: "region_mismatch";
@@ -110,19 +113,17 @@ export type MatchReason =
       readonly offerCounty: string | null;
     }
   /**
-   * Not a match and not a mismatch: the offer has no location at all (AC3) or
-   * lacks a part the profile uses (BZP publishes no county, AC5). 0 points.
-   * A part the profile uses that the offer does give, but that matches no
-   * profile entry, is named too (`offerVoivodeship` / `offerCounty`, absent
-   * otherwise), so the explanation is complete: a profile with voivodeships
-   * and counties gives "unknown", not "mismatch", for a BZP offer from another
-   * voivodeship, and the reason says that its voivodeship is outside.
+   * Not a match and not a mismatch: the offer has no location at all (AC3),
+   * gives no voivodeship while the profile has voivodeships, or gives no
+   * county while the profile has counties only (BZP publishes no county,
+   * AC5). 0 points. A known offer county that matches no profile county is
+   * named too (`offerCounty`, absent otherwise), so the explanation is
+   * complete.
    */
   | {
       readonly kind: "region_unknown";
       readonly points: 0;
       readonly missing: "location" | "voivodeship" | "county" | "voivodeship_and_county";
-      readonly offerVoivodeship?: Voivodeship;
       readonly offerCounty?: string;
     };
 
@@ -290,9 +291,25 @@ function regionReason(offer: MatchableOpportunity, profile: MatchableProfile): M
   const offerCounty = location.county === undefined ? null : normalizeCounty(location.county);
   const offerCountyKey = offerCounty === null ? null : countyKey(offerCounty);
 
+  const voivodeships = profile.voivodeships.map(normalizeVoivodeship);
+  // Profile counties never widen a profile that has voivodeships: a known
+  // voivodeship outside them is a mismatch, whatever the county (owner's
+  // decision after the live-data review, D-023). Narrowing by county inside a
+  // listed voivodeship is not implemented: no source gives counties yet.
+  if (usesVoivodeships && offerVoivodeship !== null && !voivodeships.includes(offerVoivodeship)) {
+    return {
+      kind: "region_mismatch",
+      points: 0,
+      offerVoivodeship,
+      offerCounty: offerCountyKey === null ? null : offerCounty,
+    };
+  }
+
   // A profile entry that does not normalize (refused on create, but a stored
   // row may predate that) never matches anything; it still counts as a used
-  // dimension, so it cannot turn the profile into "unrestricted".
+  // dimension, so it cannot turn the profile into "unrestricted". A county
+  // match is reported first; with voivodeships in the profile it can only
+  // decide when the offer's voivodeship is listed or unknown.
   if (usesCounties && offerCountyKey !== null) {
     const county = profile.counties.find((entry) => countyKey(entry) === offerCountyKey);
     if (county !== undefined) {
@@ -304,20 +321,16 @@ function regionReason(offer: MatchableOpportunity, profile: MatchableProfile): M
       };
     }
   }
-  if (usesVoivodeships && offerVoivodeship !== null) {
-    const voivodeship = profile.voivodeships
-      .map(normalizeVoivodeship)
-      .find((entry): entry is Voivodeship => entry === offerVoivodeship);
-    if (voivodeship !== undefined) {
-      return {
-        kind: "region_match",
-        points: POINTS.region,
-        via: "voivodeship",
-        value: voivodeship,
-      };
-    }
+  if (offerVoivodeship !== null && voivodeships.includes(offerVoivodeship)) {
+    return {
+      kind: "region_match",
+      points: POINTS.region,
+      via: "voivodeship",
+      value: offerVoivodeship,
+    };
   }
 
+  // Here the profile has no voivodeships, or the offer's voivodeship is unknown.
   const voivodeshipMissing = usesVoivodeships && offerVoivodeship === null;
   const countyMissing = usesCounties && offerCountyKey === null;
   if (!voivodeshipMissing && !countyMissing) {
@@ -334,14 +347,12 @@ function regionReason(offer: MatchableOpportunity, profile: MatchableProfile): M
       : voivodeshipMissing
         ? "voivodeship"
         : "county";
-  // The used part that is known here did not match above: name it.
-  const outsideVoivodeship = usesVoivodeships ? offerVoivodeship : null;
+  // A known county that did not match above: name it.
   const outsideCounty = usesCounties && offerCountyKey !== null ? offerCounty : null;
   return {
     kind: "region_unknown",
     points: 0,
     missing,
-    ...(outsideVoivodeship === null ? {} : { offerVoivodeship: outsideVoivodeship }),
     ...(outsideCounty === null ? {} : { offerCounty: outsideCounty }),
   };
 }

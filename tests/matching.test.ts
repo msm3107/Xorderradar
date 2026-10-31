@@ -463,10 +463,9 @@ describe("matchOpportunity — region", () => {
       points: 0,
       missing: "county",
     });
-    // Voivodeship known but not the profile's, county not given: still unknown.
-    expect(
-      region({ voivodeship: "śląskie" }, { voivodeships: ["mazowieckie"], counties: ["x"] }),
-    ).toMatchObject({ kind: "region_unknown", missing: "county" });
+    expect(formatReason({ kind: "region_unknown", points: 0, missing: "county" })).toBe(
+      "region: nieznany — źródło nie podaje powiatu",
+    );
   });
 
   it("says which part is missing for a location without it", () => {
@@ -493,13 +492,20 @@ describe("matchOpportunity — region", () => {
     ).toMatchObject({ kind: "region_match", via: "voivodeship" });
     expect(
       region(
-        { voivodeship: "śląskie", county: "Powiat Piaseczyński" },
+        { county: "Powiat Piaseczyński" },
         { voivodeships: ["mazowieckie"], counties: ["piaseczyński"] },
       ),
     ).toEqual({ kind: "region_match", points: 20, via: "county", value: "piaseczyński" });
+    // Within a listed voivodeship the voivodeship decides: no narrowing by county.
+    expect(
+      region(
+        { voivodeship: "mazowieckie", county: "pruszkowski" },
+        { voivodeships: ["mazowieckie"], counties: ["piaseczyński"] },
+      ),
+    ).toMatchObject({ kind: "region_match", via: "voivodeship", value: "mazowieckie" });
   });
 
-  it("is a mismatch only when every part the profile uses is known and none matches", () => {
+  it("is a mismatch for a known voivodeship outside the profile, or a known foreign county in a counties-only profile", () => {
     expect(region({ voivodeship: "śląskie" }, { voivodeships: ["mazowieckie"] })).toEqual({
       kind: "region_mismatch",
       points: 0,
@@ -556,22 +562,11 @@ describe("matchOpportunity — region", () => {
     expect(countyKey("  ")).toBeNull();
   });
 
-  it("names a known part outside the profile when another part is unknown (BZP)", () => {
+  it("names a known county outside the profile when the voivodeship is unknown", () => {
     const both: Partial<MatchableProfile> = {
       voivodeships: ["mazowieckie"],
       counties: ["piaseczyński"],
     };
-    const reason = region({ voivodeship: "śląskie" }, both);
-    expect(reason).toEqual({
-      kind: "region_unknown",
-      points: 0,
-      missing: "county",
-      offerVoivodeship: "śląskie",
-    });
-    if (reason === undefined) throw new Error("no region reason");
-    expect(formatReason(reason)).toBe(
-      "region: nieznany — województwo śląskie poza profilem, źródło nie podaje powiatu",
-    );
     // A known county outside the profile, voivodeship not given.
     expect(region({ county: "powiat gliwicki" }, both)).toEqual({
       kind: "region_unknown",
@@ -587,31 +582,87 @@ describe("matchOpportunity — region", () => {
     });
   });
 
-  it("documents the OR rule for BZP: a county turns out-of-voivodeship offers into unknown", () => {
-    const bzpOffer = offer({
-      title: "Modernizacja oświetlenia",
-      categories: [ELEKTRYKA_CPV],
-      location: { voivodeship: "śląskie" },
-    });
-    const keywords: Partial<MatchableProfile> = {
+  // Owner's live-data review of PR-04: adding a county must not widen a
+  // voivodeship profile to the whole country (BZP never gives a county).
+  describe("BZP offers (no county) and a profile with voivodeships and counties", () => {
+    const withCounty: Partial<MatchableProfile> = {
       includeKeywords: ["oświetlenie"],
       voivodeships: ["mazowieckie"],
+      counties: ["warszawski zachodni"],
     };
-    const voivodeshipsOnly = matchOpportunity(bzpOffer, profile(keywords));
-    expect(voivodeshipsOnly.reasons.at(-1)?.kind).toBe("region_mismatch");
-    expect(voivodeshipsOnly.matched).toBe(false);
-    const withCounty = matchOpportunity(
-      bzpOffer,
-      profile({ ...keywords, counties: ["piaseczyński"] }),
-    );
-    expect(withCounty.reasons.at(-1)?.kind).toBe("region_unknown");
-    expect(withCounty.score).toBe(70);
-    expect(withCounty.matched).toBe(true);
-    // Without the keyword, category alone (40) is not enough when the region is unknown.
-    expect(
-      matchOpportunity(bzpOffer, profile({ voivodeships: ["mazowieckie"], counties: ["x"] }))
-        .matched,
-    ).toBe(false);
+    function bzpOffer(voivodeship: string) {
+      return offer({
+        title: "Modernizacja oświetlenia",
+        categories: [ELEKTRYKA_CPV],
+        location: { voivodeship },
+      });
+    }
+
+    it("does not match an offer from another voivodeship, even with category + keyword", () => {
+      const result = matchOpportunity(bzpOffer("śląskie"), profile(withCounty));
+      expect(result.score).toBe(70);
+      expect(result.matched).toBe(false);
+      const reason = result.reasons.at(-1);
+      expect(reason).toEqual({
+        kind: "region_mismatch",
+        points: 0,
+        offerVoivodeship: "śląskie",
+        offerCounty: null,
+      });
+      if (reason === undefined) throw new Error("no region reason");
+      expect(formatReason(reason)).toBe("region: poza profilem (oferta: śląskie)");
+      // The same as with the voivodeship alone.
+      const voivodeshipsOnly = profile({ ...withCounty, counties: [] });
+      expect(matchOpportunity(bzpOffer("śląskie"), voivodeshipsOnly)).toEqual(result);
+    });
+
+    it("does not match a listed county in a voivodeship outside the profile", () => {
+      const result = matchOpportunity(
+        offer({
+          title: "Modernizacja oświetlenia",
+          categories: [ELEKTRYKA_CPV],
+          location: { voivodeship: "małopolskie", county: "powiat krakowski" },
+        }),
+        profile({
+          includeKeywords: ["oświetlenie"],
+          voivodeships: ["mazowieckie"],
+          counties: ["krakowski"],
+        }),
+      );
+      expect(result.reasons.at(-1)).toEqual({
+        kind: "region_mismatch",
+        points: 0,
+        offerVoivodeship: "małopolskie",
+        offerCounty: "krakowski",
+      });
+      expect(result.matched).toBe(false);
+    });
+
+    it("matches an offer from the profile's voivodeship via the voivodeship", () => {
+      const result = matchOpportunity(bzpOffer("mazowieckie"), profile(withCounty));
+      expect(result.reasons.at(-1)).toEqual({
+        kind: "region_match",
+        points: 20,
+        via: "voivodeship",
+        value: "mazowieckie",
+      });
+      expect(result.matched).toBe(true);
+    });
+
+    it("stays unknown (missing county) for a counties-only profile", () => {
+      const countiesOnly = profile({
+        includeKeywords: ["oświetlenie"],
+        counties: ["warszawski zachodni"],
+      });
+      const result = matchOpportunity(bzpOffer("śląskie"), countiesOnly);
+      expect(result.reasons.at(-1)).toEqual({
+        kind: "region_unknown",
+        points: 0,
+        missing: "county",
+      });
+      expect(result.score).toBe(70);
+      expect(result.matched).toBe(true);
+    });
   });
 
   it("keeps a profile entry that does not normalize as a used part that matches nothing", () => {
@@ -802,8 +853,8 @@ describe("formatReasons (Polish explanations)", () => {
       "region: nieznany — źródło nie podaje województwa ani powiatu",
     ],
     [
-      { kind: "region_unknown", points: 0, missing: "county", offerVoivodeship: "śląskie" },
-      "region: nieznany — województwo śląskie poza profilem, źródło nie podaje powiatu",
+      { kind: "region_mismatch", points: 0, offerVoivodeship: "śląskie", offerCounty: null },
+      "region: poza profilem (oferta: śląskie)",
     ],
     [
       { kind: "region_unknown", points: 0, missing: "voivodeship", offerCounty: "gliwicki" },

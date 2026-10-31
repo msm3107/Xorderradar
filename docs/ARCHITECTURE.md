@@ -411,7 +411,7 @@ punktów powodów) i to, co i gdzie znaleziono. Zawsze dokładnie jeden powód k
 CPV dającego kategorię MVP: o wyniku decydują słowa kluczowe) i jeden powód regionu
 (`region_unrestricted`, `region_match` przez powiat albo województwo, `region_mismatch`,
 `region_unknown` z brakującą częścią: lokalizacja / województwo / powiat / oba, oraz z
-podanym, ale niepasującym wymiarem, jeśli jest); do tego po jednym na każde znalezione słowo
+podanym, ale niepasującym powiatem, jeśli jest); do tego po jednym na każde znalezione słowo
 (`keyword` z polem `title`/`description`; liczone tylko słowo z własnym trafieniem — ciągiem
 tokenów tekstu, którego nie ma inne liczone słowo; przydział w D-023), `more_keywords` i
 `exclude`. Kolejność: kategoria, słowa (kolejność profilu), premia, wykluczenia, region.
@@ -421,14 +421,16 @@ tokenów tekstu, którego nie ma inne liczone słowo; przydział w D-023), `more
   odmiana: token słowa ≥ 4 znaki pasuje do tokenu tekstu zaczynającego się od niego bez jednej
   końcowej samogłoski, krótsze i bez litery (liczby) — tylko dokładnie; ta sama reguła dla
   wykluczeń. Słowo ≤ 10 tokenów (schemat). Znane ograniczenia i koszt w D-023.
-- **Region:** województwa LUB powiaty — zgodny, gdy którykolwiek używany wymiar profilu jest
-  znany w ofercie i pasuje; niezgodny tylko, gdy każdy używany wymiar jest znany i nic nie
-  pasuje; inaczej nieznany (0 pkt, jawny powód — m.in. „źródło nie podaje powiatu” dla
-  BZP, z podanym niepasującym województwem: „województwo śląskie poza profilem, źródło nie
-  podaje powiatu”). Profil z powiatem daje więc dla oferty BZP z innego województwa
-  „nieznany”, nie „niezgodny”. Powiaty porównywane przez `countyKey` =
-  `comparableText(normalizeCounty(x))` z ujednoliceniem „m. st.”/„m.st.”/„miasto stołeczne”
-  i „(miasto na prawach powiatu)”.
+- **Region:** znane województwo oferty spoza województw profilu → niezgodny, niezależnie od
+  powiatu (powiaty nigdy nie poszerzają profilu z województwami). W obrębie województwa z
+  listy decyduje województwo; zawężania powiatem nie ma (żadne źródło nie podaje jeszcze
+  powiatu). Powiat profilu działa sam tylko przy nieznanym województwie oferty albo w
+  profilu bez województw. Nieznany (0 pkt, jawny powód) tylko bez lokalizacji, bez
+  województwa przy profilu z województwami albo bez powiatu przy profilu z samymi powiatami
+  („źródło nie podaje powiatu” dla BZP — taki profil dostaje oferty BZP z całego kraju,
+  `profile:create` ostrzega). Zmiana po przeglądzie właściciela 2026-10-31 (D-023). Powiaty
+  porównywane przez `countyKey` = `comparableText(normalizeCounty(x))` z ujednoliceniem
+  „m. st.”/„m.st.”/„miasto stołeczne” i „(miasto na prawach powiatu)”.
 - **Opis** (`format.ts`): `formatReasons` →
   „kategoria: elektryka (CPV 45310000-3); słowo: oświetlenie (tytuł); region: mazowieckie”.
 - Status i termin oferty nie są sprawą matchingu: `match:preview` pomija `closed`/`cancelled`,
@@ -661,7 +663,8 @@ failed`) — wynik zostaje, a blokada znika z końcem sesji. Każde połączenie
 - `profile:create <file.json>`, `profile:show <profileId>`, `match:preview <profileId>
 [--limit N]` (PR-04, D-023) — komendy operatora. Plik profilu (zwykły plik ≤ 64 KiB, UTF-8,
   JSON, schemat profilu) jest częścią wywołania: błąd → kod 2 przed konfiguracją i bez bazy,
-  komunikat z nazwami pól i opisem błędu, bez wartości; e-mail już użyty → kod 1.
+  komunikat z nazwami pól i opisem błędu, bez wartości; e-mail już użyty → kod 1. Po
+  utworzeniu ostrzeżenia na stderr (powiaty bez województw, krótkie słowa, brak słów; D-023).
   `match:preview` czyta do N (domyślnie 100, maks. 1000) najnowszych ofert bez
   `closed`/`cancelled`, wypisuje tekstem dopasowane (termin rosnąco, brak na końcu, potem
   wynik; po terminie — na samym końcu z „(po terminie)”) z powodami i „dopasowane X z Y”

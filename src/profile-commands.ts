@@ -10,6 +10,7 @@ import type { Opportunity } from "./domain/opportunity.js";
 import { MVP_CATEGORIES, VOIVODESHIPS } from "./domain/vocabulary.js";
 import { formatReasons } from "./matching/format.js";
 import { countyKey, matchOpportunity, type MatchResult } from "./matching/match.js";
+import { MIN_INFLECTED_TOKEN_LENGTH, tokenize } from "./matching/text.js";
 import { normalizeVoivodeship } from "./sources/normalize/regions.js";
 import { cleanText } from "./sources/normalize/whitespace.js";
 
@@ -97,9 +98,24 @@ function canonicalVoivodeships(value: unknown): unknown {
 /** The fields a profile file may have, in schema order. */
 const PROFILE_FIELDS = Object.keys(companyProfileInputSchema.shape);
 
-/** Unknown keys shown at most, each at most this many characters. */
-const UNKNOWN_FIELDS_SHOWN = 5;
-const UNKNOWN_FIELD_MAX_LENGTH = 40;
+/** Names (unknown keys, keywords) shown at most, each at most this many characters. */
+const NAMES_SHOWN = 5;
+const NAME_MAX_LENGTH = 40;
+
+/**
+ * Names from the operator's own file, quoted, cleaned of control characters
+ * and cut to a bounded length: at most NAMES_SHOWN, the rest counted.
+ */
+function shownNames(names: readonly string[], open: string, close: string): string {
+  const shown = names.slice(0, NAMES_SHOWN).map((name) => {
+    // Cut by code points, so a surrogate pair is never split.
+    const characters = Array.from(cleanText(name));
+    const cut = characters.slice(0, NAME_MAX_LENGTH).join("");
+    return `${open}${cut}${characters.length > NAME_MAX_LENGTH ? "…" : ""}${close}`;
+  });
+  const more = names.length > shown.length ? ` (+${String(names.length - shown.length)} more)` : "";
+  return `${shown.join(", ")}${more}`;
+}
 
 /**
  * The message for keys the profile schema does not know, or null. The key
@@ -110,16 +126,8 @@ function unknownFields(parsed: unknown): string | null {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
   const unknown = Object.keys(parsed).filter((key) => !PROFILE_FIELDS.includes(key));
   if (unknown.length === 0) return null;
-  const shown = unknown.slice(0, UNKNOWN_FIELDS_SHOWN).map((key) => {
-    // Cut by code points, so a surrogate pair is never split.
-    const characters = Array.from(cleanText(key));
-    const name = characters.slice(0, UNKNOWN_FIELD_MAX_LENGTH).join("");
-    return `"${name}${characters.length > UNKNOWN_FIELD_MAX_LENGTH ? "…" : ""}"`;
-  });
-  const more =
-    unknown.length > shown.length ? ` (+${String(unknown.length - shown.length)} more)` : "";
   return (
-    `Invalid profile: unknown field ${shown.join(", ")}${more}. ` +
+    `Invalid profile: unknown field ${shownNames(unknown, '"', '"')}. ` +
     `Allowed fields: ${PROFILE_FIELDS.join(", ")}.`
   );
 }
@@ -222,6 +230,55 @@ export async function readProfileFile(path: string): Promise<CompanyProfileInput
     return `Invalid profile: ${counties.join(", ")} (not a county name).`;
   }
   return profile;
+}
+
+const HAS_LETTER = /\p{L}/u;
+
+/**
+ * A keyword that only ever matches its exact form: every token is a word
+ * (has a letter) shorter than the inflection minimum of src/matching/text.ts.
+ */
+function exactOnly(keyword: string): boolean {
+  const tokens = tokenize(keyword);
+  return (
+    tokens.length > 0 &&
+    tokens.every((token) => token.length < MIN_INFLECTED_TOKEN_LENGTH && HAS_LETTER.test(token))
+  );
+}
+
+/**
+ * Hints for a valid profile that will likely miss offers (D-023, owner's
+ * live-data review of PR-04). `profile:create` prints them on stderr after
+ * creating the profile; they never block it. Only the operator's own
+ * keywords are named (cleaned, bounded), never contact data.
+ */
+export function profileWarnings(profile: CompanyProfileInput): string[] {
+  const warnings: string[] = [];
+  if (profile.counties.length > 0 && profile.voivodeships.length === 0) {
+    warnings.push(
+      "Uwaga: profil ma powiaty, ale nie ma województw. BZP nie podaje powiatu, więc taki " +
+        "profil dostaje oferty BZP z całego kraju (region „nieznany”: wystarczą kategoria i " +
+        "słowo kluczowe). Dodaj województwo.",
+    );
+  }
+  const short = [...profile.includeKeywords, ...profile.excludeKeywords].filter(exactOnly);
+  if (short.length > 0) {
+    const minimum = String(MIN_INFLECTED_TOKEN_LENGTH);
+    warnings.push(
+      `Uwaga: słowa krótsze niż ${minimum} znaki pasują tylko w dokładnie tej formie ` +
+        `(np. „gaz” nie znajdzie „gazowy” ani „gazu”): ${shownNames(short, "„", "”")}. ` +
+        // Add, not replace: "gazow" alone misses "gazu" and "gaz" (quality review).
+        `Jeśli słowo się odmienia, dodaj obok dłuższy temat (np. „gaz” + „gazow”).`,
+    );
+  }
+  if (profile.includeKeywords.length === 0) {
+    warnings.push(
+      "Uwaga: profil nie ma słów kluczowych. Ogłoszenia małych zamówień BZP " +
+        "(SmallContractNotice) nie mają kodów CPV, więc bez słów kluczowych nigdy nie zostaną " +
+        "dopasowane.",
+    );
+  }
+  return warnings;
 }
 
 /** The profile as `profile:show` prints it. */
