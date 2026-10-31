@@ -10,7 +10,8 @@ round (M1, M2, L3–L5) → C&S re-review PASS; Quality Review REJECT (documenta
 met) → documentation fix round → C&S check PASS → Quality re-review ACCEPT. Owner review of
 PR #6 (head f356815): owner review round (PR #6) implemented → C&S review FAIL (H1 High,
 M1, L1–L2, N1–N3) → fix round → C&S re-review PASS → Quality Review ACCEPT (doc nits applied)
-→ pushed to PR #6 for the owner's re-review (not merged).
+→ owner re-review → **Part B MERGED in PR #6 (merge commit 1990231)**. Part C (normalization
+helpers, `docs/PR_PLAN.md` → PR-03C) in progress.
 
 ## Completed
 
