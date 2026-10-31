@@ -13,7 +13,9 @@ M1, L1–L2, N1–N3) → fix round → C&S re-review PASS → Quality Review AC
 → owner re-review → **Part B MERGED in PR #6 (merge commit 1990231)**. Part C (normalization
 helpers, `docs/PR_PLAN.md` → PR-03C) implemented: Code & Safety Review PASS with findings → fix
 round → C&S re-review PASS; Quality Review REJECT (AC7 docs only) → fix rounds → C&S PASS →
-Quality re-review ACCEPT; PR opened for the owner's review (not merged).
+Quality re-review ACCEPT; PR #7 opened for the owner's review (not merged). Owner review of
+PR #7 (head 94d1303): PASS with QoL suggestions → docs-only round (D-022 county comparison
+rule, PR-04 AC5–AC7) → C&S check PASS → Quality re-review ACCEPT.
 
 ## Completed
 
@@ -111,7 +113,14 @@ Quality re-review ACCEPT; PR opened for the owner's review (not merged).
 ## In progress
 
 **PR-03 — Part C (normalization helpers; `docs/PR_PLAN.md` → PR-03C)** — implemented; PR opened
-for the owner's review (not merged). D-022 new; D-015/D-016 amended.
+for the owner's review (PR #7, not merged). D-022 new; D-015/D-016 amended.
+
+- Owner review of PR #7: PASS (live check: 500 `ContractNotice` + 86 `SmallContractNotice`,
+  0 rejected). Its QoL suggestions are handled in docs only: D-022 now fixes the county
+  comparison rule (`comparableText(normalizeCounty(x))` on both sides; "m. st." vs "m.st."
+  variants are left to PR-04) and lists PR-04 requirements; `docs/PR_PLAN.md` PR-04 gains
+  AC5 (explicit reason when the source has no county), AC6 (keyword matching for offers
+  without CPV) and AC7 (county comparison + variant tests).
 
 - Pure helpers in `src/sources/normalize/`: `whitespace.ts` (`cleanText`: `\p{Cc}` → space,
   bidi/zero-width characters removed, whitespace collapsed), `html-text.ts` (linear HTML → text
@@ -376,8 +385,7 @@ D-021 (ingest day ranges and automatic catch-up). PR-03 Part C: D-022 (offer det
 
 ## Next action
 
-1. Owner reviews the PR-03C PR (normalization helpers; offer description/contact/value from
-   `htmlBody`) and merges it. After the merge, backfill still-open offers with
+1. Owner re-checks PR #7 (PR-03C; review follow-up was docs only) and merges it. After the merge, backfill still-open offers with
    `ingest bzp --from … --to …` (≤ 31 days per call, README). Cosmetic nits left from Part B:
    over-wide `ingest` help lines in `src/cli.ts`; two test titles still say "200 000"
    (1 000 000 cases exist). Watch live runs for `too_large` on update pages
@@ -408,7 +416,13 @@ D-021 (ingest day ranges and automatic catch-up). PR-03 Part C: D-022 (offer det
    - The multi-part `ContractNotice` layout (repeated 4.2.2 per part) is inferred, not
      captured: capture one pseudonymised multi-part notice as a fixture and confirm.
    - `pnpm audit`: 1 moderate, dev-only (GHSA-g3hv-75wg-m249, minimatch < 11.0.1 via eslint;
-     patterns come from repo config only) — upgrade when eslint ships a fixed release.
+     patterns come from repo config only). Owner proposal: a separate small PR with
+     `pnpm.overrides` `"minimatch": ">=11.0.1"` (verify eslint still works) or an eslint bump —
+     not part of PR-03C.
+   - From the Quality re-review of the PR #7 follow-up (non-blocking): a profile with
+     categories only gets nothing for offers without CPV — consider a `reasons` entry like
+     "brak CPV — kategoria niesprawdzalna" (mirrors AC5); keyword-only small contracts score
+     at most 30 + 10 + 20, so check they can cross the alert threshold when calibrating it.
    - D-016 "Konsekwencje" still describes the pre-D-021 cron ("tylko wczorajszy dzień") as a
      historical record; optionally add a pointer to D-021 in a later docs pass.
 4. Open points carried from D-015/PR-02 for PR-03: whether the API's publication-day boundary
@@ -546,6 +560,12 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-10-31, PR-03 Part C, owner-review follow-up of PR #7 (docs only: DECISIONS D-022,
+PR_PLAN PR-04 AC5–AC7, STATE): C&S ran
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 896/896 tests passed (28 files). D-022 examples were checked
+against the real `normalizeCounty`/`comparableText`. No code or dependency changes.
 
 2026-10-31, PR-03 Part C after the Quality re-review (Node 22, pnpm 10.28.0, PostgreSQL 16):
 `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`

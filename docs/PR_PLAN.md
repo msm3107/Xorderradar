@@ -283,6 +283,12 @@ z RSS. Preferencja: API → feed → dane strukturalne → HTML.
 2. Słowo wykluczające zawsze wyklucza.
 3. Brak lokalizacji w ogłoszeniu nie jest traktowany jako zgodność regionu.
 4. Brak LLM i zależności sieciowych w matchingu.
+5. Profil z powiatami a oferta z pustym `location.county` (BZP): `reasons` jawnie podaje, że
+   źródło nie podaje powiatu — nie cichy brak dopasowania i nie zgodność (D-022).
+6. Oferty bez CPV (małe zamówienia BZP) są dopasowywane po słowach kluczowych z tytułu i
+   opisu (`comparableText`); pokryte testami.
+7. Powiaty porównywane jako `comparableText(normalizeCounty(…))` po obu stronach; testy
+   obejmują warianty typu „m. st. Warszawa”/„m.st. Warszawa”, a decyzja o nich jest zapisana.
 
 **Poza zakresem:** e-mail, UI, LLM, uczenie maszynowe.
 

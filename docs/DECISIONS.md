@@ -636,7 +636,17 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
       białe znaki, małe litery (polskie znaki zostają), pusty lub dłuższy niż 100 → `null`.
       **Bez słownika 380 powiatów** (YAGNI): wynik służy tylko porównaniu profilu z zapisaną
       lokalizacją w PR-04. BZP nie podaje powiatu (NUTS 3 to podregion), więc
-      `location.county` ofert BZP zostaje puste — nie wyprowadzamy go;
+      `location.county` ofert BZP zostaje puste — nie wyprowadzamy go. **Reguła porównania
+      (PR-04):** powiat porównywany wyłącznie jako `comparableText(normalizeCounty(x))` po
+      obu stronach (profil i oferta). Wynik `normalizeCounty` ma kształt tekstu do
+      wyświetlenia/zapisu i zachowuje polskie znaki: „Powiat Łódzki Wschodni” → „łódzki
+      wschodni”, a „lodzki wschodni” zostaje bez zmian — równe dopiero po `comparableText`.
+      Helper nie ujednolica wariantów nazw: „m. st. Warszawa” → „m. st. warszawa”, a
+      „m.st. Warszawa” → „m.st. warszawa” (różne także po `comparableText`, który nie rusza
+      kropek ani spacji między nimi); dopisek „miasto na prawach powiatu” zostaje w wyniku
+      („Kraków (miasto na prawach powiatu)” → „kraków (miasto na prawach powiatu)”). PR-04
+      decyduje, jak je traktować (np. usunięcie „m. st.”/„m.st.” albo jawny alias), zapisuje
+      decyzję i pokrywa ją testami;
     - `cpv-categories.ts`: `mvpCategoriesForCpv(codes)` — kody CPV → zamknięta lista
       kategorii MVP (`bhp`, `elektryka`, `instalacje`, `it`, `ppoz`, `remonty`, `serwis`,
       `sprzatanie`, `szkolenia`, `wyposazenie`), posortowane, bez powtórzeń; tylko kody
@@ -737,3 +747,11 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     linii — znane ograniczenie skanera.
   - Miejsce realizacji zamówienia (inne niż siedziba zamawiającego) i ogłoszenia o
     unieważnieniu pozostają poza zakresem.
+  - **Wymagania dla PR-04** (przegląd właściciela PR #7; kryteria w `PR_PLAN.md`, PR-04):
+    - powiat w profilu nigdy nie pasuje do oferty BZP (`location.county` zawsze puste), więc
+      matching podaje w `reasons` jawny powód („źródło nie podaje powiatu”) — nie cichy brak
+      dopasowania; inaczej klient z profilem tylko z powiatami nie dostaje alertów i nie wie
+      dlaczego;
+    - małe zamówienia (`SmallContractNotice`) nie mają CPV, więc słownik MVP daje dla nich
+      zero kategorii (dane właściciela: 0 z 86 ogłoszeń z CPV, opis w 76 z 86) — matching
+      musi dla nich używać słów kluczowych z tytułu i opisu (`comparableText`).
