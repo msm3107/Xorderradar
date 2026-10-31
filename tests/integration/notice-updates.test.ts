@@ -401,6 +401,63 @@ describe.skipIf(skipWithoutDatabase)("notice updates (PostgreSQL, BZP adapter)",
     });
   });
 
+  it("updates a row once when its notice gains htmlBody details, keeping an applied deadline (PR-03C)", async () => {
+    // A real, pseudonymised contract notice body (2026/BZP 00507107/01): a
+    // description, an e-mail and "181300 PLN".
+    const page = recordListSchema.parse(
+      JSON.parse(
+        readFileSync(
+          new URL("../fixtures/bzp/contract-notice-2026-10-29-page1.json", import.meta.url),
+          "utf8",
+        ),
+      ),
+    );
+    const htmlBody = z.string().parse(at(page, 0).htmlBody);
+    const http = new PagesHttpClient()
+      .serve("ContractNotice", ORIGINALS_DAY, ORIGINALS)
+      .serve("NoticeUpdateNotice", UPDATES_DAY, UPDATES);
+    // Stored as before PR-03C (no details), then the update is applied.
+    await ingest(schema, http, ORIGINALS_DAY);
+    await ingest(schema, http, UPDATES_DAY);
+    const before = rowOf(await rows(schema), at(tenderIds, 0));
+    expect(before.deadline_update_notice).toBe("2026/BZP 00507126/01");
+
+    // The same notices, now with a body: the content hash covers the new
+    // fields, so each row is updated exactly once (D-016).
+    const withBody = ORIGINALS.map((record) => ({ ...record, htmlBody }));
+    http.serve("ContractNotice", ORIGINALS_DAY, withBody);
+    const refetch = await ingest(schema, http, ORIGINALS_DAY);
+    expect(refetch.run.counters).toMatchObject({ updated: 5, unchanged: 0, inserted: 0 });
+    const after = rowOf(await rows(schema), at(tenderIds, 0));
+    expect(after.content_hash).not.toBe(before.content_hash);
+    // The deadline set by the update notice and its provenance stay (PR-03B AC4).
+    expect(after).toMatchObject({
+      deadline: before.deadline,
+      status: "open",
+      deadline_update_notice: before.deadline_update_notice,
+      deadline_update_published_at: before.deadline_update_published_at,
+    });
+    const stored = await schema.db
+      .selectFrom("opportunities")
+      .select(["description", "contact", "estimated_value", "currency"])
+      .where("id", "=", after.id)
+      .executeTakeFirstOrThrow();
+    expect(stored).toMatchObject({
+      contact: { email: "kontakt@example.invalid" },
+      estimated_value: "181300",
+      currency: "PLN",
+    });
+    expect(stored.description).toMatch(/^1\. Przedmiotem zamówienia jest dostawa zabawek/u);
+    // Only the extracted values are stored, never the markup.
+    expect(JSON.stringify(await rows(schema))).not.toContain("<");
+    expect(stored.description).not.toMatch(/[<>]/u);
+
+    // Fetched again unchanged: nothing is written.
+    const again = await ingest(schema, http, ORIGINALS_DAY);
+    expect(again.run.counters).toMatchObject({ updated: 0, unchanged: 5 });
+    expect(rowOf(await rows(schema), at(tenderIds, 0))).toEqual(after);
+  });
+
   it("keeps the latest published update whatever the reading order (AC5)", async () => {
     const tenderId = at(tenderIds, 0);
     const older = variantOfUpdate0({

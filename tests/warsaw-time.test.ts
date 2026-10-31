@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { warsawLocalToUtc, type WarsawLocalTime } from "../src/sources/warsaw-time.js";
+import { warsawLocalToUtc, type WarsawLocalTime } from "../src/sources/normalize/warsaw-time.js";
 
 function local(value: string): WarsawLocalTime {
   const match = /^(\d+)-(\d+)-(\d+) (\d+):(\d+)$/.exec(value);

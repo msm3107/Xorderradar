@@ -41,5 +41,15 @@ Contents:
   - `00507136/01` — changes an "Ogłoszenie o wykonaniu umowy" (section 5.5) → skipped;
   - `00507141/01` — 8.1 → `2026-11-05T09:00:00Z`.
 
+Since PR-03C (D-022) the `htmlBody` of the contract and small-contract notices above is read
+too: description, contact (e-mail/phone of the first contracting authority) and estimated
+value come from the form labels "4.2.2.) / 3.3.)", "1.5.7.) / 1.4.7.)", "1.5.9.) / 1.4.9.)",
+"4.1.5.) / 3.4.)" and "3.5) Kod waluty" (small contracts). The expected values of every
+captured offer are asserted in `tests/bzp-adapter.test.ts`; contact values are only the
+substitutes listed above. No new fixture files were added for PR-03C and the substitutions
+are unchanged.
+
 Edge cases (missing fields, wrong types, corrupted JSON, …) are built in the tests by mutating a
-parsed copy of a real record — never by hand-crafting whole notices.
+parsed copy of a real record — never by hand-crafting whole notices. For `htmlBody` (PR-03C,
+`tests/bzp-notice-body.test.ts`) the captured bodies are mutated by replacing or removing
+form fields, or by appending unclosed markup and hostile repetitions.

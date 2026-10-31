@@ -188,6 +188,55 @@ z RSS. Preferencja: API → feed → dane strukturalne → HTML.
   - **helpery normalizacji:** białe znaki, HTML → tekst (`htmlBody`: opis, kontakt, wartość),
     daty Europe/Warsaw, województwa/powiaty, słownik kategorii (CPV → kategorie MVP), fallback
     niepoprawnego e-maila do `contact.raw`, pseudonimizowane fixture'y HTML.
+  - **Doprecyzowanie zakresu (koordynator, na podstawie fixture'ów 2026-10-29):**
+    - wspólny moduł `src/sources/normalize/` (czyste funkcje, bez I/O): białe znaki, HTML →
+      segmenty tekstu (przeniesiony liniowy skaner z `bzp/notice-update.ts`, zachowanie
+      bez zmian), tekst do porównań (małe litery, bez diakrytyków, także `ł` → `l`; tylko do
+      porównań, nigdy do zapisu), województwa (16 kanonicznych nazw, np. `mazowieckie`; wejście
+      z wielkimi literami, „woj.”, „województwo”, bez polskich znaków), słownik CPV → kategorie
+      MVP; daty Europe/Warsaw — istniejący `warsaw-time.ts` przeniesiony do modułu, bez zmian
+      zachowania;
+    - **powiaty:** BZP nie podaje powiatu (NUTS 3 to podregion, nie powiat), więc
+      `location.county` zostaje puste — nie wyprowadzamy go (byłoby zgadywaniem); helper tylko
+      normalizuje zapis (`powiat`/`pow.`, białe znaki, wielkość liter) dla profilu w PR-04,
+      bez słownika 380 powiatów (YAGNI);
+    - **kategorie (decyzja do D-022):** `categories` dalej przechowuje kody CPV ze źródła
+      (weryfikowalne, bez zmiany `content_hash` przy strojeniu słownika); słownik CPV →
+      kategorie MVP jest czystą funkcją (`mvpCategoriesForCpv`) używaną przez matching w
+      PR-04 — zmiana słownika działa od razu, bez ponownego ingestu;
+    - **BZP `htmlBody` ofert** (`ContractNotice` i `SmallContractNotice`, ≤ 1 000 000 znaków):
+      odczyt w ekstrakcji, w ofercie zostają tylko wyciągnięte wartości (HTML nie jest
+      przechowywany ani logowany); etykiety w obu numeracjach: opis 4.2.2.) / 3.3.), e-mail
+      1.5.9.) / 1.4.9.), telefon 1.5.7.) / 1.4.7.), wartość 4.1.5.) (`181300 PLN`) / 3.4.) +
+      3.5) Kod waluty (`153812,40` + `PLN`);
+  - **Kryteria akceptacji PR-03C:**
+    1. Opis ofert BZP pochodzi z `htmlBody` (segmenty po etykiecie do następnej numerowanej
+       etykiety sekcji formularza; kilka wystąpień — np. części — łączone w kolejności), białe
+       znaki znormalizowane z zachowaniem podziału na akapity; dłuższy niż 10 000 znaków →
+       skrócony na granicy słowa z „…”; brak etykiety → `null`.
+    2. Kontakt: opublikowany e-mail (poprawny → `contact.email` w małych literach) i telefon;
+       niepoprawny e-mail (albo telefon dłuższy niż limit) → `contact.raw`, nigdy odrzucenie
+       oferty; brak obu → `contact = null`. Bez wzbogacania z innych źródeł.
+    3. Wartość: tylko przy dokładnie jednym wystąpieniu etykiety wartości i ścisłym formacie
+       (cyfry, opcjonalne separatory tysięcy spacją/NBSP, część ułamkowa przecinkiem lub
+       kropką) z jednoznaczną walutą ISO z tego samego bloku albo z „Kod waluty”; cokolwiek
+       innego (brak, kilka, niejednoznaczne, poza zakresem `decimalAmountSchema`) →
+       `estimatedValue = currency = null`, nigdy zgadywanie ani `0`.
+    4. `htmlBody` brakujący, za długi, niedomknięty lub wrogi nie odrzuca oferty: pola z
+       `htmlBody` zostają `null` (pozostałe mapowanie bez zmian); czas liniowy względem długości
+       (test na złośliwym wejściu); HTML nie trafia do logów ani do bazy.
+    5. Helpery normalizacji (białe znaki, tekst do porównań, województwa, powiaty, CPV →
+       kategorie MVP) mają testy jednostkowe z polskimi znakami i przypadkami brzegowymi;
+       nieznana wartość → `null`/pusta lista, nigdy zgadywanie.
+    6. Testy na pseudonimizowanych fixture'ach HTML obu typów (z wartością i bez, z
+       telefonem i bez, z niepoprawnym e-mailem); dotychczasowe testy PR-03A/B przechodzą bez
+       osłabiania.
+    7. Dokumentacja: konsekwencja dla `content_hash` (ponownie pobrane wiersze stają się
+       `updated` raz; terminy ze zmian zostają — PR-03B AC4) w D-016/D-022, README,
+       ARCHITECTURE.
+  - **Poza zakresem PR-03C:** matching (PR-04), zapis kategorii MVP w bazie, słownik powiatów,
+    ogłoszenia o unieważnieniu (Next action), miejsce realizacji zamówienia (inne niż
+    siedziba zamawiającego), drugie źródło.
 
 **Zakres:**
 
@@ -234,6 +283,12 @@ z RSS. Preferencja: API → feed → dane strukturalne → HTML.
 2. Słowo wykluczające zawsze wyklucza.
 3. Brak lokalizacji w ogłoszeniu nie jest traktowany jako zgodność regionu.
 4. Brak LLM i zależności sieciowych w matchingu.
+5. Profil z powiatami a oferta z pustym `location.county` (BZP): `reasons` jawnie podaje, że
+   źródło nie podaje powiatu — nie cichy brak dopasowania i nie zgodność (D-022).
+6. Oferty bez CPV (małe zamówienia BZP) są dopasowywane po słowach kluczowych z tytułu i
+   opisu (`comparableText`); pokryte testami.
+7. Powiaty porównywane jako `comparableText(normalizeCounty(…))` po obu stronach; testy
+   obejmują warianty typu „m. st. Warszawa”/„m.st. Warszawa”, a decyzja o nich jest zapisana.
 
 **Poza zakresem:** e-mail, UI, LLM, uczenie maszynowe.
 

@@ -2,11 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { bzpAdapter } from "../src/sources/bzp/adapter.js";
-import {
-  extractDeadlineChange,
-  MAX_NORMALIZED_SEGMENT_LENGTH,
-  textSegments,
-} from "../src/sources/bzp/notice-update.js";
+import { extractDeadlineChange } from "../src/sources/bzp/notice-update.js";
+import { MAX_NORMALIZED_SEGMENT_LENGTH, textSegments } from "../src/sources/normalize/html-text.js";
 import type { NormalizeResult, RawDocument } from "../src/sources/types.js";
 
 const FETCHED_AT = new Date("2026-10-30T10:00:00.000Z");

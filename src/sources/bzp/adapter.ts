@@ -17,6 +17,13 @@ import {
   type RawDocument,
   type SourceAdapter,
 } from "../types.js";
+import { collapseWhitespace } from "../normalize/whitespace.js";
+import {
+  extractNoticeDetails,
+  NO_DETAILS,
+  type BzpNoticeDetails,
+  type BzpOpportunityNoticeType,
+} from "./notice-body.js";
 import { extractDeadlineChange } from "./notice-update.js";
 import { bzpProvinces } from "./provinces.js";
 
@@ -42,10 +49,9 @@ export const BZP_NOTICE_TYPES = [
 ] as const;
 export type BzpNoticeType = (typeof BZP_NOTICE_TYPES)[number];
 /** Notice types mapped to opportunities; NoticeUpdateNotice is a change to one of them. */
-const OPPORTUNITY_NOTICE_TYPES: ReadonlySet<string> = new Set([
-  "ContractNotice",
-  "SmallContractNotice",
-]);
+function isOpportunityNoticeType(value: string | null): value is BzpOpportunityNoticeType {
+  return value === "ContractNotice" || value === "SmallContractNotice";
+}
 const NOTICE_UPDATE_TYPE = "NoticeUpdateNotice";
 
 /**
@@ -65,13 +71,15 @@ const MAX_RECORDS_PER_DOCUMENT = 500;
 /** Bound on every string read from a record, before any regular expression runs on it. */
 const MAX_FIELD_LENGTH = 20_000;
 /**
- * Bound on an update notice's `htmlBody`, the one field parsed as markup
- * (src/sources/bzp/notice-update.ts). Observed: 4 379–32 895 characters on
- * 2026-10-29, up to 255 562 on 2026-10-27 (owner's live check). A page is
- * already capped at 5 MB by the HTTP client and the parse is linear (one
- * forward scan; Unicode normalization only of segments short enough to ever
- * match a label — MAX_NORMALIZED_SEGMENT_LENGTH), so the bound leaves room; a
- * longer body rejects the record instead of being cut.
+ * Bound on `htmlBody`, the one field parsed as markup (src/sources/normalize/
+ * html-text.ts). Update notices: 4 379–32 895 characters on 2026-10-29, up to
+ * 255 562 on 2026-10-27 (owner's live check); contract notices up to ~95 000.
+ * A page is already capped at 5 MB by the HTTP client and the parse is linear
+ * (one forward scan; Unicode normalization only of segments short enough to
+ * ever match a label — MAX_NORMALIZED_SEGMENT_LENGTH), so the bound leaves
+ * room. A longer body is never cut: it rejects an update notice (the change is
+ * only published there) and leaves the details of a contract notice null
+ * (D-022).
  */
 const MAX_HTML_BODY_LENGTH = 1_000_000;
 /** Same bound as the domain's `tenderId` (and `externalId`). */
@@ -92,9 +100,11 @@ const field = z.string().max(MAX_FIELD_LENGTH);
 const optionalField = field.nullish();
 
 /**
- * Only the fields the mapping uses. Not strict: the source may add fields
- * without breaking us; `htmlBody`, `contractors` and every other field are
- * dropped here and never retained.
+ * Only the list fields the mapping uses. Not strict: the source may add fields
+ * without breaking us; `contractors` and every other field are dropped here
+ * and never retained. `htmlBody` is not part of the record either: it is read
+ * once in extraction (`noticeDetailsOf`) and only the values found in it are
+ * kept, never the markup (D-022).
  */
 const bzpRecordSchema = z.object({
   noticeNumber: field,
@@ -128,9 +138,10 @@ const bzpUpdateRecordSchema = z.object({
 export type BzpUpdateRecord = z.output<typeof bzpUpdateRecordSchema>;
 
 /**
- * An extracted list item: either the validated record (a notice, or an update
- * of an earlier notice), or the field paths that did not match (turned into a
- * rejection by `normalize`, so one bad record never fails the whole page).
+ * An extracted list item: either the validated record (a notice with the
+ * details read from its `htmlBody`, or an update of an earlier notice), or the
+ * field paths that did not match (turned into a rejection by `normalize`, so
+ * one bad record never fails the whole page).
  */
 export type BzpNotice =
   | {
@@ -138,6 +149,7 @@ export type BzpNotice =
       readonly kind: "notice";
       readonly fetchedAt: Date;
       readonly record: BzpRecord;
+      readonly details: BzpNoticeDetails;
     }
   | {
       readonly valid: true;
@@ -336,6 +348,19 @@ function invalidNotice(item: unknown, fetchedAt: Date, invalidFields: string[]):
 }
 
 /**
+ * Description, contact and value from a contract notice's `htmlBody` (D-022).
+ * The body is optional for the notice: missing, not a string or longer than
+ * MAX_HTML_BODY_LENGTH → no details (all null), never a rejection; the reason
+ * is not logged (the counts of the run stay as they are, and the body is
+ * never logged anyway).
+ */
+function noticeDetailsOf(item: object, noticeType: BzpOpportunityNoticeType): BzpNoticeDetails {
+  const htmlBody = stringProperty(item, "htmlBody");
+  if (htmlBody === null || htmlBody.length > MAX_HTML_BODY_LENGTH) return NO_DETAILS;
+  return extractNoticeDetails(noticeType, htmlBody);
+}
+
+/**
  * One list item, dispatched on its own `noticeType` (not on the listing it
  * came from): contract notices and small contracts → the notice schema,
  * NoticeUpdateNotice → the update schema, anything else → invalid
@@ -352,13 +377,13 @@ function extractNotice(item: unknown, fetchedAt: Date): BzpNotice {
       ? { valid: true, kind: "update", fetchedAt, record: update.data }
       : invalidNotice(item, fetchedAt, issuePaths(update.error));
   }
-  if (noticeType === null || !OPPORTUNITY_NOTICE_TYPES.has(noticeType)) {
+  if (!isOpportunityNoticeType(noticeType)) {
     return invalidNotice(item, fetchedAt, ["noticeType"]);
   }
   const notice = bzpRecordSchema.safeParse(item);
-  return notice.success
-    ? { valid: true, kind: "notice", fetchedAt, record: notice.data }
-    : invalidNotice(item, fetchedAt, issuePaths(notice.error));
+  if (!notice.success) return invalidNotice(item, fetchedAt, issuePaths(notice.error));
+  const details = noticeDetailsOf(item, noticeType);
+  return { valid: true, kind: "notice", fetchedAt, record: notice.data, details };
 }
 
 /**
@@ -390,10 +415,6 @@ function parseUtcTimestamp(value: string): Date | null {
     date.getUTCMinutes() === mi &&
     date.getUTCSeconds() === s;
   return roundTrip ? date : null;
-}
-
-function collapseWhitespace(value: string): string {
-  return value.replace(/\s+/gu, " ").trim();
 }
 
 /** Blank counts as absent: the source uses `null`, but `""` carries no more information. */
@@ -459,16 +480,18 @@ function normalizeUpdate(record: BzpUpdateRecord, fetchedAt: Date): NormalizeRes
 }
 
 /**
- * Pure mapping (D-015). Values the list API does not provide (description,
- * contact, estimated value) stay null; nothing is guessed or truncated — a
- * record that does not fit the domain rules is rejected with the field names.
+ * Pure mapping (D-015, D-022). List fields map as published; description,
+ * contact and estimated value come from the details read from `htmlBody` in
+ * extraction and are null when not published there or unusable. Nothing is
+ * guessed, and no list field is truncated — a record that does not fit the
+ * domain rules is rejected with the field names.
  */
 function normalizeNotice(notice: BzpNotice): NormalizeResult {
   if (!notice.valid) {
     return reject(notice.externalId, `invalid source fields: ${notice.invalidFields.join(", ")}`);
   }
   if (notice.kind === "update") return normalizeUpdate(notice.record, notice.fetchedAt);
-  const { record, fetchedAt } = notice;
+  const { record, details, fetchedAt } = notice;
   const externalId = externalIdOf(record);
   // Both timestamps: surrounding whitespace trimmed, then the strict format;
   // a blank deadline means none was published.
@@ -486,14 +509,14 @@ function normalizeNotice(notice: BzpNotice): NormalizeResult {
     tenderId: tenderIdOf(record),
     issuerName: collapseWhitespace(record.organizationName),
     title: collapseWhitespace(record.orderObject),
-    description: null,
+    description: details.description,
     location: buyerLocation(record),
     publishedAt,
     deadline,
-    estimatedValue: null,
-    currency: null,
+    estimatedValue: details.estimatedValue,
+    currency: details.currency,
     categories: cpvCodes(record.cpvCode),
-    contact: null,
+    contact: details.contact,
     fetchedAt,
     status: statusOf(deadline, fetchedAt),
   });

@@ -10,9 +10,11 @@
 > `runIngestion`, blokada), tabelę `ingestion_runs` (migracja `0002_ingestion_runs`), kolumnę
 > `opportunities.tender_id` (migracja `0003`) i komendę `ingest`; część B — obsługę zmian
 > ogłoszeń BZP (`NoticeUpdateNotice`, D-015; migracja `0004_notice_updates`) i nadrabianie
-> pominiętych dni (`ingest --from/--to`, D-021); część C — później: helpery normalizacji (białe
-> znaki, HTML → tekst, daty Europe/Warsaw, województwa/powiaty, CPV → kategorie, fallback
-> kontaktu do `contact.raw`). Wszystko poniżej oznaczone
+> pominiętych dni (`ingest --from/--to`, D-021); część C — wspólne czyste helpery
+> normalizacji (`src/sources/normalize/`: białe znaki, HTML → tekst, tekst do porównań, daty
+> Europe/Warsaw, województwa/powiaty, CPV → kategorie MVP) oraz opis, kontakt (z fallbackiem
+> do `contact.raw`) i wartość ofert BZP z `htmlBody` (`src/sources/bzp/notice-body.ts`,
+> D-022), bez migracji. Wszystko poniżej oznaczone
 > _(plan, PR-xx)_ to projekt docelowy — kontrakty mogą zostać doprecyzowane w danym PR, a
 > zmiana musi trafić do tego dokumentu i do `docs/DECISIONS.md`.
 
@@ -55,7 +57,9 @@ src/
 │   └── http/               # SafeHttpClient: polityka URL/IP, retry, limity      [PR-02]
 ├── domain/                 # typy + schematy zod: Source, Opportunity, CompanyProfile [PR-01]
 ├── sources/                # kontrakt adaptera, rejestr, podgląd; bzp/ = BZP    [PR-02]
-│                           # warsaw-time.ts: czas lokalny Europe/Warsaw → UTC   [PR-03B]
+│   │                       # bzp/notice-body.ts: opis/kontakt/wartość z htmlBody [PR-03C]
+│   └── normalize/          # czyste helpery (D-022): whitespace, html-text,     [PR-03C]
+│                           # comparable, regions, cpv-categories, warsaw-time (PR-03B)
 ├── ingestion/              # fingerprint, content_hash, runIngestion, blokada ingest [PR-03A]
 │                           # catch-up.ts: plan dni nadrabiania                  [PR-03B]
 ├── matching/               # scoring + wyjaśnienie                             (plan, PR-04)
@@ -172,26 +176,40 @@ limit typu), `SearchAfter` = `objectId` ostatniego rekordu
 40 stron na typ, brak/niepoprawny kursor, powtórzony kursor (strona kończąca się już użytym
 kursorem powtarza zebrane rekordy, więc jest odrzucana), przerwany `signal`. Strona
 dłuższa niż żądany `PageSize` → `SourceFormatError`. Ekstrakcja waliduje tylko używane pola
-(każde ≤ 20 000 znaków), resztę — w tym `htmlBody` ofert — odrzuca. Mapowanie: `sourceUrl` = strona
+(każde ≤ 20 000 znaków) oraz `htmlBody` ofert (≤ 1 000 000 znaków, PR-03C), resztę odrzuca. Mapowanie: `sourceUrl` = strona
 ogłoszenia (`/mo-client-board/bzp/notice-details/id/{objectId}`), `externalId` =
 `noticeNumber`, `tenderId` = identyfikator OCDS postępowania (brak, pusty, nie-tekst, dłuższy
 niż 200 znaków, z niepoprawnym Unicode albo ze znakami sterującymi → `null`, bez odrzucania
 rekordu), daty tylko w ścisłym formacie UTC (niepoprawna data publikacji lub terminu →
 odrzucenie), lokalizacja = siedziba zamawiającego (miasto + województwo ze statycznej mapy
 kodów `PLxx`, nieznany kod → brak województwa), kategorie = kody CPV w kolejności publikacji
-bez duplikatów, `status` = `open`/`closed` względem `fetchedAt` albo `unknown` bez terminu;
-opis, kontakt i wartość — `null` (brak pól strukturalnych; kontakt, a czasem wartość, bywają
-tylko w odrzucanym `htmlBody` — kandydat na „HTML → tekst” w PR-03).
+bez duplikatów (kategorie MVP z `mvpCategoriesForCpv` liczy dopiero matching, nie zapis;
+D-022), powiat nigdy nie jest wyprowadzany (BZP go nie podaje), `status` = `open`/`closed`
+względem `fetchedAt` albo `unknown` bez terminu.
+**Szczegóły ofert z `htmlBody` (PR-03C, D-022):** lista nie ma pól strukturalnych dla opisu,
+kontaktu i wartości, więc `src/sources/bzp/notice-body.ts` (`extractNoticeDetails`) czyta je z
+`htmlBody` oferty tym samym liniowym skanerem (`src/sources/normalize/html-text.ts`) po
+etykietach formularza (osobne dla `ContractNotice` i `SmallContractNotice`; pole kończy się na
+następnej numerowanej etykiecie o numerze równym lub wyższym niż etykieta pola albo na
+„SEKCJA …”): opis — wszystkie wystąpienia „Krótki opis przedmiotu zamówienia”, linie
+zachowane, ≤ 10 000 znaków (dłuższy ucięty na granicy słowa z „…”); kontakt — pierwsze
+wystąpienie e-maila i telefonu, poprawne → `email`/`phone`, inne → `raw` (telefon bez cyfry
+pomijany), brak obu → `null`; wartość — dokładnie jedna etykieta, ścisły format kwoty (część
+ułamkowa 1, 2 lub 4 cyfry), różna od zera, i jednoznaczna waluta, inaczej wartość i waluta
+`null`. Brakujący,
+nie-tekstowy, za długi lub niedomknięty `htmlBody` nie odrzuca oferty — te trzy pola są
+wtedy `null`. `BzpNotice` niesie tylko wyciągnięte wartości; HTML nie jest zapisywany ani
+logowany.
 **Zmiany ogłoszeń BZP (PR-03B, D-015):** BZP publikuje je jako osobne `NoticeUpdateNotice`
 (własny `noticeNumber`, powiązanie z pierwotnym ogłoszeniem tylko przez `tenderId`, nowy
 termin tylko w `htmlBody`). Rekord jest rozpoznawany po własnym `noticeType`; dla zmiany
 ekstrakcja czyta `noticeNumber`, `publicationDate`, `tenderId` i `htmlBody` (≤ 1 000 000
 znaków, dłuższy → odrzucenie). `src/sources/bzp/notice-update.ts` (`extractDeadlineChange`)
-czyta `htmlBody` liniowo jako tekst między znacznikami (bez komentarzy, `<script>`, `<style>`
+czyta `htmlBody` liniowo jako tekst między znacznikami (skaner `src/sources/normalize/html-text.ts`; bez komentarzy, `<script>`, `<style>`
 i atrybutów; niedomknięty znacznik, komentarz, `<script>` lub `<style>` → odrzucenie;
 normalizacja NFC tylko segmentów ≤ 256 znaków, bo jest kwadratowa w ciągu znaków łączących, a
 dłuższy segment i tak nie może być etykietą ani datą) i zwraca tylko nowy termin z bloku „3.4.1.)” / „8.1. Termin składania ofert” /
-„Po zmianie:” (`YYYY-MM-DD HH:MM` Europe/Warsaw → UTC, `src/sources/warsaw-time.ts`; godzina
+„Po zmianie:” (`YYYY-MM-DD HH:MM` Europe/Warsaw → UTC, `src/sources/normalize/warsaw-time.ts`; godzina
 pominięta lub powtórzona przy zmianie czasu → odrzucenie), gdy zmieniane ogłoszenie to
 „Ogłoszenie o zamówieniu” (sekcja 3.1). Inna zmiana → `change.kind = "none"` ze stałym
 powodem; niejednoznaczna lub niepoprawna → odrzucenie ze stałym powodem. HTML nie jest
@@ -370,7 +388,11 @@ Czysta funkcja, deterministyczna, bez I/O i bez LLM. Punkt wyjścia reguł (do k
 
 Każda przyznana/odjęta wartość generuje `MatchReason` (co, gdzie znaleziono), który trafia do
 e-maila jako „dlaczego pasuje”. Dopasowanie tekstu po normalizacji (małe litery, usunięcie
-diakrytyków tylko do porównań, granice słów).
+diakrytyków tylko do porównań, granice słów). Czyste helpery do tego już są (PR-03C, D-022):
+`comparableText`, `normalizeVoivodeship`/`normalizeCounty` i `mvpCategoriesForCpv` w
+`src/sources/normalize/`. Zasada zależności (§2) mówi, że `matching` zależy tylko od
+`domain`, więc PR-04 musi zdecydować, czy importuje je stamtąd (wyjątek wpisany do DECISIONS),
+czy przenosi do wspólnego miejsca.
 
 ### 4.5 Notifications (PR-05)
 
@@ -473,9 +495,15 @@ kolejności pól: `issuerName`, `title`, `description`, `location`, `publishedAt
 źródła. `null`, `""` i brak pola dają różne hashe (brak = para pominięta). Nie obejmuje
 `fetchedAt` (kiedy patrzyliśmy to nie treść) ani `sourceId` (jest w fingerprincie). Zmiana
 listy pól lub kodowania zmienia hash każdego wiersza, ale `updated` dostaną tylko wiersze
-pobrane ponownie. Codzienny cron pobiera tylko wczorajszy dzień, więc starsze wiersze nie są
-ani oznaczane jako `updated`, ani uzupełniane, dopóki operator nie uruchomi
-`ingest --date …` dla tych dni. To akceptowalne, ale wymaga wpisu w DECISIONS.
+pobrane ponownie. Codzienny cron (nadrabianie, D-021) pobiera tylko dni z okna 31 dni
+kończącego się wczoraj, których żaden przebieg jeszcze nie pokrył; dni pokryte nie są pobierane
+ponownie, więc ich wiersze nie są ani oznaczane jako `updated`, ani uzupełniane, dopóki
+operator nie uruchomi dla tych dni `ingest --date …` albo `--from/--to`. To akceptowalne, ale wymaga wpisu w DECISIONS.
+PR-03C (D-022) nie zmienia listy pól ani kodowania `content_hash`, ale wiersze BZP zapisane
+wcześniej dostają wartości w `description`, `contact`, `estimatedValue` i `currency`: po
+ponownym pobraniu są raz `updated`, potem `unchanged`; termin ustawiony przez ogłoszenie o
+zmianie zostaje (PR-03B AC4, D-016 — uzupełnienie). Wiersze niepobrane ponownie mają w tych
+polach `null`, dopóki operator nie uruchomi dla ich dni `ingest --date …` albo `--from/--to`.
 
 **Wykrywanie zmian (PR-03A, D-017):** `ingestOpportunity` = ten sam `INSERT … ON CONFLICT
 (fingerprint) DO UPDATE`, ale z warunkiem `WHERE opportunities.source_id = excluded.source_id

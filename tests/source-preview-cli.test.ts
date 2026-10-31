@@ -169,14 +169,17 @@ describe("source:preview", () => {
       issuerName: "Zespół Żłobków m.st W-wy",
       title:
         "Dostawa zabawek dla dzieci od pierwszego dnia życia, w formie miękkiej przytulanki do Zespołu Żłobków m.st Warszawy - II procedura",
-      description: null,
+      // Read from htmlBody (D-022); the exact text is pinned in bzp-adapter.test.ts.
+      description: expect.stringMatching(
+        /^1\. Przedmiotem zamówienia jest dostawa zabawek dla dzieci[^<]*rodzaju wyrobów\.$/u,
+      ) as string,
       location: { city: "Warszawa", voivodeship: "mazowieckie" },
       publishedAt: "2026-10-29T04:21:51.790Z",
       deadline: "2026-11-06T08:00:00.000Z",
-      estimatedValue: null,
-      currency: null,
+      estimatedValue: "181300",
+      currency: "PLN",
       categories: ["37520000-9", "39294100-0"],
-      contact: null,
+      contact: { email: "kontakt@example.invalid" },
       fetchedAt: NOW.toISOString(),
       status: "open",
     });

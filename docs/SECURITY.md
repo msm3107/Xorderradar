@@ -135,6 +135,18 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
   nieznormalizowany, więc koszt jest liniowy w długości treści; z treści wychodzi wyłącznie jedna data; HTML nie jest zapisywany ani logowany, powody
   odrzuceń/pominięć są stałe. Testy: wrogie treści i przypadki 1 000 000 znaków (w tym długie
   ciągi znaków łączących U+0316/U+0301).
+- `htmlBody` ofert BZP (`ContractNotice`, `SmallContractNotice`; od PR-03C, D-022): ten sam
+  skaner (`src/sources/normalize/html-text.ts`) i ten sam limit 1 000 000 znaków, ale
+  brakujący, za długi lub niedomknięty `htmlBody` **nie odrzuca oferty** — opis, kontakt i
+  wartość są wtedy `null`. Po skanie jedno przejście po segmentach na pole, zbierające
+  ograniczoną ilość tekstu (opis ≤ 10 000, kontakt ≤ 500, wartość ≤ 100 znaków); wyrażenia
+  regularne tylko na ograniczonych ciągach. Z treści wychodzą wyłącznie te trzy pola (tekst
+  bez HTML; znaki sterujące `\p{Cc}` — C0, DEL, C1 z NEL U+0085 — zamienione na spację,
+  znaki sterujące kierunkiem tekstu U+061C, U+200E, U+200F, U+202A–U+202E, U+2066–U+2069 i
+  znaki zerowej szerokości U+200B–U+200D, U+2060, U+FEFF usunięte) — HTML nie jest zapisywany ani logowany, powód braku
+  szczegółów nie jest logowany. Kontakt: tylko e-mail i telefon z pól kontaktowych
+  formularza (pierwszy zamawiający), bez imion i nazwisk, bez wzbogacania (§7). Testy:
+  wrogie treści po 1 000 000 znaków (`tests/bzp-notice-body.test.ts`).
 
 ## 9. SQL injection protection _(od PR-01)_
 
