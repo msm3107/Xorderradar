@@ -246,7 +246,8 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
       `htmlBody` nie jest zapisywana ani logowana — z niej wychodzi wyłącznie sparsowany
       termin. `submittingOffersDate` ogłoszenia o zmianie jest zawsze `null` i nie jest
       używane.
-    - **Parsowanie `htmlBody`** (`src/sources/bzp/notice-update.ts`): liniowy przegląd tekstu
+    - **Parsowanie `htmlBody`** (`src/sources/bzp/notice-update.ts`; od PR-03C skaner jest
+      wspólny — `src/sources/normalize/html-text.ts`, zachowanie bez zmian, D-022): liniowy przegląd tekstu
       między znacznikami (komentarze, `<script>`, `<style>` i atrybuty pomijane; kilka encji
       dekodowanych; normalizacja NFC tylko segmentów ≤ 256 znaków — jest kwadratowa w ciągu
       znaków łączących, a dłuższy segment nie może być etykietą ani datą, więc zostaje
@@ -258,7 +259,8 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
       tylko, gdy to dokładnie „Ogłoszenie o zamówieniu” (inaczej pominięcie
       `not_contract_notice_change`). Zmiana terminu = blok po nagłówku „3.4.1.)” z etykietą
       „8.1. Termin składania ofert”; nowa wartość = tekst po „Po zmianie:” w formacie
-      `YYYY-MM-DD HH:MM` czasu Europe/Warsaw, przeliczony na UTC (`src/sources/warsaw-time.ts`).
+      `YYYY-MM-DD HH:MM` czasu Europe/Warsaw, przeliczony na UTC (`src/sources/normalize/warsaw-time.ts`, od PR-03C; wcześniej
+      `src/sources/warsaw-time.ts`).
       Brak takiego bloku → pominięcie `no_deadline_change`; dwa bloki → odrzucenie
       `ambiguous deadline change`; wartość brakująca, powtórzona, w innym formacie, niemożliwa
       w kalendarzu albo niejednoznaczna przy zmianie czasu (godzina pominięta lub powtórzona)
@@ -326,11 +328,11 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
   `location` = **siedziba zamawiającego** (`organizationCity` + województwo ze statycznej mapy
   kodów `organizationProvince` `PL02`…`PL32` zgodnej z oficjalnym słownikiem
   `/mo-board/api/v1/glossary?glossaryType=province`; nieznany kod → brak województwa), a nie
-  miejsce realizacji — lista API go nie podaje. `description`, `contact`, `estimatedValue`,
-  `currency` = `null`: lista API nie ma dla nich pól strukturalnych; opis i kontakt (np.
-  e-mail zamawiającego), a czasem wartość zamówienia (np. „Wartość zamówienia: 181300 PLN”)
-  bywają tylko w `htmlBody` (pełny HTML ogłoszenia, którego parsowanie jest poza zakresem
-  PR-02 — nie przechowujemy go; kandydat na „HTML → tekst” w PR-03). `status`: `open`, gdy termin > `fetchedAt`; `closed`, gdy termin minął;
+  miejsce realizacji — lista API go nie podaje; `location.county` zostaje puste (BZP nie
+  podaje powiatu, D-022). `description`, `contact`, `estimatedValue`, `currency` — lista API
+  nie ma dla nich pól strukturalnych; do PR-03C były `null`, **od PR-03C pochodzą z `htmlBody`**
+  ogłoszenia (D-022; brak lub nieczytelny `htmlBody` → `null`, bez odrzucania rekordu).
+  `status`: `open`, gdy termin > `fetchedAt`; `closed`, gdy termin minął;
   `unknown` bez terminu. Rekord z niepoprawnym polem jest odrzucany z powodem — nic nie jest
   zgadywane ani przycinane.
 - **Odrzucone alternatywy:** Baza Konkurencyjności (funduszeeuropejskie) — aplikacja SPA z
@@ -392,6 +394,14 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
   `status` jest częścią `contentHash`, a BZP wylicza go z `fetchedAt` (termin minął →
   `closed`): ponowne pobranie ogłoszenia po upływie terminu da jednorazowo `updated`. To
   zamierzone — zmienił się zapisany stan oferty.
+- **Uzupełnienie (PR-03C, D-022):** lista pól i kodowanie `contentHash` się nie zmieniają, ale
+  oferty BZP mają teraz wartości w `description`, `contact`, `estimatedValue` i `currency`
+  (z `htmlBody`). Wiersze zapisane przed PR-03C, pobrane ponownie (nadrabianie, backfill,
+  `--date`), dostają nowy hash i stają się **jednorazowo `updated`** (uzupełnione o te pola);
+  kolejne pobranie bez zmian → `unchanged`. Termin ustawiony przez ogłoszenie o zmianie
+  zostaje (D-015, PR-03B AC4) — test integracyjny
+  `updates a row once when its notice gains htmlBody details, keeping an applied deadline`.
+  Wierszy niepobranych ponownie to nie dotyczy — zostają z `null`.
 
 ## D-017 — `unchanged` nie zapisuje niczego; brak `last_seen_at`
 
@@ -595,3 +605,135 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
   zwykle kończy się szybkim błędem HTTP, nie pełnym timeoutem. Kolejny cron w trakcie długiego nadrabiania kończy się `skipped`
   (`lock_busy`, kod 0). Granica dnia to UTC, jak dotąd (D-015, otwarte pytanie o granicę dnia
   w API).
+
+## D-022 — Helpery normalizacji i szczegóły ofert BZP z `htmlBody`
+
+- **Status:** Accepted (PR-03C, decyzje koordynatora na podstawie fixture'ów 2026-10-29)
+- **Kontekst:** lista API BZP nie ma pól strukturalnych dla opisu, kontaktu i wartości
+  zamówienia (D-015) — są tylko w `htmlBody` ogłoszenia (pełny HTML formularza). Matching
+  (PR-04) potrzebuje też wspólnych reguł porównywania tekstu, województw/powiatów i słownika
+  kategorii.
+- **Decyzja:**
+  - **Moduł `src/sources/normalize/`** — czyste funkcje, bez I/O:
+    - `whitespace.ts`: `collapseWhitespace` (każdy ciąg białych znaków Unicode, także NBSP i
+      wąska NBSP → jedna spacja, przycięte) i `cleanText` (tekst do zapisu; dodatkowo:
+      znaki sterujące `\p{Cc}` — C0, DEL i C1, także NEL U+0085 — → spacja, a znaki
+      sterujące kierunkiem tekstu U+061C, U+200E, U+200F, U+202A–U+202E, U+2066–U+2069 oraz
+      znaki zerowej szerokości U+200B–U+200D, U+2060, U+FEFF usuwane bez śladu, więc słowo
+      ich zawierające zostaje jednym słowem; U+FEFF jest już w skanerze zamieniany na spację,
+      jak każdy biały znak `\s`);
+    - `html-text.ts`: liniowy skaner HTML → segmenty tekstu, przeniesiony bez zmian
+      zachowania z `bzp/notice-update.ts` (PR-03B, D-015) — każdy znacznik kończy segment,
+      komentarze i `<script>`/`<style>` pomijane, kilka encji dekodowanych, NFC tylko dla
+      segmentów ≤ 256 znaków, niedomknięta konstrukcja → `complete = false`;
+    - `comparable.ts`: `comparableText` — tekst **tylko do porównań** (nigdy do zapisu):
+      małe litery, bez diakrytyków (także `ł` → `l`), zwinięte białe znaki; znaki łączące
+      usuwane przed NFD (liniowo także dla wrogiego wejścia);
+    - `regions.ts`: 16 kanonicznych nazw województw (`VOIVODESHIPS`, jak w mapie
+      `bzpProvinces`) i `normalizeVoivodeship` — wielkość liter, prefiks „woj.”/„województwo”,
+      brak polskich znaków, spacje wokół łącznika → nazwa kanoniczna, inaczej `null` (bez
+      dopasowania przybliżonego); `normalizeCounty` — usuwa prefiks „powiat”/„pow.”, zwija
+      białe znaki, małe litery (polskie znaki zostają), pusty lub dłuższy niż 100 → `null`.
+      **Bez słownika 380 powiatów** (YAGNI): wynik służy tylko porównaniu profilu z zapisaną
+      lokalizacją w PR-04. BZP nie podaje powiatu (NUTS 3 to podregion), więc
+      `location.county` ofert BZP zostaje puste — nie wyprowadzamy go;
+    - `cpv-categories.ts`: `mvpCategoriesForCpv(codes)` — kody CPV → zamknięta lista
+      kategorii MVP (`bhp`, `elektryka`, `instalacje`, `it`, `ppoz`, `remonty`, `serwis`,
+      `sprzatanie`, `szkolenia`, `wyposazenie`), posortowane, bez powtórzeń; tylko kody
+      `^\d{8}-\d$`; kod może należeć do kilku kategorii; nieznany → `[]`;
+    - `warsaw-time.ts`: przeniesiony z `src/sources/` bez zmian.
+  - **Słownik CPV → MVP** (prefiksy 8 cyfr kodu; **punkt startowy do kalibracji** na
+    prawdziwych ofertach i profilach, zmiana nie wymaga migracji ani ponownego ingestu):
+
+    | Kategoria   | Prefiksy CPV                                       |
+    | ----------- | -------------------------------------------------- |
+    | elektryka   | 4531, 31, 50532, 50711, 50232                      |
+    | instalacje  | 4530, 4533, 4535                                   |
+    | ppoz        | 453121, 45343, 3511, 316252, 44480, 504132, 713171 |
+    | szkolenia   | 804, 805                                           |
+    | bhp         | 713172, 80550, 181, 351134                         |
+    | sprzatanie  | 909, 9061                                          |
+    | it          | 72, 48, 302, 50312, 5032                           |
+    | remonty     | 454                                                |
+    | serwis      | 50                                                 |
+    | wyposazenie | 391, 392                                           |
+
+    `4530` obejmuje tylko kod nadrzędny 45300000 (roboty instalacyjne w budynkach); `50232`
+    (konserwacja oświetlenia publicznego i sygnalizacji świetlnej) należy też do `serwis` przez `50`. Celowo poza
+    słownikiem: `0931` (dostawy energii elektrycznej — zakup energii, nie prace elektryczne;
+    test) oraz szersze prefiksy robót budowlanych (`45`, `452`).
+
+  - **`categories` dalej przechowuje kody CPV ze źródła** (weryfikowalne). Słownik jest
+    stosowany w czasie dopasowania (PR-04), nie przy zapisie: strojenie słownika działa od
+    razu i nie zmienia `content_hash`. Bez zmiany schematu i bez migracji.
+  - **BZP `htmlBody` ofert** (`ContractNotice`, `SmallContractNotice`;
+    `src/sources/bzp/notice-body.ts`): czytany raz w ekstrakcji (po walidacji pól listy);
+    `BzpNotice` niesie tylko wyciągnięte wartości (`details`), nigdy HTML; nic z `htmlBody`
+    nie jest zapisywane ani logowane poza tymi wartościami. Brakujący, nie-tekst, dłuższy niż
+    1 000 000 znaków albo niedomknięty (`complete = false`) `htmlBody` **nie odrzuca
+    oferty**: pola z `htmlBody` są `null`, reszta mapowania bez zmian. Powód nie jest
+    logowany (świadomie — bez nowych pól raportu; treść nigdy nie trafia do logów).
+    - **Etykiety** (dokładny segment, z dwukropkiem lub bez): opis „4.2.2.) Krótki opis
+      przedmiotu zamówienia” / „3.3.)”; telefon „1.5.7.) Numer telefonu” / „1.4.7.)”; e-mail
+      „1.5.9.) Adres poczty elektronicznej” / „1.4.9.)”; wartość „4.1.5.) Wartość zamówienia”
+      / „3.4.) Wartość”; waluta osobno tylko w małych zamówieniach „3.5) Kod waluty”. Pole
+      kończy się na nagłówku „SEKCJA …” albo na następnej numerowanej etykiecie formularza
+      (`^(\d{1,3}(?:\.\d{1,3})+)\.?\)(?:\s|$)` na prefiksie 40 znaków, np. „4.2.6.)”,
+      „3.5)”) o numerze **równym lub wyższym** niż numer etykiety pola (porównanie
+      leksykograficzne liczb: 4.2.2 → kończy 4.2.3, 4.2.10, 4.3, 5.1, 4.2.2.1 i ponowne
+      4.2.2 — kolejna część; 3.3 → 3.4 i wyżej). W obrębie czytanych pól formularz numeruje
+      etykiety rosnąco (po 4.2.2 jest 4.2.6, po 3.3 jest 3.4/3.5), więc linia opisu o niższym
+      numerze („1.1) roboty ziemne”, „2.1.) …”, „1.1.1.) …” w 4.2.2) jest treścią pola, nie
+      etykietą. Linie „1. …”, „2.1 …”, „1) …”, „14.1.Wykonawca…” w ogóle nie pasują do
+      wzorca. **Znane ograniczenie:** linia opisu numerowana równo lub
+      wyżej niż etykieta (np. „5.1) …” albo „4.2.3) …” w 4.2.2) nadal kończy pole — opis jest
+      wtedy krótszy, bez treści innego pola. Odwrotnie: etykieta o niższym numerze tuż po
+      polu (w zarejestrowanym formularzu nie występuje — po 4.2.2 jest 4.2.6, po 3.3 jest
+      3.4 albo 3.5) zostałaby linią opisu.
+    - **Opis:** wszystkie wystąpienia etykiety (np. części) w kolejności, rozdzielone pustą
+      linią; w jednym wystąpieniu każdy segment tekstu to linia (`\n`), białe znaki zwinięte,
+      tekst oczyszczony przez `cleanText` (znaki `\p{Cc}` → spacja, znaki kierunku tekstu i
+      zerowej szerokości usunięte — lista wyżej; tak samo e-mail, telefon i `raw`). Dłuższy
+      niż 10 000 znaków → ucięty na granicy słowa (bez rozcinania pary surogatów; pojedyncze
+      słowo dłuższe od limitu — twardo) z „…”, razem ≤ 10 000. Brak, pusty albo niepoprawny
+      dla `text(10_000)` → `null`.
+    - **Kontakt:** tylko **pierwsze** wystąpienie etykiety e-maila i telefonu (przy wspólnym
+      zamówieniu kolejni zamawiający są dalej; pierwszy prowadzi postępowanie). Poprawny
+      e-mail (`emailSchema`) → `email` małymi literami, telefon ≤ 50 znaków → `phone`; inna
+      treść (np. kilka adresów, „(at)”, długi telefon) → `raw` (łączone „; ”, ≤ 500 —
+      wartość, która by się nie zmieściła, jest pomijana, nie przycinana). Pole telefonu bez
+      ani jednej cyfry („-”, „brak”) nie niesie numeru i jest pomijane (także w `raw`). Bez
+      imienia i nazwiska, bez wzbogacania. Brak obu → `contact = null`.
+    - **Wartość:** dokładnie jedno wystąpienie etykiety wartości; blok (≤ 100 znaków) w ścisłym
+      formacie: cyfry albo grupy po 3 cyfry rozdzielone spacją/NBSP (pierwsza grupa bez zera
+      wiodącego), opcjonalna część ułamkowa po „,” lub „.” z **1, 2 albo 4** cyframi,
+      opcjonalny 3-literowy kod waluty w tym samym bloku. Waluta = kod z bloku i/lub
+      „Kod waluty” (tylko przy dokładnie jednym wystąpieniu, wartość `^[A-Z]{3}$`); oba
+      muszą się zgadzać. Zera wiodące usuwane, wynik musi przejść `decimalAmountSchema` i
+      `currencySchema`. **Opublikowane zero** („0”, „0,00”, „000”, „0,00 PLN”) →
+      `estimatedValue = currency = null`: szacunkowa wartość 0 nie niesie informacji i może
+      być wypełniaczem, więc jest traktowana jak niepodana (brak wartości nigdy nie jest
+      zerem — MASTER_PROMPT §9; decyzja koordynatora w PR-03C). Cokolwiek innego (brak, kilka,
+      niejednoznaczne, poza zakresem, brak waluty) → `estimatedValue = currency = null`.
+      **Doprecyzowanie względem AC3:** część ułamkowa z dokładnie 3 cyframi („1.500”,
+      „1,500”) jest odrzucana — może być separatorem tysięcy, a błędny odczyt dałby wartość
+      1000 razy za małą; więcej niż 4 cyfry też → `null` (bez zaokrąglania).
+    - **Liniowość:** jeden skaner (`html-text.ts`), potem jedno przejście po segmentach na
+      pole, zbierające ograniczoną ilość tekstu; wyrażenia regularne tylko na ograniczonych
+      ciągach (prefiks 40 znaków, blok wartości). Testy na 1 000 000 znaków wrogiego wejścia.
+- **Odrzucone alternatywy:** zapis kategorii MVP w bazie (zmiana słownika wymagałaby
+  ponownego ingestu i zmieniałaby `content_hash`); słownik powiatów (BZP go nie potrzebuje);
+  parser DOM/biblioteka HTML (nowa zależność; liniowy skaner wystarcza dla formularza BZP);
+  przechowywanie `htmlBody` (rozmiar, dane osobowe, brak potrzeby).
+- **Konsekwencje:**
+  - `content_hash` ofert BZP się zmienia: ponownie pobrane wiersze stają się jednorazowo
+    `updated` (D-016, uzupełnienie); terminy ustawione przez ogłoszenia o zmianie zostają
+    (PR-03B AC4).
+  - Etykiety muszą być osobnym segmentem (tak jest w zarejestrowanym formularzu); zmiana
+    szablonu BZP (inna numeracja, etykieta i wartość w jednym elemencie) da `null` wartości i
+    kontaktu, nigdy błędną wartość. Opis może wtedy być niepełny albo za długi: bez
+    numerowanych etykiet ciągnie się do następnego nagłówka „SEKCJA …” albo do limitu
+    10 000 znaków. Znacznik wewnątrz akapitu (np. `<strong>`) dzieli linię opisu na kilka
+    linii — znane ograniczenie skanera.
+  - Miejsce realizacji zamówienia (inne niż siedziba zamawiającego) i ogłoszenia o
+    unieważnieniu pozostają poza zakresem.

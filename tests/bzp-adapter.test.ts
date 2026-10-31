@@ -88,6 +88,18 @@ function expectCandidate(result: NormalizeResult): OpportunityCandidate {
   return result.candidate;
 }
 
+/** "4.2.2.) Krótki opis przedmiotu zamówienia" of 2026/BZP 00507107/01, one line per paragraph line. */
+const FIRST_DESCRIPTION = [
+  "1. Przedmiotem zamówienia jest dostawa zabawek dla dzieci od pierwszego dnia życia, w formie miękkiej przytulanki, do Zespołu Żłobków m.st Warszawy - II procedura.",
+  "2. Szczegółowy opis przedmiotu zamówienia stanowi załącznik nr 9 do SWZ.",
+  "3. Wspólny Słownik Zamówień (CPV):",
+  "37520000-9 Zabawki",
+  "39294100-0 Artykuły informacyjne i promocyjne",
+  "4. Zamawiający wymaga udzielenia przez Wykonawcę gwarancji jakości na dostarczony przedmiot zamówienia na okres co najmniej: 24 miesięcy od daty odbioru przedmiotu umowy.",
+  "5. Zamawiający wymaga, aby oferowana maskotka dla niemowlaka o charakterze przytulanki sensorycznej spełniała wymagania w zakresie bezpieczeństwa i ochrony zdrowia wynikające z obowiązujących przepisów prawa krajowego oraz Unii Europejskiej. Produkt musi być przeznaczony do użytkowania przez noworodki i niemowlęta od pierwszych dni życia (0+) oraz spełniać wymagania określone dla zabawek w szczególności w dyrektywie Parlamentu Europejskiego i Rady 2009/48/WE w sprawie bezpieczeństwa zabawek oraz przepisach wdrażających tę dyrektywę do prawa krajowego, a także wymagania normy PN-EN 71 w częściach właściwych dla oferowanego produktu.",
+  "6. Wykonawca zobowiązuje się dostarczyć przedmiot zamówienia jako fabrycznie nowy, wolny od wad fizycznych i prawnych, wykonany zgodnie z obowiązującymi przepisami prawa, wymaganiami technicznymi oraz normami mającymi zastosowanie do danego rodzaju wyrobów.",
+].join("\n");
+
 describe("bzpAdapter.extract + normalize on captured responses", () => {
   it("maps the first contract notice exactly", () => {
     const [first] = candidatesOf(fixtureDocument(PAGE1));
@@ -99,14 +111,15 @@ describe("bzpAdapter.extract + normalize on captured responses", () => {
       issuerName: "Zespół Żłobków m.st W-wy",
       title:
         "Dostawa zabawek dla dzieci od pierwszego dnia życia, w formie miękkiej przytulanki do Zespołu Żłobków m.st Warszawy - II procedura",
-      description: null,
+      // From htmlBody (D-022): 4.2.2.) description, 1.5.9.) e-mail, 4.1.5.) "181300 PLN".
+      description: FIRST_DESCRIPTION,
       location: { city: "Warszawa", voivodeship: "mazowieckie" },
       publishedAt: new Date("2026-10-29T04:21:51.790Z"),
       deadline: new Date("2026-11-06T08:00:00.000Z"),
-      estimatedValue: null,
-      currency: null,
+      estimatedValue: "181300",
+      currency: "PLN",
       categories: ["37520000-9", "39294100-0"],
-      contact: null,
+      contact: { email: "kontakt@example.invalid" },
       fetchedAt: FETCHED_AT,
       status: "open",
     });
@@ -172,14 +185,15 @@ describe("bzpAdapter.extract + normalize on captured responses", () => {
       tenderId: null,
       issuerName: "Rudzki Zakład Aktywności Zawodowej",
       title: "dostawa środków piorących i dezynfekujących",
-      description: null,
+      // From htmlBody (D-022): 3.3.), 1.4.9.) + 1.4.7.), 3.4.) "153812,40" + 3.5) "PLN".
+      description: "dostawa środków piorących i dezynfekujących na potrzeby pralni",
       location: { city: "Ruda Śląska", voivodeship: "śląskie" },
       publishedAt: new Date("2026-10-29T07:55:58.274Z"),
       deadline: new Date("2026-11-04T11:00:00.000Z"),
-      estimatedValue: null,
-      currency: null,
+      estimatedValue: "153812.40",
+      currency: "PLN",
       categories: [],
-      contact: null,
+      contact: { email: "kontakt@example.invalid", phone: "000 000 000" },
       fetchedAt: FETCHED_AT,
       status: "open",
     });
@@ -228,6 +242,44 @@ describe("bzpAdapter.extract + normalize on captured responses", () => {
     }
     const candidates = candidatesOf(fixtureDocument(PAGE1));
     expect(JSON.stringify(candidates)).not.toContain("<");
+  });
+
+  it("carries only the values read from htmlBody, never the markup (D-022)", () => {
+    const notices = [PAGE1, PAGE2, SMALL].flatMap((name) =>
+      bzpAdapter.extract(fixtureDocument(name)),
+    );
+    expect(notices).toHaveLength(8);
+    for (const notice of notices) {
+      if (!notice.valid || notice.kind !== "notice") throw new Error("unexpected notice");
+      expect(Object.keys(notice.details).sort()).toEqual(
+        ["contact", "currency", "description", "estimatedValue"].sort(),
+      );
+      expect(notice.details.description).not.toBeNull();
+    }
+    expect(JSON.stringify(notices)).not.toMatch(/[<>]/u);
+    const candidates = [PAGE1, PAGE2, SMALL].flatMap((name) => candidatesOf(fixtureDocument(name)));
+    expect(candidates.map((c) => [c.externalId, c.estimatedValue, c.currency])).toEqual([
+      ["2026/BZP 00507107/01", "181300", "PLN"],
+      ["2026/BZP 00507109/01", null, null],
+      ["2026/BZP 00507112/01", null, null],
+      ["2026/BZP 00507113/01", null, null],
+      ["2026/BZP 00507114/01", null, null],
+      ["2026/BZP 00507115/01", null, null],
+      ["2026/BZP 00507754/01", "153812.40", "PLN"],
+      ["2026/BZP 00507787/01", null, null],
+    ]);
+    expect(candidates.map((c) => c.contact)).toEqual([
+      { email: "kontakt@example.invalid" },
+      { email: "kontakt@example.invalid" },
+      { email: "kontakt@example.invalid" },
+      { email: "kontakt@example.invalid" },
+      { email: "kontakt@example.invalid", phone: "000 000 000" },
+      { email: "kontakt@example.invalid" },
+      { email: "kontakt@example.invalid", phone: "000 000 000" },
+      { email: "kontakt@example.invalid" },
+    ]);
+    // BZP publishes no county (NUTS 3 is a subregion): it is never derived.
+    for (const candidate of candidates) expect(candidate.location).not.toHaveProperty("county");
   });
 
   it("uses the document's fetchedAt for every notice and for the status", () => {
@@ -287,6 +339,45 @@ describe("bzpAdapter.normalize on mutated records", () => {
     });
     expect(expectCandidate(normalizeMutated({ orderObject: "x".repeat(1000) })).title).toHaveLength(
       1000,
+    );
+  });
+
+  it("keeps the offer when htmlBody is missing, not a string, too long or unreadable (D-022)", () => {
+    const withoutDetails = {
+      ...expectCandidate(normalizeMutated({})),
+      description: null,
+      contact: null,
+      estimatedValue: null,
+      currency: null,
+    };
+    const [first] = fixtureRecords(PAGE1);
+    const body = typeof first?.htmlBody === "string" ? first.htmlBody : "";
+    expect(body.length).toBeGreaterThan(0);
+    for (const htmlBody of [
+      undefined,
+      null,
+      42,
+      ["<p>x</p>"],
+      { text: body },
+      // Over the bound by one character: not cut, not read at all.
+      `${body}<!--${"x".repeat(1_000_001 - body.length - 7)}-->`,
+      `${body}<h3`,
+      `${body}<!-- unclosed`,
+      "<<<<",
+      "",
+    ]) {
+      const label = typeof htmlBody === "string" ? htmlBody.slice(-20) : typeof htmlBody;
+      expect(normalizeMutated({ htmlBody }), label).toEqual({
+        ok: true,
+        kind: "opportunity",
+        candidate: withoutDetails,
+      });
+    }
+    // At the bound the body is still read.
+    const atBound = `${body}<!--${"x".repeat(1_000_000 - body.length - 7)}-->`;
+    expect(atBound).toHaveLength(1_000_000);
+    expect(expectCandidate(normalizeMutated({ htmlBody: atBound }))).toEqual(
+      expectCandidate(normalizeMutated({})),
     );
   });
 

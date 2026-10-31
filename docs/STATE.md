@@ -11,7 +11,9 @@ met) → documentation fix round → C&S check PASS → Quality re-review ACCEPT
 PR #6 (head f356815): owner review round (PR #6) implemented → C&S review FAIL (H1 High,
 M1, L1–L2, N1–N3) → fix round → C&S re-review PASS → Quality Review ACCEPT (doc nits applied)
 → owner re-review → **Part B MERGED in PR #6 (merge commit 1990231)**. Part C (normalization
-helpers, `docs/PR_PLAN.md` → PR-03C) in progress.
+helpers, `docs/PR_PLAN.md` → PR-03C) implemented: Code & Safety Review PASS with findings → fix
+round → C&S re-review PASS; Quality Review REJECT (AC7 docs only) → fix rounds → C&S PASS →
+Quality re-review ACCEPT; PR opened for the owner's review (not merged).
 
 ## Completed
 
@@ -108,7 +110,36 @@ helpers, `docs/PR_PLAN.md` → PR-03C) in progress.
 
 ## In progress
 
-**PR-03 — Part B (BZP notice updates + catch-up)** — implemented; Code & Safety Review PASS
+**PR-03 — Part C (normalization helpers; `docs/PR_PLAN.md` → PR-03C)** — implemented; PR opened
+for the owner's review (not merged). D-022 new; D-015/D-016 amended.
+
+- Pure helpers in `src/sources/normalize/`: `whitespace.ts` (`cleanText`: `\p{Cc}` → space,
+  bidi/zero-width characters removed, whitespace collapsed), `html-text.ts` (linear HTML → text
+  scanner, moved from `notice-update.ts` unchanged in behaviour), `comparable.ts` (lower-case,
+  no diacritics incl. ł/Ł, for matching), `regions.ts` (16 voivodeships, `woj.`/`województwo`
+  prefixes, BZP province codes; county only normalized as text, never derived),
+  `cpv-categories.ts` (`mvpCategoriesForCpv`, CPV prefix table → the 10 MVP categories;
+  applied in PR-04, `categories` keep the CPV codes), `warsaw-time.ts` (moved from
+  `src/sources/`).
+- `src/sources/bzp/notice-body.ts`: offers (`ContractNotice`, `SmallContractNotice`) read
+  `htmlBody` (≤ 1 000 000 chars) for description (4.2.2.)/3.3.), parts joined by a blank line,
+  ≤ 10 000 chars cut at a word boundary with "…"), contact (e-mail 1.5.9.)/1.4.9.) lower-cased
+  if valid, otherwise `raw`; phone 1.5.7.)/1.4.7.) ≤ 50 chars and with a digit, otherwise
+  dropped) and estimated value (4.1.5.) or 3.4.) + 3.5) currency; exactly one label, strict
+  format, 3-digit fraction refused, zero → `null`, ambiguous currency → both `null`). A field
+  ends at a "SEKCJA" heading or a form label numbered ≥ its own. An unreadable body never
+  rejects the offer (details `null`).
+- Tests: `tests/normalize.test.ts`, `tests/bzp-notice-body.test.ts`, adapter/preview tests
+  with real values from the fixtures, integration test: a re-fetched row becomes `updated`
+  once, keeps a deadline set by an update notice, then `unchanged`.
+- Reviews: C&S PASS with findings (M1 description cut at "1.1)" lines; L1 control/bidi
+  characters; L2 phone without a digit; L3 published 0) → fix round → C&S re-review PASS;
+  Quality Review REJECT (AC7: ARCHITECTURE did not record the `content_hash` consequence) →
+  fix round (ARCHITECTURE §5, README backfill hint, D-022 wording, `4530` → instalacje,
+  `50232` → elektryka) → C&S PASS with 3 Low (comment wording) → comment fix round → C&S
+  PASS → Quality re-review ACCEPT.
+
+**PR-03 — Part B (BZP notice updates + catch-up)** — MERGED in PR #6 (merge commit 1990231); Code & Safety Review PASS
 with findings → fix round → C&S re-review PASS; Quality Review REJECT (documentation only,
 AC1–AC9 met) → documentation fix round → C&S check PASS → Quality re-review ACCEPT; PR
 opened for the owner's review (not merged). **Owner review round (PR #6) implemented; C&S
@@ -339,26 +370,47 @@ limit 1000 per notice type, 10-min source timeout, streaming), D-019 (advisory l
 (lock busy → skipped, exit 0) and D-020 (readiness = no pending migrations) without new IDs.
 PR-03 Part B: D-015 amended (notice updates: linking by `tenderId` only, older-row rule,
 latest published update wins, provenance columns, skip reasons), D-019 (busy report shape),
-D-021 (ingest day ranges and automatic catch-up).
+D-021 (ingest day ranges and automatic catch-up). PR-03 Part C: D-022 (offer details from
+`htmlBody`, normalization helpers, CPV → MVP dictionary); D-015/D-016 amended (offers read
+`htmlBody`; `content_hash` consequence of the new values).
 
 ## Next action
 
-1. Owner re-reviews PR #6 (PR-03 Part B, with the owner-review round: `htmlBody` ≤ 1 000 000,
-   gap-based catch-up, first-deployment backfill, `skippedReasons`) and merges it. Cosmetic
-   nits left: over-wide `ingest` help lines in `src/cli.ts`; two test titles still say
-   "200 000" (1 000 000 cases exist). Watch live runs for `too_large` on update pages
+1. Owner reviews the PR-03C PR (normalization helpers; offer description/contact/value from
+   `htmlBody`) and merges it. After the merge, backfill still-open offers with
+   `ingest bzp --from … --to …` (≤ 31 days per call, README). Cosmetic nits left from Part B:
+   over-wide `ingest` help lines in `src/cli.ts`; two test titles still say "200 000"
+   (1 000 000 cases exist). Watch live runs for `too_large` on update pages
    (`BZP_PAGE_SIZE` 25 kept; lower it if it happens).
 2. Owner verifies PR-02 AC1 outside the container (command and checklist under Blockers); a
    first live `ingest bzp --date <past weekday>` on the same machine is a useful follow-up
    check (exit 0, `inserted` > 0, a second run all `unchanged`; `skipped` > 0 and some
    `updated` from `NoticeUpdateNotice` when originals of that day's updates are stored).
-3. PR-03 Part C — normalization helpers (`docs/PR_PLAN.md` → PR-03C): whitespace,
-   HTML → text from `htmlBody` (description, contact, value), dates in Europe/Warsaw in
-   general, voivodeships/counties, category dictionary (CPV → MVP categories), invalid
-   published e-mail → `contact.raw` instead of rejecting the notice, pseudonymised HTML
-   fixtures. Note: adding description/contact/value changes `content_hash`, but only rows
-   fetched again become `updated` (D-016); a backfill (`ingest --from/--to`, ≤ 31 days per
-   call) re-ingests the originals and keeps deadlines set by update notices (PR-03B AC4).
+3. Next PR after PR-03C: PR-04 (matching, `docs/ROADMAP.md`). Deferred from the PR-03C
+   reviews, to handle there or when touching the files:
+   - `matching` will depend on `sources/normalize` (`comparableText`, `mvpCategoriesForCpv`) —
+     decide in PR-04 whether to move the shared helpers to a neutral module (C&S L6).
+   - Soft hyphen (U+00AD) and other `\p{Cf}` characters are kept by `cleanText` and not
+     ignored by `comparableText`, so "oświe\u00adtlenie" does not match "oświetlenie" — handle
+     in `comparableText` (PR-04).
+   - CPV → MVP dictionary calibration (D-022 calls it a starting point): `remonty` is only
+     `454` (misses `45000000`, `4526` roofs/masonry, `45262700` przebudowa); `serwis` = all of
+     `50` also catches vehicle/ship/aircraft repair (`501`/`502`); candidates `324` (it),
+     `397`/`301` (wyposazenie). Do not map bare `45`/`452`; general construction must be
+     matched by title/description keywords.
+   - Small contracts have no CPV in the listing or in `htmlBody` (both captured ones), so PR-04
+     must match them on title + description keywords.
+   - The long description (≤ 10 000 chars) is for matching/detail; PR-05 should show a short
+     snippet in the digest.
+   - Field boundaries (D-022, C&S L-a): a description line numbered ≥ its label (e.g. "4.3)"
+     inside 4.2.2) ends the field early — shorter description, never wrong data. Refine to
+     boundaries within the same top-level section only if real notices show it.
+   - The multi-part `ContractNotice` layout (repeated 4.2.2 per part) is inferred, not
+     captured: capture one pseudonymised multi-part notice as a fixture and confirm.
+   - `pnpm audit`: 1 moderate, dev-only (GHSA-g3hv-75wg-m249, minimatch < 11.0.1 via eslint;
+     patterns come from repo config only) — upgrade when eslint ships a fixed release.
+   - D-016 "Konsekwencje" still describes the pre-D-021 cron ("tylko wczorajszy dzień") as a
+     historical record; optionally add a pointer to D-021 in a later docs pass.
 4. Open points carried from D-015/PR-02 for PR-03: whether the API's publication-day boundary
    is UTC or Polish time (cron at ~06:00 Europe/Warsaw ingests yesterday UTC; overlapping days
    are harmless thanks to dedup) — verify on the first live runs.
@@ -439,9 +491,9 @@ Notes from Part B (for later PRs):
   deadline). A second source is a condition of product value for small firms (ROADMAP), and
   PR-04 matching must use title keywords (see the CPV gap below).
 - Gaps handed to later PRs (Quality Review of Part B):
-  - `htmlBody` (dropped in Part B) contains the buyer's contact e-mail and sometimes the order
-    value (e.g. "Wartość zamówienia: 181300 PLN") — candidate for the PR-03 "HTML → text" step
-    (description, contact, value); there is no structured value field in the listing.
+  - ~~`htmlBody` contains the buyer's contact and sometimes the order value~~ — done in
+    PR-03C: offers store description, contact and estimated value + currency from `htmlBody`
+    (D-022).
   - CPV → MVP category mapping is still open; both captured small contracts have an empty
     `cpvCode`, so category matching may also need title keywords (PR-03/04).
   - `location` is the buyer's seat, not the place of performance — PR-04 region matching must
@@ -470,8 +522,8 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
     ARCHITECTURE §5). Enforce the vocabulary when the category dictionary and the operator
     profile command are added.
 - From the owner's PR-01 GitHub review (rules for later PRs):
-  - **PR-03 normalizer:** a published contact e-mail that fails `emailSchema` (IDN domain,
-    trailing dot) goes to `contact.raw` as published — it must not reject the whole notice.
+  - ~~**PR-03 normalizer:** a published contact e-mail that fails `emailSchema` goes to
+    `contact.raw` as published — it must not reject the whole notice~~ — done in PR-03C.
   - **PR-03:** compute the fingerprint and `content_hash` from the validated draft (canonical
     `sourceUrl`), not from raw adapter input.
   - **PR-02:** `base_url` is a stored display link (IP literals / port 0 are accepted by the
@@ -494,6 +546,15 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-10-31, PR-03 Part C after the Quality re-review (Node 22, pnpm 10.28.0, PostgreSQL 16):
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 896/896 tests passed (28 files; before PR-03C: 774 in 26
+files). No dependency changes, no live network calls (captured fixtures only). Existing tests
+changed only for the `warsaw-time` import path and where offers now carry real
+description/contact/value (`tests/bzp-adapter.test.ts`, `tests/source-preview-cli.test.ts`:
+expected `null` → fixture values). Working-tree fingerprint unchanged across every reviewer
+run.
 
 2026-10-30, PR-03 Part B after the Quality Review of the owner-review round (coordinator doc
 nits only; README, DECISIONS D-021, STATE):
