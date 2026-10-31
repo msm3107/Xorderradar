@@ -14,7 +14,10 @@
 > normalizacji (`src/sources/normalize/`: białe znaki, HTML → tekst, tekst do porównań, daty
 > Europe/Warsaw, województwa/powiaty, CPV → kategorie MVP) oraz opis, kontakt (z fallbackiem
 > do `contact.raw`) i wartość ofert BZP z `htmlBody` (`src/sources/bzp/notice-body.ts`,
-> D-022), bez migracji. Wszystko poniżej oznaczone
+> D-022), bez migracji. PR-04 dodaje matching (`src/matching/`: czyste `matchOpportunity` z
+> powodami i ich polskim opisem, D-023), reguły profilu w domenie (`src/domain/vocabulary.ts`:
+> kategorie MVP i województwa) oraz komendy `profile:create`, `profile:show` i `match:preview`
+> (`src/profile-commands.ts`), bez migracji. Wszystko poniżej oznaczone
 > _(plan, PR-xx)_ to projekt docelowy — kontrakty mogą zostać doprecyzowane w danym PR, a
 > zmiana musi trafić do tego dokumentu i do `docs/DECISIONS.md`.
 
@@ -49,6 +52,7 @@ Katalog powstaje dopiero razem z kodem, który go wypełnia.
 src/
 ├── main.ts                 # granica procesu (process.argv/env/exitCode)          [PR-00]
 ├── cli.ts                  # routing komend, wstrzykiwana baza; bez procesu        [PR-00/01]
+├── profile-commands.ts     # plik profilu, tekst match:preview (bez bazy)         [PR-04]
 ├── health.ts               # raport health (+ połączenie z bazą, migracje)         [PR-00/01]
 ├── infrastructure/
 │   ├── config.ts           # walidacja env (zod)                                    [PR-00]
@@ -56,13 +60,15 @@ src/
 │   ├── db/                 # pula pg + Kysely, migracje, repozytoria, mapowanie błędów [PR-01]
 │   └── http/               # SafeHttpClient: polityka URL/IP, retry, limity      [PR-02]
 ├── domain/                 # typy + schematy zod: Source, Opportunity, CompanyProfile [PR-01]
+│                           # vocabulary.ts: kategorie MVP, 16 województw (D-023) [PR-04]
 ├── sources/                # kontrakt adaptera, rejestr, podgląd; bzp/ = BZP    [PR-02]
 │   │                       # bzp/notice-body.ts: opis/kontakt/wartość z htmlBody [PR-03C]
 │   └── normalize/          # czyste helpery (D-022): whitespace, html-text,     [PR-03C]
 │                           # comparable, regions, cpv-categories, warsaw-time (PR-03B)
 ├── ingestion/              # fingerprint, content_hash, runIngestion, blokada ingest [PR-03A]
 │                           # catch-up.ts: plan dni nadrabiania                  [PR-03B]
-├── matching/               # scoring + wyjaśnienie                             (plan, PR-04)
+├── matching/               # match.ts (scoring, powody), text.ts (tokeny, odmiana), [PR-04]
+│                           # format.ts (polskie opisy powodów); czyste (D-023)
 ├── notifications/          # digest, szablon, wysyłka, idempotencja            (plan, PR-05)
 └── web/                    # minimalny UI renderowany po stronie serwera       (plan, PR-06)
 tests/
@@ -79,7 +85,10 @@ adresy instytucji zostają). Ta sama zasada obowiązuje przyszłe fixture'y (m.i
 lista zamian — w `tests/fixtures/<source>/README.md`.
 
 Zasada zależności: `domain` nie importuje niczego z innych modułów. `sources` zależy od
-`domain` i `infrastructure/http`. `matching` zależy tylko od `domain` (czyste funkcje).
+`domain` i `infrastructure/http`. `matching` zależy tylko od `domain` (czyste funkcje) —
+z jednym wyjątkiem (D-023): może importować czyste helpery `sources/normalize/` (nic innego ze
+`sources`, nic z `infrastructure`, żadnych pakietów ani modułów Node); pilnuje tego
+`no-restricted-imports` w `eslint.config.js` i test `tests/matching-dependency-guard.test.ts`.
 `ingestion` i `notifications` orkiestrują i jako jedyne dotykają repozytoriów. `cli`/`web`
 składają zależności (proste wstrzykiwanie przez parametry, bez kontenera DI).
 
@@ -99,7 +108,11 @@ składają zależności (proste wstrzykiwanie przez parametry, bez kontenera DI)
   (zawierają wartości). Listy mają limit (domyślnie 100, max 1000).
 - Repozytoria w PR-01: `sources` (upsert, get, lista włączonych), `opportunities` (atomowy
   upsert po `fingerprint`, zwraca `inserted`/`updated`; get), `company_profiles`
-  (create/get/update/delete). PR-03A: `opportunities.ingestOpportunity` (upsert z wykrywaniem
+  (create/get/update/delete; odczyt waliduje wiersz schematem profilu → `invalid_stored_row`,
+  PR-04; update waliduje wynik w tej samej transakcji, więc błąd wycofuje zapis). PR-04:
+  `opportunities.listMatchCandidates` (oferty bez `closed`/`cancelled`,
+  `published_at DESC NULLS LAST, id`, limit; wiersz niezgodny ze schematem pominięty i
+  zwrócony w `skipped` z id i ścieżkami pól). PR-03A: `opportunities.ingestOpportunity` (upsert z wykrywaniem
   zmian, zwraca `inserted`/`updated`/`unchanged`, §5) i `ingestion-runs.recordIngestionRun`
   (zapis podsumowania przebiegu, §5).
 
@@ -369,30 +382,60 @@ interface IngestionOutcome {
 `src/ingestion/fingerprint.ts` — `fingerprint` i `contentHash` (reguły w §5).
 `src/ingestion/lock.ts` — `withIngestLock` (§6).
 
-### 4.4 Matching (PR-04)
+### 4.4 Matching (PR-04, zaimplementowany)
 
 ```ts
-matchOpportunity(opportunity: Opportunity, profile: CompanyProfile): MatchResult;
-interface MatchResult { score: number; matched: boolean; reasons: MatchReason[] }
+matchOpportunity(offer: MatchableOpportunity, profile: MatchableProfile): MatchResult;
+// MatchableOpportunity = Pick<Opportunity, "title" | "description" | "categories" | "location">
+// MatchableProfile = Pick<CompanyProfile, "categories" | "includeKeywords" | "excludeKeywords"
+//                                         | "voivodeships" | "counties">
+interface MatchResult { score: number; matched: boolean; reasons: readonly MatchReason[] }
 ```
 
-Czysta funkcja, deterministyczna, bez I/O i bez LLM. Punkt wyjścia reguł (do kalibracji):
+Czysta funkcja (`src/matching/match.ts`), deterministyczna, bez I/O, zegara, sieci i LLM;
+pełne reguły i uzasadnienie — D-023. Punkty (`POINTS`, punkt startowy do kalibracji):
 
-| Reguła                                   | Punkty |
-| ---------------------------------------- | ------ |
-| kategoria profilu ∈ kategorie zamówienia | +40    |
-| słowo kluczowe profilu w tytule/opisie   | +30    |
-| region zgodny                            | +20    |
-| więcej niż jedno słowo kluczowe          | +10    |
-| słowo wykluczające                       | −100   |
+| Reguła                                               | Punkty |
+| ---------------------------------------------------- | ------ |
+| kategoria profilu ∈ kategorie MVP z CPV oferty (raz) | +40    |
+| słowo kluczowe w tytule/opisie (pierwsze znalezione) | +30    |
+| więcej niż jedno różne słowo kluczowe                | +10    |
+| region zgodny albo profil bez ograniczeń regionu     | +20    |
+| słowo wykluczające (każde znalezione)                | −100   |
 
-Każda przyznana/odjęta wartość generuje `MatchReason` (co, gdzie znaleziono), który trafia do
-e-maila jako „dlaczego pasuje”. Dopasowanie tekstu po normalizacji (małe litery, usunięcie
-diakrytyków tylko do porównań, granice słów). Czyste helpery do tego już są (PR-03C, D-022):
-`comparableText`, `normalizeVoivodeship`/`normalizeCounty` i `mvpCategoriesForCpv` w
-`src/sources/normalize/`. Zasada zależności (§2) mówi, że `matching` zależy tylko od
-`domain`, więc PR-04 musi zdecydować, czy importuje je stamtąd (wyjątek wpisany do DECISIONS),
-czy przenosi do wspólnego miejsca.
+`matched = score ≥ 50 (MATCH_THRESHOLD) && brak słowa wykluczającego && region ≠ niezgodny`.
+
+`MatchReason` to unia rozróżnialna po `kind`; każdy powód niesie swoje `points` (wynik = suma
+punktów powodów) i to, co i gdzie znaleziono. Zawsze dokładnie jeden powód kategorii
+(`category` z kategoriami i kodami CPV, `category_mismatch`, `category_unverifiable` — brak
+CPV dającego kategorię MVP: o wyniku decydują słowa kluczowe) i jeden powód regionu
+(`region_unrestricted`, `region_match` przez powiat albo województwo, `region_mismatch`,
+`region_unknown` z brakującą częścią: lokalizacja / województwo / powiat / oba, oraz z
+podanym, ale niepasującym wymiarem, jeśli jest); do tego po jednym na każde znalezione słowo
+(`keyword` z polem `title`/`description`; liczone tylko słowo z własnym trafieniem — ciągiem
+tokenów tekstu, którego nie ma inne liczone słowo; przydział w D-023), `more_keywords` i
+`exclude`. Kolejność: kategoria, słowa (kolejność profilu), premia, wykluczenia, region.
+
+- **Tekst** (`text.ts`): obie strony przez `comparableText` (także bez znaków `\p{Cf}`, np.
+  miękkiego łącznika), tokeny = ciągi liter/cyfr; fraza pasuje do kolejnych tokenów; prosta
+  odmiana: token słowa ≥ 4 znaki pasuje do tokenu tekstu zaczynającego się od niego bez jednej
+  końcowej samogłoski, krótsze i bez litery (liczby) — tylko dokładnie; ta sama reguła dla
+  wykluczeń. Słowo ≤ 10 tokenów (schemat). Znane ograniczenia i koszt w D-023.
+- **Region:** województwa LUB powiaty — zgodny, gdy którykolwiek używany wymiar profilu jest
+  znany w ofercie i pasuje; niezgodny tylko, gdy każdy używany wymiar jest znany i nic nie
+  pasuje; inaczej nieznany (0 pkt, jawny powód — m.in. „źródło nie podaje powiatu” dla
+  BZP, z podanym niepasującym województwem: „województwo śląskie poza profilem, źródło nie
+  podaje powiatu”). Profil z powiatem daje więc dla oferty BZP z innego województwa
+  „nieznany”, nie „niezgodny”. Powiaty porównywane przez `countyKey` =
+  `comparableText(normalizeCounty(x))` z ujednoliceniem „m. st.”/„m.st.”/„miasto stołeczne”
+  i „(miasto na prawach powiatu)”.
+- **Opis** (`format.ts`): `formatReasons` →
+  „kategoria: elektryka (CPV 45310000-3); słowo: oświetlenie (tytuł); region: mazowieckie”.
+- Status i termin oferty nie są sprawą matchingu: `match:preview` pomija `closed`/`cancelled`,
+  oferty po terminie (wobec wstrzykiwanego zegara) pokazuje na końcu z „(po terminie)”, a
+  nieprawidłowe zapisane wiersze ofert pomija (ostrzeżenie z id wiersza i ścieżkami pól,
+  licznik w podsumowaniu); termin filtruje digest (PR-05). Wyniki nie są zapisywane (zapis z
+  doręczeniami w PR-05).
 
 ### 4.5 Notifications (PR-05)
 
@@ -537,7 +580,9 @@ tego terminu i nowego `fetched_at` — ponowne pobranie oryginału nie cofa prze
 `name text`, `categories`, `include_keywords`, `exclude_keywords`, `voivodeships`, `counties`
 (wszystkie `text[] NOT NULL DEFAULT '{}'`), `active bool` (domyślnie `true`), `created_at`,
 `updated_at`. Wszystkie kolumny `NOT NULL`. Przy tworzeniu profilu kod wymaga podania
-wszystkich pól (bez ukrytych wartości domyślnych). Jedna tabela zamiast osobnych encji
+wszystkich pól (bez ukrytych wartości domyślnych); schemat domeny (PR-04, D-023) wymaga co
+najmniej jednej kategorii z listy MVP i kanonicznych nazw województw — bez CHECK w bazie, więc
+odczyt waliduje wiersz (`invalid_stored_row`). Jedna tabela zamiast osobnych encji
 użytkownik/subskrypcja/filtr — wystarczy dla MVP (D-009).
 
 ### Migracje
@@ -613,6 +658,15 @@ failed`) — wynik zostaje, a blokada znika z końcem sesji. Każde połączenie
   `error` i TCP keepalive, więc zerwane połączenie nie zabija procesu. Klucz (`INGEST_LOCK_KEY` w
   `src/ingestion/lock.ts`) jest wspólny dla całej bazy (advisory locki nie znają schematów),
   inny niż blokada Migratora Kysely; nowy klucz dla innej komendy = nowa stała tutaj.
+- `profile:create <file.json>`, `profile:show <profileId>`, `match:preview <profileId>
+[--limit N]` (PR-04, D-023) — komendy operatora. Plik profilu (zwykły plik ≤ 64 KiB, UTF-8,
+  JSON, schemat profilu) jest częścią wywołania: błąd → kod 2 przed konfiguracją i bez bazy,
+  komunikat z nazwami pól i opisem błędu, bez wartości; e-mail już użyty → kod 1.
+  `match:preview` czyta do N (domyślnie 100, maks. 1000) najnowszych ofert bez
+  `closed`/`cancelled`, wypisuje tekstem dopasowane (termin rosnąco, brak na końcu, potem
+  wynik; po terminie — na samym końcu z „(po terminie)”) z powodami i „dopasowane X z Y”
+  (plus liczba pominiętych nieprawidłowych wierszy, każdy z ostrzeżeniem w logu); bez danych
+  kontaktowych, tekst ze źródła przez `cleanText`; nic nie zapisuje.
 - Planowany harmonogram (przykład w README; ten PR nie dodaje artefaktu cron/wdrożenia):
   `ingest` raz dziennie ok. 06:00 Europe/Warsaw bez opcji dnia (nadrabianie: zwykle tylko
   wczoraj UTC, dzień już zamknięty; po przerwie — pominięte dni); `digest` (PR-05) — rano, po `ingest`.

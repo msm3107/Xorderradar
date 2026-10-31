@@ -755,3 +755,156 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     - małe zamówienia (`SmallContractNotice`) nie mają CPV, więc słownik MVP daje dla nich
       zero kategorii (dane właściciela: 0 z 86 ogłoszeń z CPV, opis w 76 z 86) — matching
       musi dla nich używać słów kluczowych z tytułu i opisu (`comparableText`).
+
+## D-023 — Matching: reguły dopasowania, profil i `match:preview`
+
+- **Status:** Accepted (PR-04, decyzje koordynatora z briefu PR-04)
+- **Kontekst:** ARCHITECTURE §4.4 dawała punkty startowe i pytanie o zależność `matching` od
+  helperów `src/sources/normalize/` (D-022). PR_PLAN PR-04 wymaga wyniku deterministycznego
+  i w pełni wyjaśnionego (AC1), wykluczeń (AC2), braku lokalizacji ≠ zgodność (AC3), braku
+  LLM/sieci (AC4), jawnego „źródło nie podaje powiatu” (AC5), dopasowania ofert bez CPV po
+  słowach kluczowych (AC6) i porównania powiatów z decyzją o wariantach „m. st.” (AC7).
+- **Decyzja:**
+  - **Moduł `src/matching/`**: `matchOpportunity(offer, profile): MatchResult` (`match.ts`,
+    czyste, bez I/O, zegara, sieci i LLM), tokenizacja i reguła odmiany (`text.ts`), polskie
+    opisy powodów (`format.ts`). Wejście to `Pick` z `Opportunity` (`title`, `description`,
+    `categories`, `location`) i `CompanyProfile` (kategorie, słowa, województwa, powiaty).
+    Wyniki nie są zapisywane (bez tabeli `matches`; zapis dopiero z doręczeniami w PR-05).
+  - **Zasada zależności (wyjątek od §2):** `matching` importuje tylko własne moduły,
+    `domain` i czyste helpery `src/sources/normalize/` — nic z `infrastructure`, adapterów
+    źródeł, wbudowanych modułów Node ani pakietów. Pilnuje tego blok `no-restricted-imports`
+    w `eslint.config.js` (allowlista ścieżek jednego segmentu, więc
+    `../sources/normalize/../bzp/…` nie przechodzi; dynamiczny `import()` zostaje dla code
+    review), przypięty testem `tests/matching-dependency-guard.test.ts`. Listy
+    `MVP_CATEGORIES` i `VOIVODESHIPS` przeniesione do `src/domain/vocabulary.ts` (domena
+    waliduje nimi profil i nie importuje nic ze `sources`); `cpv-categories.ts` i
+    `regions.ts` re-eksportują je bez zmian dla dotychczasowych importów.
+  - **Profil (schemat domeny):** `categories` wymagane, co najmniej jedna, wyłącznie z
+    `MVP_CATEGORIES`; `voivodeships` wyłącznie kanoniczne nazwy 16 województw (front, np.
+    `profile:create`, zamienia inne zapisy przez `normalizeVoivodeship`; nieznany zapis —
+    odrzucony, ścieżka pola bez wartości); słowa kluczowe i wykluczające — każde musi
+    zawierać literę lub cyfrę (inaczej nigdy nic nie dopasuje) i mieć najwyżej 10 tokenów
+    (`MAX_KEYWORD_TOKENS`, liczone tą samą regułą co tokenizer — `keywordTokenCount`,
+    test przypina zgodność z `tokenize`); `counties` zapisane jak
+    podane (bez słownika powiatów, D-022), a `profile:create` odrzuca wpis, który nie jest
+    nazwą powiatu (`countyKey` = `null`, np. „powiat”). Wiersz z bazy, który nie spełnia
+    schematu (np. edytowany ręcznie), repozytorium odrzuca jako `DomainError`
+    `invalid_stored_row` ze ścieżkami pól (bez wartości).
+  - **`comparableText`** usuwa też znaki formatujące `\p{Cf}` (miękki łącznik U+00AD,
+    zerowej szerokości, kierunku tekstu, U+FEFF) bez śladu, przed resztą kroków — słowo z
+    miękkim łącznikiem U+00AD w środku („oświe-tlenie” z niewidocznym łącznikiem) zostaje
+    jednym słowem; nadal liniowo (test).
+    Uzupełnia D-022: U+FEFF i U+200B nie dają już spacji w tekście do porównań.
+  - **Tekst:** obie strony przez `comparableText`, podział na tokeny po każdym znaku, który
+    nie jest literą ani cyfrą (`[^\p{L}\p{N}]+`). Fraza z k tokenów pasuje do k kolejnych
+    tokenów tekstu. Szukane w tytule, potem w opisie (może być `null`); powód podaje pole
+    (słowa kluczowe: tytuł ma pierwszeństwo, chyba że trafienie w tytule przydzielono innemu
+    słowu — wtedy opis; wykluczenia: zawsze najpierw tytuł). **Odmiana (prosta reguła):**
+    token tekstu pasuje do tokenu
+    słowa kluczowego, gdy jest równy albo — dla tokenu słowa kluczowego o długości ≥ 4 —
+    zaczyna się od tematu = token bez jednej końcowej samogłoski (`aeiouy`, po
+    `comparableText`). Tokeny krótsze niż 4 („bhp”, „it”, „gaz”) i tokeny bez litery
+    (liczby: „2024” ≠ „20245”) — tylko równe. Wykluczenia — ta sama reguła. Słowa o tym samym
+    ciągu tokenów („Oświetlenie”, „oswietlenie”) liczą się raz, w kolejności profilu; tak
+    samo słowo bez własnego dowodu: każde liczone słowo dostaje trafienie (ciąg tokenów tekstu),
+    którego nie ma żadne inne liczone słowo — przydział jako maksymalne skojarzenie (ścieżki
+    powiększające, słowa w kolejności profilu, trafienia: tytuł, potem opis, w kolejności
+    tekstu; deterministyczne). „oświetlenie” i „oświetlenia” na jednym „Oświetlenie” dzielą
+    jedyne trafienie — liczy się pierwsze, bez drugiego powodu i bez +10; „sala” i „salon” na
+    „Remont salonu i sali” liczą się oba („salon” → „salonu”, „sala” → „sali”), tak samo „auto”
+    i „automatyka” na „Automatyka i auto”. Trafienia na słowo są ograniczone do liczby słów
+    profilu (słowo z tyloma trafieniami zawsze ma wolne, więc limit nie zmienia wyniku; ≤ 100 ×
+    100). Pole w powodzie to pole przydzielonego trafienia. Wykluczenia bez tego: każde
+    znalezione −100. **Znane ograniczenia:** temat zmieniający się wewnątrz słowa nie jest
+    rozpoznawany („kabel” ≠ „kable”/„kabli”, „żłobek” ≠ „żłobka”, „węgiel” ≠ „węgla”);
+    temat może zaczynać inne słowo („sala” → „salon”, „lampa” → „lampart”) — dotyczy to też
+    słów wykluczających, gdzie skutkiem jest cichy brak alertu (wykluczenie „auto” usuwa
+    też „Automatyka budynkowa”). **Koszt:** tokeny tekstu × tokeny słowa na każde słowo,
+    ograniczone schematami (tytuł ≤ 1 000, opis ≤ 10 000 znaków, słowo ≤ 100 znaków i ≤ 10
+    tokenów, ≤ 100 słów kluczowych i ≤ 100 wykluczających). Bez wzorców z nawrotami, więc
+    tekst ze źródła sam niczego nie wydłuża; najgorszy przypadek wymaga też spreparowanego
+    profilu: 200 słów po 10 tokenów („a a … b”) na opisie „a a a …” z 10 000 znaków —
+    zmierzone ok. 50 ms na parę oferta × profil, czyli ok. 50 s dla `match:preview` z 1 000
+    ofert; realny maksymalny profil (200 słów po 2 tokeny) × 1 000 ofert maksymalnej
+    długości — ok. 3 s. **Uwaga dla PR-05:** digest liczy klienci × oferty, więc ten koszt
+    mnoży się przez liczbę klientów — zmierzyć na danych pilota, zanim doda się
+    optymalizację (np. tokenizacja oferty raz na ofertę zamiast raz na parę).
+  - **Punkty i próg** (`POINTS`, `MATCH_THRESHOLD`): kategoria +40 (raz, nawet przy kilku
+    kategoriach), słowo kluczowe +30 (pierwsze znalezione; kolejne mają powód z 0 pkt),
+    więcej niż jedno różne słowo +10, region +20, każde słowo wykluczające −100.
+    `matched = score ≥ 50 && brak wykluczenia && region ≠ niezgodny`. Uzasadnienie:
+    kategoria + region = 60 przechodzi; przy nieznanym regionie potrzeba kategorii i słowa
+    (70); słowo + zgodny region = 50 przechodzi; samo słowo przy nieznanym regionie (30) —
+    nie.
+  - **Kategorie:** `mvpCategoriesForCpv(offer.categories)` ∩ kategorie profilu → +40 z listą
+    kategorii i kodów CPV, które je dały. Oferta z kategoriami MVP spoza profilu → „kategoria:
+    niezgodna” (0). Brak kodu dającego kategorię MVP → „brak CPV — kategoria
+    niesprawdzalna” albo „CPV spoza słownika (…) — kategoria niesprawdzalna” (0): o wyniku
+    decydują słowa kluczowe (AC6).
+  - **Region (trzy stany):** profil bez województw i powiatów → +20 „region: bez
+    ograniczeń”. Województwa i powiaty profilu łączy **LUB**: zgodny (+20), gdy którykolwiek
+    używany przez profil wymiar jest znany w ofercie i pasuje (powiat sprawdzany przed
+    województwem). Niezgodny (0, nigdy dopasowanie) tylko gdy **każdy** używany wymiar jest
+    w ofercie znany i żaden nie pasuje. Inaczej nieznany (0) z brakującą częścią: brak
+    `location` → „oferta nie podaje lokalizacji” (AC3); brak powiatu → „źródło nie podaje
+    powiatu” (AC5; BZP); brak województwa / obu. Używany wymiar, który oferta podaje, a który
+    nie pasuje, powód nieznanego regionu też wymienia, np. „region: nieznany — województwo
+    śląskie poza profilem, źródło nie podaje powiatu” (wewnątrz powodu przecinek, bo „; ”
+    rozdziela powody). **Konsekwencja dla BZP** (BZP nie podaje powiatu): w profilu z samymi
+    województwami oferta BZP spoza nich jest niezgodna;
+    po dodaniu choćby jednego powiatu ta sama oferta jest „nieznana” — nie odpada, tylko
+    potrzebuje kategorii i słowa (70 pkt). Województwo oferty przez `normalizeVoivodeship`;
+    nierozpoznany zapis liczy się jak niepodany. Wpis profilu, który się nie normalizuje
+    (stary wiersz), nigdy niczego nie dopasowuje, ale nadal liczy się jako używany wymiar:
+    profil nie staje się przez to „bez ograniczeń”, a oferta z podanym tym wymiarem nie
+    jest przez ten wpis zgodna.
+  - **Powiaty (AC7):** po obu stronach `countyKey(x)` = `comparableText(normalizeCounty(x))`,
+    następnie spacje po kropce usunięte („m. st.” = „m.st.”), prefiks „m.st.” / „miasto
+    stołeczne” i sufiks „(miasto na prawach powiatu)” usunięte. Czyli „m. st. Warszawa” =
+    „m.st. Warszawa” = „miasto stołeczne Warszawa” = „Warszawa” oraz „Kraków (miasto na
+    prawach powiatu)” = „Kraków”; powiat ziemski „krakowski” ≠ miasto „Kraków”.
+  - **Status i termin** nie są sprawą matchingu: `match:preview` pomija oferty `closed` i
+    `cancelled`, a oferty po terminie tylko przesuwa na koniec (z dopiskiem); termin
+    filtruje digest (PR-05).
+  - **Komendy operatorskie** (`src/profile-commands.ts`, routing w `src/cli.ts`):
+    - `profile:create <file.json>`: plik zwykły (otwarty z `O_NONBLOCK`, `fstat`), ≤ 64 KiB
+      sprawdzone przed parsowaniem (i ograniczony odczyt limit + 1 B), UTF-8 (`fatal`),
+      `JSON.parse` ze stałym komunikatem (komunikaty V8 cytują wejście), walidacja
+      `companyProfileInputSchema`. Błąd pliku lub profilu → exit 2 (część wywołania,
+      sprawdzana przed konfiguracją i bez otwierania bazy) ze ścieżkami pól (najwyżej 5,
+      reszta policzona) i opisem błędu: „missing” dla brakującego pola, „not an allowed
+      value” dla spoza słownika (z listą dozwolonych kategorii / przykładem województw tylko
+      przy tych polach), „expected <typ>” (tylko typ ze schematu) dla złego typu, stały
+      komunikat zoda dla długości i e-maila oraz własne
+      komunikaty schematu — nigdy z wartościami; nieznany klucz → „unknown field” z nazwą
+      klucza (z pliku operatora; przez `cleanText`, ≤ 40 znaków, najwyżej 5 kluczy) i listą
+      dozwolonych pól; e-mail już użyty → exit 1; błąd bazy →
+      stały powód. Wypisuje `{"status":"ok","id":…}`.
+    - `profile:show <id>`: profil jako JSON; nieznany id → exit 1.
+    - `match:preview <profileId> [--limit N]`: oferty nie `closed`/`cancelled`, od
+      najnowszych (`published_at DESC NULLS LAST, id`; domyślnie 100, maks. 1000,
+      parametryzowane zapytanie `listMatchCandidates`), dopasowane posortowane po terminie
+      (rosnąco, brak na końcu), potem wyniku; oferty z terminem przed „teraz” (zegar
+      wstrzykiwany, `matchOpportunity` zostaje czyste) — za wszystkimi pozostałymi, w tej
+      samej kolejności, z dopiskiem „(po terminie)”: status w bazie może nie nadążać za
+      terminem, więc oferta nie znika z podglądu. Każda z wynikiem, tytułem, zamawiającym,
+      terminem (czas Europe/Warsaw), linkiem i powodami; na końcu „dopasowane X z Y”. Bez
+      danych kontaktowych; tekst ze źródła przez `cleanText` (znaki sterujące nie trafiają
+      do terminala). Profil nieaktywny też, z informacją, że jest nieaktywny. Zapisany
+      wiersz oferty niezgodny ze schematem (`invalid_stored_row`) jest pomijany: ostrzeżenie
+      w logu (id wiersza i ścieżki pól, bez wartości), w podsumowaniu „…, pominięto N
+      nieprawidłowy wiersz / nieprawidłowe wiersze / nieprawidłowych wierszy”, kod 0.
+      Pominięte wiersze liczą się do `--limit` (limit dotyczy odczytanych wierszy), więc
+      podgląd może pokazać mniej ofert niż N — ile pominięto, mówi podsumowanie.
+      Nieprawidłowy wiersz profilu nadal kończy komendę kodem 1.
+- **Odrzucone alternatywy:** stemmer/słownik odmiany (nowa zależność, nadmiar dla MVP);
+  dopasowanie podciągów (fałszywe trafienia w środku słów); przeniesienie helperów
+  normalizacji do wspólnego katalogu (więcej zmian niż przeniesienie dwóch list); region
+  nieznany traktowany jak zgodny (łamie AC3) albo jak niezgodny (cichy brak alertów przy
+  BZP, AC5); tabela wyników dopasowania (PR-05).
+- **Konsekwencje:** progi i punkty są punktem startowym do kalibracji w pilocie (zmiana bez
+  migracji). Profile zapisane wcześniej z pustymi kategoriami, niekanonicznymi
+  województwami lub słowem dłuższym niż 10 tokenów są odrzucane przy odczycie
+  (`invalid_stored_row`) — do poprawienia ręcznie. `updateCompanyProfile` waliduje wynik w
+  tej samej transakcji co `UPDATE … RETURNING`, więc nieudana zmiana takiego wiersza jest
+  wycofana i niczego nie zmienia.

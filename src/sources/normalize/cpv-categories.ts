@@ -4,21 +4,11 @@
  * applied at matching time, so tuning it takes effect at once, without a
  * re-ingest and without changing any `content_hash`.
  */
+import { MVP_CATEGORIES, type MvpCategory } from "../../domain/vocabulary.js";
 
-/** The closed list of MVP categories (sorted). */
-export const MVP_CATEGORIES = [
-  "bhp",
-  "elektryka",
-  "instalacje",
-  "it",
-  "ppoz",
-  "remonty",
-  "serwis",
-  "sprzatanie",
-  "szkolenia",
-  "wyposazenie",
-] as const;
-export type MvpCategory = (typeof MVP_CATEGORIES)[number];
+// The list itself is in the domain (D-023): the profile schema validates
+// against it, and domain imports nothing from sources.
+export { MVP_CATEGORIES, type MvpCategory };
 
 /**
  * Prefixes of the 8 CPV digits per category, a calibratable starting point

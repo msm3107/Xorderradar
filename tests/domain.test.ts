@@ -169,7 +169,7 @@ describe("well-formed Unicode", () => {
       companyProfileInputSchema.safeParse({
         email: "a@b.pl",
         name: `Firma${lone}`,
-        categories: [],
+        categories: ["elektryka"],
         includeKeywords: [`klucz${lone}`],
         excludeKeywords: [],
         voivodeships: [],
@@ -338,5 +338,96 @@ describe("company profile schema", () => {
     expect(
       invalidFields(companyProfilePatchSchema, { email: undefined, active: undefined }),
     ).toEqual(["(root)"]);
+  });
+});
+
+describe("company profile preferences (PR-04, D-023)", () => {
+  const profile = {
+    email: "kontakt@example.invalid",
+    name: "Jan Kowalski Usługi",
+    categories: ["elektryka"],
+    includeKeywords: ["oświetlenie"],
+    excludeKeywords: [],
+    voivodeships: ["mazowieckie"],
+    counties: ["piaseczyński"],
+    active: true,
+  };
+
+  it("accepts MVP categories and canonical voivodeship names", () => {
+    const parsed = parseDomain(companyProfileInputSchema, {
+      ...profile,
+      categories: ["elektryka", "ppoz"],
+      voivodeships: ["mazowieckie", "śląskie"],
+    });
+    expect(parsed.categories).toEqual(["elektryka", "ppoz"]);
+    expect(parsed.voivodeships).toEqual(["mazowieckie", "śląskie"]);
+  });
+
+  it("requires at least one category", () => {
+    expect(invalidFields(companyProfileInputSchema, { ...profile, categories: [] })).toEqual([
+      "categories",
+    ]);
+  });
+
+  it("rejects a category outside the MVP list", () => {
+    expect(
+      invalidFields(companyProfileInputSchema, { ...profile, categories: ["elektryka", "gaz"] }),
+    ).toEqual(["categories.1"]);
+  });
+
+  it("rejects a voivodeship that is not a canonical name", () => {
+    expect(
+      invalidFields(companyProfileInputSchema, {
+        ...profile,
+        voivodeships: ["Mazowieckie", "mazowsze"],
+      }),
+    ).toEqual(["voivodeships.0", "voivodeships.1"]);
+  });
+
+  it("rejects a keyword without any letter or digit", () => {
+    expect(
+      invalidFields(companyProfileInputSchema, { ...profile, includeKeywords: ["ok", "--"] }),
+    ).toEqual(["includeKeywords.1"]);
+    expect(
+      invalidFields(companyProfileInputSchema, { ...profile, excludeKeywords: ["."] }),
+    ).toEqual(["excludeKeywords.0"]);
+  });
+
+  it("accepts a keyword of up to 10 words and rejects a longer one", () => {
+    const ten = "a b c d e f g h i j";
+    const eleven = `${ten} k`;
+    expect(
+      parseDomain(companyProfileInputSchema, { ...profile, includeKeywords: [ten] })
+        .includeKeywords,
+    ).toEqual([ten]);
+    expect(
+      invalidFields(companyProfileInputSchema, { ...profile, includeKeywords: ["ok", eleven] }),
+    ).toEqual(["includeKeywords.1"]);
+    expect(
+      invalidFields(companyProfileInputSchema, { ...profile, excludeKeywords: [eleven] }),
+    ).toEqual(["excludeKeywords.0"]);
+    // Words as the tokenizer counts them: punctuation separates, a soft hyphen does not.
+    expect(
+      invalidFields(companyProfileInputSchema, {
+        ...profile,
+        includeKeywords: ["a-b-c-d-e-f-g-h-i-j-k"],
+      }),
+    ).toEqual(["includeKeywords.0"]);
+    expect(
+      parseDomain(companyProfileInputSchema, {
+        ...profile,
+        includeKeywords: [`${ten}\u00adk`],
+      }).includeKeywords,
+    ).toHaveLength(1);
+    expect(invalidFields(companyProfilePatchSchema, { excludeKeywords: [eleven] })).toEqual([
+      "excludeKeywords.0",
+    ]);
+  });
+
+  it("applies the same rules to a patch", () => {
+    expect(invalidFields(companyProfilePatchSchema, { categories: [] })).toEqual(["categories"]);
+    expect(invalidFields(companyProfilePatchSchema, { voivodeships: ["Śląsk"] })).toEqual([
+      "voivodeships.0",
+    ]);
   });
 });

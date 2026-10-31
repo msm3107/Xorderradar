@@ -7,12 +7,19 @@ import {
   type CompanyProfilePatch,
 } from "../../domain/company-profile.js";
 import { entityIdSchema, parseDomain } from "../../domain/common.js";
+import { DomainError } from "../../domain/errors.js";
 import { withDomainErrors } from "./errors.js";
 import type { CompanyProfilesTable, Database } from "./schema.js";
 
+/**
+ * Maps a row to the domain type. The columns have no CHECKs for the profile
+ * rules (closed category list, canonical voivodeships, …; D-023), so the row
+ * is validated with the input schema; a row that no longer satisfies it (e.g.
+ * edited by hand) is refused as DomainError `invalid_stored_row` with the
+ * field paths only, never the values.
+ */
 function toCompanyProfile(row: Selectable<CompanyProfilesTable>): CompanyProfile {
-  return {
-    id: row.id,
+  const result = companyProfileInputSchema.safeParse({
     email: row.email,
     name: row.name,
     categories: row.categories,
@@ -21,9 +28,20 @@ function toCompanyProfile(row: Selectable<CompanyProfilesTable>): CompanyProfile
     voivodeships: row.voivodeships,
     counties: row.counties,
     active: row.active,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
+  });
+  if (!result.success) {
+    const fields = [
+      ...new Set(result.error.issues.map((issue) => issue.path.map(String).join(".") || "(root)")),
+    ];
+    throw new DomainError(
+      "invalid_stored_row",
+      `Stored company profile ${row.id} does not match the domain schema: ${fields.join(", ")}`,
+      fields,
+      null,
+      row.id,
+    );
+  }
+  return { id: row.id, ...result.data, createdAt: row.created_at, updatedAt: row.updated_at };
 }
 
 /** Creates a profile. The same e-mail (case-insensitive) twice → DomainError `duplicate`. */
@@ -64,7 +82,13 @@ export async function getCompanyProfile(
   return row === undefined ? null : toCompanyProfile(row);
 }
 
-/** Updates the given fields only; returns null when the profile does not exist. */
+/**
+ * Updates the given fields only; returns null when the profile does not exist.
+ * The merged row is validated inside the same transaction as the UPDATE: when
+ * the result does not satisfy the schema (an untouched field of an old row,
+ * e.g. empty categories) the call fails with `invalid_stored_row` and the
+ * write is rolled back, so a failed call never changes the row.
+ */
 export async function updateCompanyProfile(
   db: Kysely<Database>,
   id: string,
@@ -72,26 +96,28 @@ export async function updateCompanyProfile(
 ): Promise<CompanyProfile | null> {
   const profileId = parseDomain(entityIdSchema, id);
   const changes = parseDomain(companyProfilePatchSchema, patch);
-  const row = await withDomainErrors(() =>
-    db
-      .updateTable("company_profiles")
-      // Undefined values are skipped by Kysely, so absent fields stay untouched.
-      .set({
-        email: changes.email,
-        name: changes.name,
-        categories: changes.categories,
-        include_keywords: changes.includeKeywords,
-        exclude_keywords: changes.excludeKeywords,
-        voivodeships: changes.voivodeships,
-        counties: changes.counties,
-        active: changes.active,
-        updated_at: sql<Date>`now()`,
-      })
-      .where("id", "=", profileId)
-      .returningAll()
-      .executeTakeFirst(),
-  );
-  return row === undefined ? null : toCompanyProfile(row);
+  return db.transaction().execute(async (trx) => {
+    const row = await withDomainErrors(() =>
+      trx
+        .updateTable("company_profiles")
+        // Undefined values are skipped by Kysely, so absent fields stay untouched.
+        .set({
+          email: changes.email,
+          name: changes.name,
+          categories: changes.categories,
+          include_keywords: changes.includeKeywords,
+          exclude_keywords: changes.excludeKeywords,
+          voivodeships: changes.voivodeships,
+          counties: changes.counties,
+          active: changes.active,
+          updated_at: sql<Date>`now()`,
+        })
+        .where("id", "=", profileId)
+        .returningAll()
+        .executeTakeFirst(),
+    );
+    return row === undefined ? null : toCompanyProfile(row);
+  });
 }
 
 /** Deletes the profile; returns false when it did not exist. */

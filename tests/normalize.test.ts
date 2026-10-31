@@ -192,3 +192,21 @@ describe("mvpCategoriesForCpv", () => {
     }
   });
 });
+
+describe("comparableText format characters (PR-04)", () => {
+  it("drops the soft hyphen inside a word, so the word stays one word", () => {
+    expect(comparableText("oświe\u00adtlenie")).toBe("oswietlenie");
+    expect(comparableText("OŚWIE\u00adTLENIE ulic")).toBe("oswietlenie ulic");
+  });
+
+  it("drops zero-width, bidi and BOM characters without a trace", () => {
+    expect(comparableText("\ufeffre\u200bmont\u200e da\u2060chu\u202e")).toBe("remont dachu");
+  });
+
+  it("is linear on a long run of format characters", () => {
+    const hostile = `a${"\u00ad".repeat(200_000)}b`;
+    const started = performance.now();
+    expect(comparableText(hostile)).toBe("ab");
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+});

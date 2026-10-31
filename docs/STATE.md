@@ -1,21 +1,14 @@
 # Current State
 
 Current phase: PHASE 1 — DATA PIPELINE
-Current PR: PR-03 — Ingestion, Normalization & Deduplication
-Status: Part A (ingestion core) merged in PR #4 (head 6263cd8); its owner-review follow-up
-round (docs, `tender_id`, lock busy → skipped, `health` schema check) merged in PR #5
-(e71decc). Part B (BZP notice updates + catch-up of missed days; owner split: normalization
-helpers moved unchanged to Part C) implemented. Code & Safety Review PASS with findings → fix
-round (M1, M2, L3–L5) → C&S re-review PASS; Quality Review REJECT (documentation only, AC1–AC9
-met) → documentation fix round → C&S check PASS → Quality re-review ACCEPT. Owner review of
-PR #6 (head f356815): owner review round (PR #6) implemented → C&S review FAIL (H1 High,
-M1, L1–L2, N1–N3) → fix round → C&S re-review PASS → Quality Review ACCEPT (doc nits applied)
-→ owner re-review → **Part B MERGED in PR #6 (merge commit 1990231)**. Part C (normalization
-helpers, `docs/PR_PLAN.md` → PR-03C) implemented: Code & Safety Review PASS with findings → fix
-round → C&S re-review PASS; Quality Review REJECT (AC7 docs only) → fix rounds → C&S PASS →
-Quality re-review ACCEPT; PR #7 opened for the owner's review (not merged). Owner review of
-PR #7 (head 94d1303): PASS with QoL suggestions → docs-only round (D-022 county comparison
-rule, PR-04 AC5–AC7) → C&S check PASS → Quality re-review ACCEPT.
+Current PR: PR-04 — Matching Engine
+Status: PR-03 complete — Part C (normalization helpers) **MERGED in PR #7 (merge commit
+f41b49c)** after the owner review (docs follow-up ad42ff5). PR-04 (deterministic matching,
+company profile commands, `match:preview`) implemented: Code & Safety Review PASS with
+findings (M1, M2, L1–L5) → fix round → C&S re-review PASS (N1 Low) → N1 fix round → C&S
+PASS → Quality Review ACCEPT WITH NOTES (R1 STATE, O1–O6) → fix round → C&S PASS (L-a, L-b
+Low) → follow-up round → C&S PASS → Quality re-review; PR opened for the owner's review
+(not merged).
 
 ## Completed
 
@@ -110,10 +103,8 @@ rule, PR-04 AC5–AC7) → C&S check PASS → Quality re-review ACCEPT.
       the run); `SafeHttpClient` is constructed once, in `defaultSourceDeps` in `src/cli.ts`, with
       options only (for manual review). Not done (optional): gzip-only simplification.
 
-## In progress
-
-**PR-03 — Part C (normalization helpers; `docs/PR_PLAN.md` → PR-03C)** — implemented; PR opened
-for the owner's review (PR #7, not merged). D-022 new; D-015/D-016 amended.
+**PR-03 — Part C (normalization helpers; `docs/PR_PLAN.md` → PR-03C)** — MERGED in PR #7
+(merge commit f41b49c). D-022 new; D-015/D-016 amended.
 
 - Owner review of PR #7: PASS (live check: 500 `ContractNotice` + 86 `SmallContractNotice`,
   0 rejected). Its QoL suggestions are handled in docs only: D-022 now fixes the county
@@ -337,6 +328,58 @@ recorded in `docs/PR_PLAN.md` → PR-03 „Podział”; acceptance criteria 1–
     monitor freshness by the newest `succeeded` run), N6 (cancellation notices, open question
     below).
 
+## In progress
+
+**PR-04 — Matching Engine** (`docs/PR_PLAN.md` → PR-04, AC1–AC7) — implemented; PR opened for
+the owner's review (not merged). D-023 new (rules, profile schema, `match:preview`).
+
+- `src/matching/` (pure, no network/LLM; ESLint import allowlist: only `domain` and
+  `sources/normalize`, pinned by `tests/matching-dependency-guard.test.ts`):
+  - `match.ts` — `matchOpportunity(offer, profile)` → `{ score, matched, reasons }`. Points:
+    category +40 (`mvpCategoriesForCpv` ∩ profile categories), first keyword +30, more than one
+    keyword +10, region +20, each exclude −100. `matched` = score ≥ 50, no exclude, region not
+    `mismatch`. Missing CPV → reason "brak CPV — kategoria niesprawdzalna" (AC6).
+  - Region is three-valued with OR semantics (voivodeships OR counties): `match` / `mismatch`
+    (every used part known and none matches) / `unknown` with an explicit reason, e.g.
+    "źródło nie podaje powiatu" (AC5) or "województwo śląskie poza profilem, źródło nie podaje
+    powiatu". No regions in the profile → +20 "bez ograniczeń". Missing location never matches
+    (AC3). Counties compared by `countyKey` (`comparableText(normalizeCounty(…))`, "m. st." /
+    "m.st." / "miasto stołeczne" / "(miasto na prawach powiatu)" variants; AC7).
+  - `text.ts` — tokenizer and phrase search on `comparableText`: consecutive tokens; tokens
+    ≥ 4 letters match by stem (one final vowel dropped) as prefix; number and short tokens
+    exact only. Keyword de-duplication by maximum bipartite matching (each counted keyword has
+    a hit of its own; profile order; hit lists capped at the number of keywords).
+  - `format.ts` — Polish reason texts.
+- `src/domain/vocabulary.ts` — `MVP_CATEGORIES`, `VOIVODESHIPS` (old exports kept as
+  re-exports). Profile schema: categories from the MVP list (≥ 1), canonical voivodeships,
+  keywords with a letter or digit and ≤ 10 tokens. Stored profiles are validated on read
+  (breaking rows → `invalid_stored_row`, fixed by hand; no `profile:update` yet).
+  `comparableText` drops `\p{Cf}` (soft hyphen).
+- Repositories: `listMatchCandidates` (no `cancelled`/`closed`,
+  `published_at DESC NULLS LAST, id ASC`, limit; returns `{ offers, skipped }` — invalid
+  stored rows are skipped per row, the owner's PR-01 rule); `updateCompanyProfile` in one
+  transaction.
+- CLI (`src/profile-commands.ts`): `profile:create <file.json>` (regular file, ≤ 64 KiB,
+  strict UTF-8, per-field messages without values; exit 2 bad file/profile, 1 duplicate
+  e-mail), `profile:show <id>`, `match:preview <id> [--limit N]` (default 100, max 1000;
+  deadline first, null last, past deadlines last with "(po terminie)"; summary "dopasowane X z
+  Y", skipped rows counted and logged by id; never prints contact data). README has a
+  copy-paste example profile (tested).
+- Reviews: C&S PASS with findings (M1 region hid a mismatching voivodeship; M2 update could
+  write then throw; L1 number prefix match; L2 duplicate inflections; L3 cost; L4 unknown key
+  as "(root)"; L5 FIFO/symlink tests) → fix round → C&S PASS (N1: de-duplication looked only
+  at the first hit) → fix (maximum matching; also a flaky integration test made deterministic)
+  → C&S PASS → Quality ACCEPT WITH NOTES (R1 STATE; O1 past deadlines; O2 per-row skip; O3
+  error texts; O4 README example; O5/O6 docs) → fix round → C&S PASS (L-a zod `invalid_type`
+  can print "Infinity"; L-b `--limit` counts skipped rows) → follow-up → C&S PASS → Quality
+  re-review.
+- Owner decisions to judge in the PR review (D-023): threshold 50; region `mismatch` rejects
+  whatever the score; OR semantics — adding a county **widens** results to other voivodeships
+  while BZP gives no county (e.g. "mazowieckie + powiat warszawski zachodni" gets a Katowice
+  offer at 70 as region unknown); stem rule (phrases need consecutive tokens; "auto" exclude
+  also removes "Automatyka"); validation on read; maximum-matching de-duplication (only affects
+  the +10 bonus and reason lines, never `matched`).
+
 ## Blockers
 
 - **AC1 (real notices via `source:preview`) cannot be verified in the session container:**
@@ -369,7 +412,7 @@ recorded in `docs/PR_PLAN.md` → PR-03 „Podział”; acceptance criteria 1–
 
 ## Decisions made
 
-See `docs/DECISIONS.md` (D-001 … D-021). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
+See `docs/DECISIONS.md` (D-001 … D-023). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
 on `node:https` with pinned lookup, no HTTP library) accepted in PR-02 Part A; D-015 (first
 source: BZP through the official API) in PR-02 Part B; PR-03 Part A: D-016 (fingerprint and
 `content_hash` format), D-017 (`unchanged` writes nothing, no `last_seen_at`), D-018 (ingest
@@ -381,11 +424,13 @@ PR-03 Part B: D-015 amended (notice updates: linking by `tenderId` only, older-r
 latest published update wins, provenance columns, skip reasons), D-019 (busy report shape),
 D-021 (ingest day ranges and automatic catch-up). PR-03 Part C: D-022 (offer details from
 `htmlBody`, normalization helpers, CPV → MVP dictionary); D-015/D-016 amended (offers read
-`htmlBody`; `content_hash` consequence of the new values).
+`htmlBody`; `content_hash` consequence of the new values). PR-04: D-023 (matching rules,
+region semantics, profile schema, `match:preview`).
 
 ## Next action
 
-1. Owner re-checks PR #7 (PR-03C; review follow-up was docs only) and merges it. After the merge, backfill still-open offers with
+1. Owner reviews the PR-04 pull request (decisions listed under In progress / D-023) and
+   merges it. Backfill still-open offers (PR #7 is merged) with
    `ingest bzp --from … --to …` (≤ 31 days per call, README). Cosmetic nits left from Part B:
    over-wide `ingest` help lines in `src/cli.ts`; two test titles still say "200 000"
    (1 000 000 cases exist). Watch live runs for `too_large` on update pages
@@ -394,20 +439,33 @@ D-021 (ingest day ranges and automatic catch-up). PR-03 Part C: D-022 (offer det
    first live `ingest bzp --date <past weekday>` on the same machine is a useful follow-up
    check (exit 0, `inserted` > 0, a second run all `unchanged`; `skipped` > 0 and some
    `updated` from `NoticeUpdateNotice` when originals of that day's updates are stored).
-3. Next PR after PR-03C: PR-04 (matching, `docs/ROADMAP.md`). Deferred from the PR-03C
-   reviews, to handle there or when touching the files:
-   - `matching` will depend on `sources/normalize` (`comparableText`, `mvpCategoriesForCpv`) —
-     decide in PR-04 whether to move the shared helpers to a neutral module (C&S L6).
-   - Soft hyphen (U+00AD) and other `\p{Cf}` characters are kept by `cleanText` and not
-     ignored by `comparableText`, so "oświe\u00adtlenie" does not match "oświetlenie" — handle
-     in `comparableText` (PR-04).
+3. Next PR after PR-04: PR-05 (digest, `docs/ROADMAP.md`). Notes for it from the PR-04
+   reviews:
+   - Matching cost: ~10–60 ms per offer × profile pair in the worst case (100 ten-token
+     keywords, 10 000-char description); fine for 10–100 profiles × ≤ 1000 offers, measure
+     before optimising (D-023).
+   - The digest must filter by deadline vs now (past deadlines out) and handle
+     `invalid_stored_row` per row, as `match:preview` does; `--limit`-style caps count skipped
+     rows.
+   - Owner decisions from the PR-04 review (threshold, region semantics) may change the
+     scoring before the digest relies on it.
+   - Optional from the PR-04 Quality Review: a `match:preview --all` mode that also prints
+     non-matches with reasons (threshold calibration); a `profile:update` command (stored
+     profiles breaking the new schema are fixed by hand today); "prefer single words" hint in
+     the profile guidance.
+   - Resolved in PR-04 (from the PR-03C reviews): `matching` depends on `sources/normalize`
+     by an explicit ESLint allowlist (no new neutral module; vocabulary moved to
+     `src/domain`); `comparableText` drops `\p{Cf}` (soft hyphen); the "brak CPV — kategoria
+     niesprawdzalna" reason exists; small contracts (no CPV) match on title + description
+     keywords — keyword-only ones reach 50 only with region match/unrestricted.
+
+   Still deferred from the PR-03C reviews:
+
    - CPV → MVP dictionary calibration (D-022 calls it a starting point): `remonty` is only
      `454` (misses `45000000`, `4526` roofs/masonry, `45262700` przebudowa); `serwis` = all of
      `50` also catches vehicle/ship/aircraft repair (`501`/`502`); candidates `324` (it),
      `397`/`301` (wyposazenie). Do not map bare `45`/`452`; general construction must be
      matched by title/description keywords.
-   - Small contracts have no CPV in the listing or in `htmlBody` (both captured ones), so PR-04
-     must match them on title + description keywords.
    - The long description (≤ 10 000 chars) is for matching/detail; PR-05 should show a short
      snippet in the digest.
    - Field boundaries (D-022, C&S L-a): a description line numbered ≥ its label (e.g. "4.3)"
@@ -419,12 +477,9 @@ D-021 (ingest day ranges and automatic catch-up). PR-03 Part C: D-022 (offer det
      patterns come from repo config only). Owner proposal: a separate small PR with
      `pnpm.overrides` `"minimatch": ">=11.0.1"` (verify eslint still works) or an eslint bump —
      not part of PR-03C.
-   - From the Quality re-review of the PR #7 follow-up (non-blocking): a profile with
-     categories only gets nothing for offers without CPV — consider a `reasons` entry like
-     "brak CPV — kategoria niesprawdzalna" (mirrors AC5); keyword-only small contracts score
-     at most 30 + 10 + 20, so check they can cross the alert threshold when calibrating it.
    - D-016 "Konsekwencje" still describes the pre-D-021 cron ("tylko wczorajszy dzień") as a
      historical record; optionally add a pointer to D-021 in a later docs pass.
+
 4. Open points carried from D-015/PR-02 for PR-03: whether the API's publication-day boundary
    is UTC or Polish time (cron at ~06:00 Europe/Warsaw ingests yesterday UTC; overlapping days
    are harmless thanks to dedup) — verify on the first live runs.
@@ -475,7 +530,8 @@ Notes from the Part A Code & Safety Review (for the Quality Review and later):
     drop a tender whose deadline was extended.
 - **PR-04/05:** the stored `status` stays `open` after the deadline for rows that are never
   re-fetched, so matching and the digest must decide "still open" from `deadline` vs now, not
-  from the stored `status`.
+  from the stored `status`. PR-04: `match:preview` lists past-deadline offers last with
+  "(po terminie)"; PR-05 still has to filter them out of the digest.
 
 Notes from Part B (for later PRs):
 
@@ -543,7 +599,8 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - **PR-02:** `base_url` is a stored display link (IP literals / port 0 are accepted by the
     domain schema); never trust it as a fetch target without SafeHttpClient's host/SSRF checks.
   - **PR-04/05:** list/digest reads must handle `invalid_stored_row` per row (skip + log the
-    row id), so one inconsistent row does not abort the whole run.
+    row id), so one inconsistent row does not abort the whole run. Done for
+    `listMatchCandidates`/`match:preview` in PR-04; PR-05 digest still to do.
   - **PR-05/06:** stored URLs may still contain `'`, `` ` ``, `{`, `}` and percent-encoded
     controls — escape contextually on output (SECURITY §10).
   - **PR-07 CI:** set `CI`/`REQUIRE_DB_TESTS` with `TEST_DATABASE_URL`; without the URL the run
@@ -560,6 +617,14 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-10-31, PR-04 after the last fix round (Node 22, pnpm 10.28.0, PostgreSQL 16): C&S ran
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 1099/1099 tests passed (32 files), DB tests included. Probes
+(scratch only): 20 000 random de-duplication cases against a brute-force reference (0
+differences); worst-case cost ~57 ms per pair; secret-marker probe of `profile:create` messages
+and of skipped-row warnings (no value leaked). `pnpm audit`: unchanged (1 moderate, dev-only
+minimatch via eslint).
 
 2026-10-31, PR-03 Part C, owner-review follow-up of PR #7 (docs only: DECISIONS D-022,
 PR_PLAN PR-04 AC5–AC7, STATE): C&S ran
