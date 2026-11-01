@@ -109,9 +109,27 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
 
 ## D-010 — E-mail jako jedyny kanał; provider przez SMTP
 
-- **Status:** Proposed → decyzja w PR-05
+- **Status:** Accepted (PR-05)
 - **Decyzja:** wysyłka przez SMTP (niezależnie od dostawcy), domyślny tryb `test` bez
-  prawdziwej wysyłki.
+  prawdziwej wysyłki (`EMAIL_MODE=test`: plik `.eml` + kopia `.json` w `EMAIL_OUTBOX_DIR`).
+  Tryb `smtp` tylko jawnie (`EMAIL_MODE=smtp` + `EMAIL_FROM` + `SMTP_URL`) i — wobec
+  prawdziwych odbiorców — po potwierdzeniu właściciela (SECURITY §10, §14).
+- **Biblioteka:** `nodemailer` 10.1.7 (przypięta; opublikowana 2026-10-18, typy w pakiecie,
+  bez zależności runtime). Uzasadnienie: klient SMTP (STARTTLS, AUTH, timeouty, kody
+  odpowiedzi) i budowa MIME z kodowaniem nagłówków (ochrona przed header injection,
+  SECURITY §10) to za dużo, żeby pisać samemu. 10.1.7 zamiast starszej: wersje `< 10.1.4`
+  mają trzy podatności moderate w `addressparser` (GHSA-m943-m63m-w62w, GHSA-85x2-q946-cp5h,
+  GHSA-8c8m-p3m8-cjg8); żadna wersja bez nich nie miała w chwili wyboru pełnych 2 tygodni
+  (SECURITY §13 — „preferowane”), więc wybrana najnowsza poprawkowa. Adres odbiorcy i
+  nadawcy przekazujemy jako obiekty `{name, address}` (bez parsowania tekstu adresu).
+- **Konfiguracja transportu:** `smtps://` = TLS od początku (domyślny port 465), `smtp://` =
+  STARTTLS **wymagany** (`requireTLS`, domyślny port 587; serwer bez STARTTLS → błąd przed
+  AUTH i kopertą). TLS ≥ 1.2, weryfikacja certyfikatu zawsze włączona; `SMTP_URL` bez
+  ścieżki, zapytania i fragmentu (nodemailer czytałby z zapytania opcje, np.
+  `tls.rejectUnauthorized`), dane logowania tylko jako para. Logger i debug nodemailera
+  wyłączone, dostęp do plików i URL-i w treści wyłączony, jeden odbiorca na wiadomość.
+  Timeouty: połączenie 10 s, powitanie 10 s, gniazdo 30 s, DNS 10 s. Szczegóły i
+  idempotencja — D-024.
 
 ## D-011 — Matching regułowy, bez LLM
 
@@ -838,9 +856,9 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     nie.
   - **Kategorie:** `mvpCategoriesForCpv(offer.categories)` ∩ kategorie profilu → +40 z listą
     kategorii i kodów CPV, które je dały. Oferta z kategoriami MVP spoza profilu → „kategoria:
-    niezgodna” (0). Brak kodu dającego kategorię MVP → „brak CPV — kategoria
-    niesprawdzalna” albo „CPV spoza słownika (…) — kategoria niesprawdzalna” (0): o wyniku
-    decydują słowa kluczowe (AC6).
+    niezgodna” (0). Brak kodu dającego kategorię MVP → „kategoria: ogłoszenie nie podaje
+    kodu CPV” (do PR-05: „brak CPV — kategoria niesprawdzalna”) albo „CPV spoza słownika
+    (…) — kategoria niesprawdzalna” (0): o wyniku decydują słowa kluczowe (AC6).
   - **Region (trzy stany):** profil bez województw i powiatów → +20 „region: bez
     ograniczeń”. Kolejność: (1) profil ma województwa, a znane województwo oferty jest
     spoza nich → niezgodny (0, nigdy dopasowanie), **niezależnie od powiatu** — powiaty
@@ -930,3 +948,171 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
   (`invalid_stored_row`) — do poprawienia ręcznie. `updateCompanyProfile` waliduje wynik w
   tej samej transakcji co `UPDATE … RETURNING`, więc nieudana zmiana takiego wiersza jest
   wycofana i niczego nie zmienia.
+
+## D-024 — `digest`: wybór ofert, idempotencja i niepewne wysyłki
+
+- **Status:** Accepted (PR-05, decyzje koordynatora z briefu PR-05)
+- **Kontekst:** PR_PLAN PR-05: jeden e-mail na profil dziennie, tylko z nowymi dopasowaniami
+  (AC1: bez duplikatów przy ponownym uruchomieniu), bez ofert po terminie (AC2), dane ze
+  źródeł escapowane (AC3), tryb `smtp` tylko jawnie, testy bez prawdziwych maili (AC4).
+  Jeden proces + PostgreSQL + cron (D-001) — bez kolejki.
+- **Decyzja:**
+  - **Komenda** `digest [--dry-run] [--profile <profileId>]` (`src/notifications/run.ts`,
+    routing w `src/cli.ts`). Kolejność kontroli: argumenty (kod 2) → konfiguracja, w tym
+    e-mail (`loadEmailConfig`, kod 1 przed otwarciem bazy i przed jakąkolwiek wysyłką; błąd
+    wymienia tylko nazwy zmiennych) → baza (oczekujące migracje → kod 1) → blokada. „Dziś” =
+    dzień kalendarzowy w Polsce w chwili `now` (`warsawDay`), zapisywany jako
+    `deliveries.digest_date`.
+  - **Kandydaci** (`listDigestCandidates`, jedno zapytanie na przebieg, wspólne dla
+    profili): status nie `closed`/`cancelled`, `deadline IS NULL OR deadline >= now` (termin
+    nieznany zostaje i w e-mailu jest „nie podano”), `first_seen_at` w ostatnich 7 dniach
+    (`DIGEST_NEW_DAYS`), `deadline ASC NULLS LAST, id`, najwyżej 10 000
+    (`DIGEST_CANDIDATE_LIMIT`; osiągnięty → `candidatesTruncated` i ostrzeżenie w logu).
+    Status w bazie może nie nadążać za terminem (STATE), więc o „po terminie” decyduje
+    `deadline` wobec `now`. Wiersz niezgodny ze schematem jest pomijany (log: id i ścieżki
+    pól; licznik `skippedInvalidRows`).
+  - **Profile:** wszystkie aktywne (`created_at, id`); nieprawidłowy wiersz profilu →
+    `invalid_profile` (kod 1, pozostałe profile obsłużone). Nieaktywny profil nie dostaje
+    niczego (`--profile` nieaktywnego → `inactive`, kod 0; nieznany → `not_found`, kod 1). E-mail
+    jest w profilu wymagany (schemat), więc profil bez adresu nie istnieje.
+  - **Wybór na profil:** `matchOpportunity` (D-023) na każdym kandydacie; z dopasowanych
+    odpadają oferty z wierszem `deliveries` tego profilu i transportu — chyba że `failed` z
+    `attempts < 3` (`DIGEST_MAX_ATTEMPTS`). Do e-maila trafia najwyżej 50
+    (`DIGEST_MAX_ITEMS`) o najbliższym terminie; reszta (`overflow`) nie jest rezerwowana,
+    e-mail podaje jej liczbę, a kolejne dni ją wyślą, jeśli dalej spełnia warunki (7 dni,
+    termin). Nic do wysłania → `nothing_new`, bez e-maila.
+  - **Tabela `deliveries`** (migracja `0005_deliveries`, ARCHITECTURE §5): jeden wiersz na
+    (profil, oferta, transport), `status` `pending`/`sent`/`failed`, `attempts`, `error_code`
+    (tylko kod), `digest_date`, `sent_at`. Transport (`test`/`smtp`) jest częścią klucza, więc
+    próby w trybie `test` nie blokują późniejszej prawdziwej wysyłki.
+  - **Idempotencja (AC1), najwyżej raz:**
+    1. Profil, który ma dziś wiersz `sent` → `already_sent_today` (nic nie jest liczone ani
+       wysyłane); dziś `pending` → `pending_today` (wynik dzisiejszej wysyłki nieznany).
+    2. **Rezerwacja przed wysyłką** (`claimDeliveries`, jedna transakcja, zatwierdzona przed
+       połączeniem z serwerem): dla nowych ofert `INSERT … status 'pending'` z
+       `ON CONFLICT ON CONSTRAINT deliveries_profile_opportunity_transport_key DO NOTHING`
+       i `RETURNING`, dla ponawianych
+       `UPDATE … SET status = 'pending' WHERE status = 'failed' AND attempts < 3 RETURNING`.
+       E-mail zawiera tylko oferty, które ta transakcja zwróciła.
+    3. Wysyłka, potem `markDeliveries`: `sent` (`sent_at`, `attempts + 1`) albo `failed` z
+       kodem (`attempts + 1`; przy błędzie konfiguracji lub nieosiągalnym serwerze bez
+       zwiększania `attempts`, niżej) — tylko wiersze nadal `pending`.
+    4. Wynik **niepewny** (zerwane połączenie lub timeout gniazda po rozpoczęciu sesji —
+       serwer mógł przyjąć wiadomość) albo awaria procesu/bazy między wysyłką a zapisem →
+       wiersze zostają `pending` i **nigdy nie są wysyłane ponownie** automatycznie (status
+       `uncertain`, kod 1, licznik `uncertain` w kolejnych przebiegach i linia
+       `Digest: N deliveries are pending …` na stderr w każdym przebiegu, który je widzi — bez
+       zmiany kodu wyjścia), a przebieg się zatrzymuje (niżej). Wolimy zgubić jeden e-mail
+       niż wysłać go dwa razy.
+    5. Jeden `digest` naraz: sesyjny advisory lock `7206120309002` (`DIGEST_LOCK_KEY`, wzór
+       D-019, wspólny helper `src/infrastructure/db/advisory-lock.ts`); zajęta → `skipped`,
+       kod 0, nic nie wysłano; utrata → kolejne profile `not_run`, kod 1. Także `--dry-run`
+       bierze blokadę (spójny odczyt).
+  - **Klasy błędów wysyłki** (`classifySmtpError`, `src/notifications/sender.ts`; tylko z
+    `responseCode`, `code`, `originalCode`, `timeoutType` i `command` nodemailera — etap SMTP —
+    nigdy z treści komunikatu ani odpowiedzi serwera):
+    - `transient` — odpowiedź 4xx (poza 421) na `MAIL FROM`, `RCPT TO`, `DATA`, odpowiedź
+      pozostała przy zamknięciu połączenia (`ECONNECTION` z `command` `CONN`) lub nieznany
+      etap: do 2 ponowień w przebiegu po 2 s i 10 s, potem `failed` (`attempts + 1`);
+    - `permanent` — 5xx na `RCPT TO`/`DATA` lub pozostała przy zamknięciu połączenia,
+      odrzucenie koperty przez nodemailera przed wysłaniem (`EENVELOPE` z `command` `API` —
+      nie da się go odróżnić od złego nadawcy, ale `EMAIL_FROM` jest walidowany przy starcie)
+      i inne nierozpoznane: `failed` (`attempts + 1`) od razu;
+    - `unreachable` — serwer nieosiągalny, nic nie wysłano: DNS, odmowa połączenia, timeout
+      połączenia, powitania lub STARTTLS, odpowiedź 4xx na powitanie (`EPROTOCOL` z `CONN`)
+      albo na `EHLO`/`HELO`/`LHLO` (z każdym kodem nodemailera — przy wymaganym STARTTLS
+      odrzucony `EHLO` przychodzi jako `ECONNECTION`); albo serwer zamyka
+      sesję — 421 na dowolnym etapie (RFC 5321 4.2): ponawiane w przebiegu jak `transient`;
+      gdy nadal → jak `setup`;
+    - `setup` — konfiguracja lub serwer odrzuca każdą wiadomość: `EAUTH` (każda odpowiedź
+      na `AUTH`, brak danych logowania), `ETLS` (w tym odmowa STARTTLS 454/530), błędy
+      certyfikatu/uzgadniania TLS przy `smtps`, 5xx na powitanie (`EPROTOCOL` z `CONN`), na
+      `EHLO`/`HELO`/`LHLO` (każdy kod nodemailera) lub na `MAIL FROM` (odrzucony
+      `EMAIL_FROM`), niezapisywalny outbox (tryb `test`): **bez ponawiania**;
+    - `uncertain` — zerwane połączenie bez odpowiedzi (`ESOCKET`, `ECONNECTION`,
+      `ECONNRESET`, `EPIPE`, timeout gniazda; także `EHOSTUNREACH`/`ENETUNREACH`, które
+      nodemailer zgłasza tak samo przy połączeniu i w trakcie sesji): punkt 4. `ECONNECTION`
+      bez kodu odpowiedzi zostaje `uncertain` także wtedy, gdy zdarzył się przed wysłaniem
+      wiadomości (strona ostrożna) — operator rozstrzyga według procedury dla `pending`
+      poniżej.
+    - Odpowiedź 4xx/5xx pozostała przy zamknięciu połączenia (`ECONNECTION` z `command`
+      `CONN`) jest klasyfikowana po kodzie (`transient`/`permanent`), nie jako `setup` —
+      celowo: może być odpowiedzią na treść wiadomości, której nie wolno wziąć za błąd
+      konfiguracji. Koszt: serwer, który przy powitaniu zamyka połączenie z odpowiedzią
+      błędu, zużywa próby (421 nadal → `unreachable`).
+  - **Zatrzymanie przebiegu:** błąd `setup`, `unreachable` (po ponowieniach) lub `uncertain`
+    nie dotyczy jednej wiadomości — powtórzyłby się dla każdego profilu (np. złe hasło: N
+    nieudanych logowań na przebieg) albo zostawiłby każdy profil z nieznanym wynikiem.
+    Przebieg kończy się na pierwszym takim błędzie: wiersze bieżącego profilu → `failed` z
+    kodem **bez zwiększania `attempts`** (przy `uncertain` zostają `pending`), pozostałe
+    profile → `not_run` (bez wierszy i bez prób), `errorCode` podsumowania
+    `send_setup_failed` / `send_server_unreachable` / `send_outcome_unknown`, komunikat
+    `Digest stopped (…)`, kod 1. Po naprawie konfiguracji kolejny przebieg (także tego samego
+    dnia) wyśle wszystkie oferty — zepsuta konfiguracja nie zużywa limitu prób.
+    `transporter.verify()` przed przebiegiem nie jest potrzebne: pierwsza wysyłka pełni tę
+    rolę i nie dodaje osobnego logowania.
+  - **Ponawianie w kolejnych przebiegach:** `failed` jest ponawiany przez kolejne przebiegi
+    (także tego samego dnia — dzisiejszy `failed` nie blokuje profilu), aż `attempts` = 3
+    (liczone na przebieg, nie na próbę w przebiegu); potem oferta nie jest już wysyłana temu
+    profilowi.
+  - **Procedura operatora dla `pending`** (`uncertain`/`pending_today`; zapytanie
+    `SELECT … FROM deliveries WHERE status = 'pending'`): sprawdzić log serwera SMTP /
+    skrzynkę wysłanych (tryb `test`: `EMAIL_OUTBOX_DIR`) dla `profile_id` i daty. Doręczono →
+    `UPDATE deliveries SET status = 'sent', sent_at = now(), attempts = attempts + 1 WHERE …`.
+    Nie doręczono →
+    `UPDATE … SET status = 'failed', error_code = 'operator_reset', attempts = attempts + 1`
+    (kolejny przebieg wyśle, jeśli `attempts < 3` i oferta nadal się kwalifikuje) albo
+    `DELETE` tych wierszy (wyśle jak nowe). Bez decyzji operatora oferty nie trafią do tego
+    profilu, a profil z dzisiejszym `pending` nic dziś nie dostanie.
+  - **Treść** (`buildDigest`, czyste, `src/notifications/digest.ts`; D-013 — po polsku): temat
+    tylko z liczby ofert i nazwy profilu (≤ 80 znaków, bez znaków sterujących i CR/LF), nigdy z
+    danych źródła. Dla każdej oferty: tytuł, zamawiający, lokalizacja, termin (czas polski) i
+    data publikacji („nie podano”, gdy brak), kategoria (MVP + CPV, gdy są), opis (≤ 300
+    znaków, cięty na granicy słowa) i kontakt publiczny — tylko gdy są, powody dopasowania,
+    link tylko `http(s)` (`url.href`; inny → „Link: nie podano”). Tekst i HTML z tymi samymi
+    wartościami; w HTML każda wartość przez `escapeHtml` (`&`, `<`, `>`, `"`, `'` i grawis),
+    także `href` w cudzysłowie (AC3). Tuż pod nagłówkiem: ile pasujących ofert się nie
+    zmieściło („N kolejnych pasujących zamówień wyślemy w następnych dniach…”, polska odmiana).
+    Stopka: stan na chwilę przebiegu, ostrzeżenie, że termin mógł się zmienić, a postępowanie
+    zostać odwołane (odwołania BZP nie są pobierane), dlaczego odbiorca dostaje e-mail, jak
+    zrezygnować
+    (odpowiedź na wiadomość / kontakt z operatorem — operator ustawia `active = false`; link
+    z tokenem — PR-06). Nagłówek `List-Unsubscribe: <mailto:…?subject=wypis> (Wypisz)` (RFC
+    2369; opcja `list` nodemailera, wspólne `mailOptions` obu senderów, więc `.eml` w trybie
+    `test` pokazuje ten sam nagłówek): sam adres z `EMAIL_FROM` (w trybie `test` bez
+    `EMAIL_FROM` — ten sam zastępczy `radar@example.invalid` co w `From`), kodowany
+    procentowo; adres, który nie jest jednym zwykłym adresem → bez nagłówka. Przycisk
+    wypisu w programie pocztowym wysyła więc e-mail na skrzynkę operatora, obsługiwany jak
+    odpowiedź. Stopka nie wspomina przycisku: Gmail i Outlook pokazują go według własnych
+    reguł, a w trybie `test` nic nie dociera. Wypis jednym kliknięciem (RFC 8058,
+    `List-Unsubscribe-Post`) wymaga endpointu HTTP — PR-06.
+  - **Wynik:** jedna linia JSON na stdout (`status` `ok`/`failed`, `digestDate`,
+    `transport`, `dryRun`, `candidates`, `candidatesTruncated`, `skippedInvalidRows`,
+    `errorCode` — powód zatrzymania albo `null`, `profiles[]` z `profileId`, `status`,
+    `matched`, `claimed`, `sent`, `failed`, `uncertain`, `overflow`, `errorCode`). Kod 1, gdy
+    przebieg się zatrzymał albo któryś profil jest `failed`, `uncertain`, `not_found`,
+    `invalid_profile` lub `not_run`. Logi i stdout: identyfikatory,
+    statusy, liczniki i kody — nigdy adresy, tytuły ani treść e-maila.
+  - **`--dry-run`:** to samo liczenie bez sendera (nie jest tworzony), bez zapisu do
+    `deliveries` i bez plików w outboxie; `claimed` = ile byłoby zarezerwowanych.
+- **AC2 — zastrzeżenie (STATE „Next action” 5 i 6, D-015):** „po terminie” opiera się na
+  zapisanym `deadline`. Dla ogłoszeń `ContractNotice` pobieranych dzień po dniu jest on
+  aktualizowany przez `NoticeUpdateNotice` (PR-03B), ale może być nieaktualny dla małych
+  zamówień (`SmallContractNotice` bez `tenderId` — zmiany ich nie dosięgają), dni obciętych
+  (`clipped`) lub niepobranych w oknie 31 dni oraz zmian pominiętych jako `no_original` po
+  nadrabianiu poza kolejnością. Skutek: przetarg z przedłużonym terminem może zostać pominięty
+  jako „po terminie”. E-mail ostrzega, że termin mógł się zmienić. Odwołania postępowań BZP nie
+  są pobierane, więc odwołany przetarg może trafić do digestu jako otwarty (STATE punkt 5).
+- **Koszt:** dopasowanie liczy profile × kandydaci. Zmierzone (2026-11-01, lokalnie)
+  ok. 120 µs na parę przy opisie ok. 1,4 tys. znaków: 100 profili × 5 000 ofert ≈ 60 s,
+  przy limicie 10 000 ofert ≈ 2 min — akceptowalne dla dziennego crona. Tokenizacja oferty raz
+  na przebieg wymagałaby zmiany API `matching` (D-023) — odłożona, dopóki pomiar na danych
+  pilota tego nie uzasadni.
+- **Odrzucone alternatywy:** wysyłka, potem zapis (awaria między nimi → duplikat następnego
+  dnia); automatyczne ponawianie `pending` (możliwy duplikat); zapis wyników dopasowania
+  (tabela `matches` — niepotrzebna, liczone na bieżąco); kolejka/worker (D-001).
+- **Konsekwencje:** zmiana profilu (np. nowe słowo) nie wyśle ofert już wysłanych, a oferty
+  starsze niż 7 dni nie trafią do profilu założonego później. Usunięcie profilu usuwa jego
+  historię doręczeń (`ON DELETE CASCADE`); usunięcie oferty z doręczeniami jest blokowane
+  (FK bez kaskady). Advisory lock jest wspólny dla bazy: testy biorące blokadę digestu są w
+  jednym pliku (`tests/integration/digest.test.ts`).

@@ -1,10 +1,17 @@
 import type { Kysely } from "kysely";
+import { setTimeout as sleep } from "node:timers/promises";
 import { entityIdSchema } from "./domain/common.js";
 import type { CompanyProfile, CompanyProfileInput } from "./domain/company-profile.js";
 import { DomainError } from "./domain/errors.js";
 import type { NoticeUpdate } from "./domain/notice-update.js";
 import { checkHealth } from "./health.js";
-import { ConfigError, loadConfig, type AppConfig } from "./infrastructure/config.js";
+import {
+  ConfigError,
+  loadConfig,
+  loadEmailConfig,
+  type AppConfig,
+  type EmailConfig,
+} from "./infrastructure/config.js";
 import {
   createDatabase,
   MigrationError,
@@ -56,6 +63,18 @@ import {
   readProfileFile,
   showProfile,
 } from "./profile-commands.js";
+import {
+  DIGEST_LOCK_KEY,
+  DIGEST_MAX_ATTEMPTS,
+  DIGEST_MAX_ITEMS,
+  DIGEST_NEW_DAYS,
+  digestFailed,
+  profileFailed,
+  runDigest,
+  withDigestLock,
+  type DigestSummary,
+} from "./notifications/run.js";
+import { createEmailSender, type EmailSender } from "./notifications/sender.js";
 import { previewSource, type SourcePreview } from "./sources/preview.js";
 import { sourceAdapters } from "./sources/registry.js";
 import { SourceFormatError, type SourceAdapter, type SourceHttpClient } from "./sources/types.js";
@@ -100,6 +119,15 @@ export interface CliDatabase {
    * left out (listMatchCandidates).
    */
   listMatchCandidates?(limit: number): Promise<MatchCandidates>;
+  /**
+   * Runs `task` with the pool while holding the digest advisory lock
+   * (src/notifications/run.ts), like withIngestLock. Optional only so that
+   * stubs for the other commands need not provide it.
+   */
+  withDigestLock?<T>(
+    task: (db: Kysely<Database>, signal: AbortSignal) => Promise<T>,
+    logger: Logger,
+  ): Promise<LockResult<T>>;
 }
 
 /** What commands that read sources need; injected so tests run without the network. */
@@ -114,12 +142,25 @@ export interface CliSourceDeps {
   readonly ingestTimeoutMs?: number;
 }
 
+/** What `digest` needs besides the database; injected so tests never send e-mail. */
+export interface CliDigestDeps {
+  /** Called once per non-dry run, after the configuration was validated. */
+  readonly createSender: (config: EmailConfig) => EmailSender;
+  readonly now: () => Date;
+  /** The pause between in-run retries of a transient send failure. */
+  readonly sleep: (ms: number) => Promise<void>;
+  /** RETRY_DELAYS_MS when absent. */
+  readonly retryDelaysMs?: readonly number[];
+}
+
 /** External dependencies, injected so the CLI can be unit-tested without PostgreSQL. */
 export interface CliDeps {
   /** Must not connect yet; connecting happens on the first operation. */
   readonly openDatabase: (databaseUrl: string) => CliDatabase;
   /** Defaults to defaultSourceDeps (the real network); tests inject fakes. */
   readonly sources?: CliSourceDeps;
+  /** Defaults to defaultDigestDeps (real e-mail per EMAIL_MODE); tests inject fakes. */
+  readonly digest?: CliDigestDeps;
 }
 
 /**
@@ -151,9 +192,19 @@ export const defaultSourceDeps: CliSourceDeps = {
   ingestTimeoutMs: INGEST_SOURCE_TIMEOUT_MS,
 };
 
+/** Production `digest` wiring: the sender EMAIL_MODE selects, the real clock. */
+export const defaultDigestDeps: CliDigestDeps = {
+  createSender: createEmailSender,
+  now: () => new Date(),
+  sleep: async (ms) => {
+    await sleep(ms);
+  },
+};
+
 /**
  * A real connection pool (src/infrastructure/db). `lockHeartbeatMs` exists for
- * integration tests; production uses INGEST_LOCK_HEARTBEAT_MS.
+ * integration tests; production uses INGEST_LOCK_HEARTBEAT_MS (and the digest
+ * lock's own default).
  */
 export function openCliDatabase(
   databaseUrl: string,
@@ -173,12 +224,18 @@ export function openCliDatabase(
     createCompanyProfile: (input) => createCompanyProfile(db, input),
     getCompanyProfile: (id) => getCompanyProfile(db, id),
     listMatchCandidates: (limit) => listMatchCandidates(db, limit),
+    withDigestLock: (task, logger) =>
+      withDigestLock(db, (signal) => task(db, signal), {
+        logger,
+        ...(options.lockHeartbeatMs === undefined ? {} : { heartbeatMs: options.lockHeartbeatMs }),
+      }),
   };
 }
 
 /** Production wiring. */
 export const defaultCliDeps: CliDeps = {
   sources: defaultSourceDeps,
+  digest: defaultDigestDeps,
   openDatabase: (databaseUrl) => openCliDatabase(databaseUrl),
 };
 
@@ -247,6 +304,24 @@ Commands:
             offer row that is no longer valid is skipped with a warning on stderr (row id
             and field names) and counted in the summary ("pominięto N ...").
             --limit  offers to read, 1-${String(MATCH_PREVIEW_MAX_LIMIT)}, default ${String(MATCH_PREVIEW_DEFAULT_LIMIT)}
+  digest [--dry-run] [--profile <profileId>]
+            Send today's digest: per active profile at most one e-mail a day (Poland's
+            calendar day) with the matching offers first stored in the last ${String(DIGEST_NEW_DAYS)} days that
+            are not closed or cancelled, not past their deadline (unknown kept) and never
+            sent to the profile before; at most ${String(DIGEST_MAX_ITEMS)} per e-mail, soonest deadline first (the
+            rest waits, "overflow"). No e-mail when there is nothing new. EMAIL_MODE=test
+            (default) writes each e-mail to EMAIL_OUTBOX_DIR (default ./outbox) and sends
+            nothing; EMAIL_MODE=smtp sends through SMTP_URL from EMAIL_FROM. Each offer goes
+            to a profile at most once: it is claimed before sending, so a send interrupted
+            without an answer is reported "uncertain" and never repeated; a failed send is
+            tried again by later runs, at most ${String(DIGEST_MAX_ATTEMPTS)} times. Prints one JSON summary with
+            counts per profile (never addresses or e-mail content). One run at a time
+            (lock): while another run holds it, prints status "skipped" and exits 0.
+            Requires an up-to-date schema (migrate). Exit 1 when a send failed or is
+            uncertain, a profile is missing or invalid, or the lock was lost.
+            --dry-run   build the digests and print the summary; nothing is claimed,
+                        sent or written to the outbox
+            --profile   only this profile (also when it has nothing new)
 `;
 
 type Command =
@@ -256,7 +331,8 @@ type Command =
   | "ingest"
   | "profile:create"
   | "profile:show"
-  | "match:preview";
+  | "match:preview"
+  | "digest";
 const commands: readonly Command[] = [
   "health",
   "migrate",
@@ -265,6 +341,7 @@ const commands: readonly Command[] = [
   "profile:create",
   "profile:show",
   "match:preview",
+  "digest",
 ];
 
 function isCommand(value: string): value is Command {
@@ -295,13 +372,20 @@ interface MatchPreviewArgs {
   readonly limit: number;
 }
 
+interface DigestArgs {
+  readonly dryRun: boolean;
+  /** null: every active profile. */
+  readonly profileId: string | null;
+}
+
 type Invocation =
   | { readonly command: "health" | "migrate" }
   | { readonly command: "source:preview"; readonly preview: PreviewArgs }
   | { readonly command: "ingest"; readonly ingest: IngestArgs }
   | { readonly command: "profile:create"; readonly file: string }
   | { readonly command: "profile:show"; readonly profileId: string }
-  | { readonly command: "match:preview"; readonly match: MatchPreviewArgs };
+  | { readonly command: "match:preview"; readonly match: MatchPreviewArgs }
+  | { readonly command: "digest"; readonly digest: DigestArgs };
 
 /** A real calendar day as `YYYY-MM-DD` (2026-02-30 is rejected, not rolled over). */
 function isCalendarDate(value: string): boolean {
@@ -450,6 +534,27 @@ function parseMatchPreviewArgs(args: readonly string[]): MatchPreviewArgs | stri
   return { profileId, limit: limit ?? MATCH_PREVIEW_DEFAULT_LIMIT };
 }
 
+/** `digest [--dry-run] [--profile <id>]`; returns the parsed arguments or a usage error. */
+function parseDigestArgs(args: readonly string[]): DigestArgs | string {
+  let dryRun = false;
+  let profileId: string | null = null;
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index] ?? "";
+    if (arg === "--dry-run") {
+      if (dryRun) return "Option --dry-run given twice.";
+      dryRun = true;
+    } else if (arg === "--profile") {
+      if (profileId !== null) return "Option --profile given twice.";
+      profileId = parseProfileId(args[index + 1]);
+      if (profileId === null) return "Option --profile needs a profile id (uuid).";
+      index++;
+    } else {
+      return `Unexpected argument: ${JSON.stringify(arg)}`;
+    }
+  }
+  return { dryRun, profileId };
+}
+
 /** Returns the invocation or a usage error message. */
 function parseInvocation(
   command: Command,
@@ -483,6 +588,10 @@ function parseInvocation(
     const match = parseMatchPreviewArgs(rest);
     return typeof match === "string" ? match : { command, match };
   }
+  if (command === "digest") {
+    const digest = parseDigestArgs(rest);
+    return typeof digest === "string" ? digest : { command, digest };
+  }
   if (rest.length > 0) return `Command "${command}" takes no arguments.`;
   return { command };
 }
@@ -494,7 +603,7 @@ const CRAWLER_CONTACT_REQUIRED =
 export const INTERNAL_ERROR_MESSAGE = "Internal error: the command failed unexpectedly.\n";
 
 /**
- * Single entry point for every operational command (later: digest).
+ * Single entry point for every operational command.
  * Kept free of process globals so it can be tested directly.
  *
  * Order matters: the command and its arguments are validated first, so a usage
@@ -547,8 +656,11 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
   }
 
   let config: AppConfig;
+  // Only `digest` reads the e-mail variables; checked before the database is opened.
+  let emailConfig: EmailConfig | null = null;
   try {
     config = loadConfig(io.env);
+    if (invocation.command === "digest") emailConfig = loadEmailConfig(io.env);
   } catch (error: unknown) {
     if (error instanceof ConfigError) {
       io.stderr(`${error.message}\n`);
@@ -579,6 +691,16 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
         return await runProfileShow(invocation.profileId, database, io);
       case "match:preview":
         return await runMatchPreview(config, invocation.match, database, io, sources);
+      case "digest":
+        if (emailConfig === null) throw new Error("e-mail configuration was not loaded");
+        return await runDigestCommand(
+          config,
+          emailConfig,
+          invocation.digest,
+          database,
+          io,
+          deps.digest ?? defaultDigestDeps,
+        );
     }
   } finally {
     await database.close();
@@ -1002,4 +1124,97 @@ async function runMatchPreview(
     }),
   );
   return ExitCode.Ok;
+}
+
+/**
+ * `digest`: today's digests under the digest lock (one run at a time), as
+ * one JSON summary on stdout (ids and counts only: never addresses or e-mail
+ * content, also in a dry run). Exit 0 when every e-mail went out or there was
+ * nothing to send, and when another run holds the lock (status `skipped`);
+ * 1 when a send failed or is uncertain, the profile given is missing or
+ * invalid, the lock was lost, the schema is not migrated or the database is
+ * unavailable.
+ */
+async function runDigestCommand(
+  config: AppConfig,
+  emailConfig: EmailConfig,
+  args: DigestArgs,
+  database: CliDatabase,
+  io: CliIo,
+  digestDeps: CliDigestDeps,
+): Promise<ExitCode> {
+  if (database.withDigestLock === undefined || database.pendingMigrations === undefined) {
+    throw new Error("database cannot run digest");
+  }
+  const logger = createLogger(config.logLevel, io.stderr);
+  const sender = args.dryRun ? null : digestDeps.createSender(emailConfig);
+  let locked: LockResult<DigestSummary>;
+  try {
+    const pending = await database.pendingMigrations();
+    if (pending.length > 0) {
+      io.stderr("Digest failed: the database schema is not up to date; run `migrate`.\n");
+      return ExitCode.Failure;
+    }
+    locked = await database.withDigestLock(
+      (db, signal) =>
+        runDigest(
+          {
+            db,
+            transport: emailConfig.mode,
+            sender,
+            now: digestDeps.now(),
+            logger,
+            sleep: digestDeps.sleep,
+            signal,
+            ...(digestDeps.retryDelaysMs === undefined
+              ? {}
+              : { retryDelaysMs: digestDeps.retryDelaysMs }),
+          },
+          { profileId: args.profileId, dryRun: args.dryRun },
+        ),
+      logger,
+    );
+  } catch (error: unknown) {
+    const failure = describeDatabaseFailure(error);
+    if (failure.reason === "unknown") throw error;
+    io.stderr(`Digest failed: database ${formatDatabaseFailure(failure)}\n`);
+    return ExitCode.Failure;
+  } finally {
+    sender?.close();
+  }
+
+  if (!locked.acquired) {
+    logger.warn("digest lock busy", { lockKey: String(DIGEST_LOCK_KEY) });
+    const skipped = { status: "skipped", reason: "lock_busy", dryRun: args.dryRun, profiles: [] };
+    io.stdout(`${JSON.stringify(skipped)}\n`);
+    io.stderr("Digest skipped: another digest run holds the lock; nothing was sent.\n");
+    return ExitCode.Ok;
+  }
+  const summary = locked.value;
+  const failed = locked.lockLost || digestFailed(summary);
+  io.stdout(`${JSON.stringify({ status: failed ? "failed" : "ok", ...summary })}\n`);
+  // Rows left pending (an uncertain send, a crashed run) are never resent: say so on every run.
+  const pending = summary.profiles.reduce((total, profile) => total + profile.uncertain, 0);
+  if (pending > 0) {
+    io.stderr(
+      `Digest: ${String(pending)} ` +
+        (pending === 1 ? "delivery is pending and needs" : "deliveries are pending and need") +
+        " an operator decision (README „Wynik niepewny”).\n",
+    );
+  }
+  if (!failed) return ExitCode.Ok;
+  if (locked.lockLost) {
+    io.stderr("Digest aborted: the digest lock was lost during the run (lock_lost).\n");
+  }
+  if (summary.errorCode !== null) {
+    io.stderr(
+      `Digest stopped (${summary.errorCode}): a send failed for a reason that is not about ` +
+        "the message; the remaining profiles were not run.\n",
+    );
+  }
+  const problems = summary.profiles
+    .filter(profileFailed)
+    .map((profile) => `${profile.profileId} (${profile.errorCode ?? profile.status})`);
+  if (problems.length > 0) io.stderr(`Digest failed for: ${problems.join(", ")}\n`);
+  return ExitCode.Failure;
 }

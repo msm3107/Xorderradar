@@ -58,6 +58,7 @@ src/
 │   ├── config.ts           # walidacja env (zod)                                    [PR-00]
 │   ├── logger.ts           # JSON-lines logger na stderr                            [PR-00]
 │   ├── db/                 # pula pg + Kysely, migracje, repozytoria, mapowanie błędów [PR-01]
+│   │                       # advisory-lock.ts: sesyjny advisory lock (ingest, digest) [PR-05]
 │   └── http/               # SafeHttpClient: polityka URL/IP, retry, limity      [PR-02]
 ├── domain/                 # typy + schematy zod: Source, Opportunity, CompanyProfile [PR-01]
 │                           # vocabulary.ts: kategorie MVP, 16 województw (D-023) [PR-04]
@@ -69,7 +70,8 @@ src/
 │                           # catch-up.ts: plan dni nadrabiania                  [PR-03B]
 ├── matching/               # match.ts (scoring, powody), text.ts (tokeny, odmiana), [PR-04]
 │                           # format.ts (polskie opisy powodów); czyste (D-023)
-├── notifications/          # digest, szablon, wysyłka, idempotencja            (plan, PR-05)
+├── notifications/          # digest.ts (szablon, czysty), sender.ts (outbox/SMTP), [PR-05]
+│                           # run.ts (wybór ofert, idempotencja, blokada digest; D-024)
 └── web/                    # minimalny UI renderowany po stronie serwera       (plan, PR-06)
 tests/
 ├── *.test.ts               # unit / smoke                                           [PR-00]
@@ -112,7 +114,12 @@ składają zależności (proste wstrzykiwanie przez parametry, bez kontenera DI)
   PR-04; update waliduje wynik w tej samej transakcji, więc błąd wycofuje zapis). PR-04:
   `opportunities.listMatchCandidates` (oferty bez `closed`/`cancelled`,
   `published_at DESC NULLS LAST, id`, limit; wiersz niezgodny ze schematem pominięty i
-  zwrócony w `skipped` z id i ścieżkami pól). PR-03A: `opportunities.ingestOpportunity` (upsert z wykrywaniem
+  zwrócony w `skipped` z id i ścieżkami pól). PR-05 (D-024):
+  `opportunities.listDigestCandidates` (bez `closed`/`cancelled`, termin nieznany lub nie
+  minął, `first_seen_at` od podanej chwili, `deadline ASC NULLS LAST, id`, limit; pominięte
+  jak wyżej), `company_profiles.listActiveCompanyProfiles` (aktywne, `created_at, id`;
+  nieprawidłowe wiersze w `skipped`) i `deliveries` (stan dnia profilu, stany doręczeń ofert,
+  `claimDeliveries` — rezerwacja w jednej transakcji, `markDeliveries`). PR-03A: `opportunities.ingestOpportunity` (upsert z wykrywaniem
   zmian, zwraca `inserted`/`updated`/`unchanged`, §5) i `ingestion-runs.recordIngestionRun`
   (zapis podsumowania przebiegu, §5).
 
@@ -439,16 +446,33 @@ tokenów tekstu, którego nie ma inne liczone słowo; przydział w D-023), `more
   licznik w podsumowaniu); termin filtruje digest (PR-05). Wyniki nie są zapisywane (zapis z
   doręczeniami w PR-05).
 
-### 4.5 Notifications (PR-05)
+### 4.5 Notifications (PR-05, zaimplementowany)
 
-`buildDigest(profile, matches)` (czyste) → `EmailMessage`; `EmailSender` z dwiema
-implementacjami: `test` (zapis do lokalnego outboxa/logu) i `smtp`. Idempotencja przez
-unikalny wpis `deliveries(profile_id, opportunity_id)` zapisywany transakcyjnie przed/po
-wysyłce wg strategii opisanej w PR-05.
+Szczegóły i uzasadnienie: D-010 (SMTP, biblioteka) i D-024 (wybór ofert, idempotencja).
+
+- `buildDigest(profile, items, now, { overflow })` (`digest.ts`, czyste, bez I/O) →
+  `{ subject, text, html }`; `items` = oferta + powody z `matchOpportunity`. Pola tylko
+  podane przez źródło („nie podano” dla lokalizacji, terminu, daty publikacji i kategorii),
+  link tylko `http(s)`, każda wartość w HTML przez `escapeHtml`, temat bez danych źródła.
+- `EmailSender` (`sender.ts`): `transport` (`test`/`smtp`), `send(email)`, `close()`. Tryb
+  `test` (`createOutboxSender`) zapisuje `.eml` (MIME z nodemailera, `streamTransport`) i
+  `.json` w `EMAIL_OUTBOX_DIR` (katalog `0700`, pliki `0600`, nazwy z czasu i UUID, nigdy z
+  danych; nieudany zapis drugiego pliku usuwa pierwszy — `writeAllOrNothing`); tryb `smtp`
+  (`createSmtpSender`) — TLS zawsze (D-010). Błąd → `EmailSendError` z kodem
+  (`smtp_<kod odpowiedzi lub błędu>`) i rodzajem `transient` / `permanent` / `unreachable` /
+  `setup` / `uncertain` (`classifySmtpError` czyta tylko kody i etap SMTP, nigdy komunikat
+  ani odpowiedź serwera; D-024). `sendWithRetry` ponawia tylko `transient` i `unreachable`
+  (pauzy 2 s, 10 s).
+- `runDigest(deps, { profileId, dryRun })` (`run.ts`): kandydaci raz na przebieg, profile po
+  kolei, dla każdego rezerwacja `pending` → wysyłka → `sent`/`failed`; wynik niepewny
+  zostawia `pending` (nigdy nie wysyłany ponownie). Błąd `setup`, `unreachable` lub
+  `uncertain` zatrzymuje przebieg (pozostałe profile `not_run`, `errorCode` podsumowania);
+  przy `setup`/`unreachable` wiersze są `failed` bez zużycia próby. Zegar, sender, `sleep` i sygnał
+  przerwania są wstrzykiwane (`CliDeps.digest`), więc testy działają bez sieci.
 
 ## 5. Model danych
 
-Stan zgodny z migracjami `0001_core_schema` … `0004_notice_updates`
+Stan zgodny z migracjami `0001_core_schema` … `0005_deliveries`
 (`src/infrastructure/db/migrations.ts`) — źródłem
 prawdy są migracje. Wszystkie kolumny czasu to `timestamptz`; `id` typu uuid generuje
 `gen_random_uuid()`. Statusy to `text` + `CHECK` (a nie typ `enum` PostgreSQL): dodanie
@@ -609,9 +633,35 @@ Jeden wiersz na przebieg jednego źródła: `id uuid` (PK), `source_id` (FK →
 (`src/domain/ingestion-run.ts`) i sama baza (`ingestion_runs_error_code_status_check`). Migracja dodaje też źródło `bzp` (`INSERT … ON CONFLICT (id)
 DO NOTHING` — istniejący wiersz, np. wyłączony przez operatora, zostaje bez zmian).
 
+### `deliveries` (PR-05, migracja `0005_deliveries`, D-024)
+
+Jeden wiersz na ofertę wysłaną (lub wysyłaną) profilowi jednym transportem:
+
+| Kolumna          | Typ                        | Null | Uwagi                                                         |
+| ---------------- | -------------------------- | ---- | ------------------------------------------------------------- |
+| `id`             | uuid                       | nie  | PK, `gen_random_uuid()`                                       |
+| `profile_id`     | uuid FK → company_profiles | nie  | `ON DELETE CASCADE` (usunięcie profilu usuwa historię)        |
+| `opportunity_id` | uuid FK → opportunities    | nie  | bez kaskady                                                   |
+| `transport`      | text + CHECK               | nie  | `test` / `smtp`                                               |
+| `digest_date`    | date                       | nie  | dzień digestu w Polsce (ostatnia rezerwacja)                  |
+| `status`         | text + CHECK               | nie  | `pending` (zarezerwowany, wynik nieznany) / `sent` / `failed` |
+| `attempts`       | integer                    | nie  | domyślnie 0; +1 przy każdym zapisanym wyniku, `>= 0`          |
+| `error_code`     | text                       | tak  | tylko kod `^[a-z][a-z0-9_]{0,63}$`; ustawiony ⇔ `failed`      |
+| `created_at`     | timestamptz                | nie  | domyślnie `now()`                                             |
+| `sent_at`        | timestamptz                | tak  | ustawiony ⇔ `sent`                                            |
+
+Ograniczenia: `deliveries_profile_id_fkey`, `deliveries_opportunity_id_fkey`,
+`deliveries_profile_opportunity_transport_key` (`UNIQUE (profile_id, opportunity_id,
+transport)` — podstawa „najwyżej raz”), `deliveries_transport_check`,
+`deliveries_status_check`, `deliveries_attempts_check`, `deliveries_error_code_check`,
+`deliveries_error_code_status_check` (`(status = 'failed') = (error_code IS NOT NULL)`),
+`deliveries_sent_at_check` (`(status = 'sent') = (sent_at IS NOT NULL)`). Indeks
+`deliveries_profile_transport_date_idx (profile_id, transport, digest_date)` pod „czy profil
+dostał dziś digest”. Nigdy treść e-maila, adres ani komunikat serwera.
+
 ### Później
 
-`deliveries` (PR-05). Żadnych tabel analitycznych w MVP.
+Żadnych tabel analitycznych w MVP.
 
 ## 6. Uruchamianie
 
@@ -670,16 +720,33 @@ failed`) — wynik zostaje, a blokada znika z końcem sesji. Każde połączenie
   wynik; po terminie — na samym końcu z „(po terminie)”) z powodami i „dopasowane X z Y”
   (plus liczba pominiętych nieprawidłowych wierszy, każdy z ostrzeżeniem w logu); bez danych
   kontaktowych, tekst ze źródła przez `cleanText`; nic nie zapisuje.
+- `digest [--dry-run] [--profile <profileId>]` (PR-05, D-024) — dzisiejsze digesty (dzień w
+  Polsce): dla każdego aktywnego profilu (albo jednego) nowe dopasowane oferty (pierwszy
+  zapis w ostatnich 7 dniach, bez `closed`/`cancelled`, termin nieznany lub nie minął), które
+  nie były mu jeszcze wysłane, najwyżej 50 na e-mail, najwyżej jeden e-mail na profil
+  dziennie. Kolejność kontroli: argumenty (kod 2) → konfiguracja, w tym zmienne `EMAIL_*`
+  i `SMTP_URL` (kod 1, przed bazą i wysyłką) → baza (oczekujące migracje → kod 1). Tryb
+  `test` (domyślny) zapisuje e-maile w `EMAIL_OUTBOX_DIR`; `smtp` wysyła. `--dry-run`: bez
+  wysyłki, bez zapisu, bez plików. Wynik: jedna linia JSON na stdout (§7, D-024); kod 0, gdy
+  wszystko poszło albo nie było czego wysłać, także przy zajętej blokadzie
+  (`{"status":"skipped","reason":"lock_busy",…}`); 1, gdy któryś profil `failed`,
+  `uncertain`, `not_found`, `invalid_profile`, `not_run` (utrata blokady) albo baza
+  niedostępna.
+- **Blokada digest:** ten sam mechanizm co ingest (`withAdvisoryLock` w
+  `src/infrastructure/db/advisory-lock.ts`), klucz `7206120309002` (`DIGEST_LOCK_KEY` w
+  `src/notifications/run.ts`), sprawdzanie co 5 s, logi `digest lock lost` / `digest lock
+release failed`. `ingest` i `digest` nie blokują się wzajemnie.
 - Planowany harmonogram (przykład w README; ten PR nie dodaje artefaktu cron/wdrożenia):
   `ingest` raz dziennie ok. 06:00 Europe/Warsaw bez opcji dnia (nadrabianie: zwykle tylko
-  wczoraj UTC, dzień już zamknięty; po przerwie — pominięte dni); `digest` (PR-05) — rano, po `ingest`.
+  wczoraj UTC, dzień już zamknięty; po przerwie — pominięte dni); `digest` — rano, po
+  `ingest` (np. 07:30).
 
 ## 7. Obserwowalność
 
 JSON-lines na stderr (`infrastructure/logger.ts`), stdout zarezerwowany na wynik komendy.
 Serializacja pól nie rzuca (`Error` → `{name, message}`, `bigint` → string, cykle →
 `"[Circular]"`); logger nie redaguje pól (`docs/SECURITY.md` §12).
-Błędy bazy w CLI (`health`, `migrate`, `ingest`) są raportowane jako stały powód + kod SQLSTATE/errno,
+Błędy bazy w CLI (`health`, `migrate`, `ingest`, `digest`) są raportowane jako stały powód + kod SQLSTATE/errno,
 nigdy jako komunikat sterownika/serwera.
 Każdy wpis `SafeHttpClient` zawiera `sourceId` i host (PR-02); `source:preview` loguje
 koniec przebiegu (`sourceId`, `status`, `durationMs`, liczniki, `incomplete`), każde
@@ -693,4 +760,8 @@ consecutive failed days`), niezapisane podsumowanie
 (`sourceId`, `errorCode` = SQLSTATE), zajętą, utraconą i niezwolnioną blokadę (`lockKey`,
 `errorCode`) oraz pominięte po przerwaniu źródła (`sourceIds`) — bez treści
 dokumentów, tytułów, danych kontaktowych i adresu bazy. Podsumowanie każdego przebiegu jest w
-`ingestion_runs`. Alerting/deployment: PR-07.
+`ingestion_runs`. `digest` (PR-05) loguje: wynik profilu (`digest profile done`: `profileId`,
+`status`, liczniki, `errorCode`), nieudaną i niepewną wysyłkę (`profileId`, `errorCode`,
+liczba ofert), pominięte nieprawidłowe oferty i profile (id i ścieżki pól), osiągnięty limit
+kandydatów oraz blokadę — bez adresów e-mail, tytułów, treści e-maili i `SMTP_URL`.
+Doręczenia są w `deliveries`. Alerting/deployment: PR-07.

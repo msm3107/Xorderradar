@@ -808,7 +808,7 @@ describe("formatReasons (Polish explanations)", () => {
     ],
     [
       { kind: "category_unverifiable", points: 0, cpvCodes: [] },
-      "brak CPV — kategoria niesprawdzalna",
+      "kategoria: ogłoszenie nie podaje kodu CPV",
     ],
     [
       { kind: "category_unverifiable", points: 0, cpvCodes: ["45000000-7"] },

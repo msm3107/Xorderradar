@@ -1,14 +1,16 @@
-import { sql, type Kysely } from "kysely";
-import { describeDatabaseFailure } from "../infrastructure/db/errors.js";
+import type { Kysely } from "kysely";
+import { withAdvisoryLock, type LockResult } from "../infrastructure/db/advisory-lock.js";
 import type { Database } from "../infrastructure/db/schema.js";
 import type { Logger } from "../infrastructure/logger.js";
+
+export type { LockResult } from "../infrastructure/db/advisory-lock.js";
 
 /**
  * Key of the session-level PostgreSQL advisory lock that serializes `ingest`
  * runs (docs/ARCHITECTURE.md §6, D-019). Advisory locks are per database, not
  * per schema, so one key covers every process using the same database.
  * Arbitrary but fixed; it must not change while an old process may still run.
- * Kysely's migrator uses its own, different key.
+ * Kysely's migrator uses its own, different key; `digest` has its own too.
  */
 export const INGEST_LOCK_KEY = 7_206_120_309_001;
 
@@ -30,11 +32,6 @@ export class IngestLockLostError extends Error {
   }
 }
 
-/** `lockLost`: the lock connection broke while the task ran; its signal was aborted. */
-export type LockResult<T> =
-  | { readonly acquired: true; readonly value: T; readonly lockLost: boolean }
-  | { readonly acquired: false };
-
 export interface IngestLockOptions {
   /** Lock loss and release failures are logged with codes only. */
   readonly logger: Logger;
@@ -42,81 +39,20 @@ export interface IngestLockOptions {
   readonly heartbeatMs?: number;
 }
 
-const LOCK_KEY_FIELD = String(INGEST_LOCK_KEY);
-
 /**
  * Runs `task` while holding the ingest lock, or returns `{ acquired: false }`
- * at once when another session holds it (never waits). The lock is taken with
- * `pg_try_advisory_lock` on one dedicated pooled connection and held for the
- * whole task; `task` uses the pool for its own queries, not this connection.
- *
- * The lock lives as long as that connection's session. While the task runs,
- * the connection is checked every `heartbeatMs`; when a check fails (the
- * session was terminated, the server restarted, the network broke), the
- * signal passed to `task` is aborted with IngestLockLostError so the run stops
- * instead of continuing unprotected, and the result reports `lockLost`. A
- * broken connection never crashes the process: the pool gives every client an
- * 'error' listener (createDatabase).
- *
- * The lock is released afterwards, also when `task` rejects. A failing
- * release is logged and does not discard the task's result: the session still
- * ends when the caller closes the pool, and the server then drops the lock.
+ * at once when another session holds it (never waits). See withAdvisoryLock
+ * for how the lock is held, checked and released.
  */
 export async function withIngestLock<T>(
   db: Kysely<Database>,
   task: (signal: AbortSignal) => Promise<T>,
   options: IngestLockOptions,
 ): Promise<LockResult<T>> {
-  const { logger } = options;
-  const heartbeatMs = options.heartbeatMs ?? INGEST_LOCK_HEARTBEAT_MS;
-  return db.connection().execute(async (connection): Promise<LockResult<T>> => {
-    const { rows } = await sql<{
-      acquired: boolean;
-    }>`SELECT pg_try_advisory_lock(${INGEST_LOCK_KEY}::bigint) AS acquired`.execute(connection);
-    if (rows[0]?.acquired !== true) return { acquired: false };
-
-    const controller = new AbortController();
-    let stopped = false;
-    let timer: NodeJS.Timeout | undefined;
-    // The check in flight, awaited before the connection is used for the unlock.
-    let check: Promise<void> = Promise.resolve();
-    const scheduleCheck = (): void => {
-      timer = setTimeout(() => {
-        check = sql`SELECT 1`.execute(connection).then(
-          () => {
-            if (!stopped) scheduleCheck();
-          },
-          (error: unknown) => {
-            logger.error("ingest lock lost", {
-              lockKey: LOCK_KEY_FIELD,
-              errorCode: describeDatabaseFailure(error).code,
-            });
-            controller.abort(new IngestLockLostError());
-          },
-        );
-      }, heartbeatMs);
-    };
-    scheduleCheck();
-
-    let value: T;
-    try {
-      value = await task(controller.signal);
-    } finally {
-      stopped = true;
-      clearTimeout(timer);
-      await check;
-      // After a loss there is no session left to unlock.
-      if (!controller.signal.aborted) {
-        try {
-          await sql`SELECT pg_advisory_unlock(${INGEST_LOCK_KEY}::bigint)`.execute(connection);
-        } catch (error: unknown) {
-          logger.error("ingest lock release failed", {
-            lockKey: LOCK_KEY_FIELD,
-            errorCode: describeDatabaseFailure(error).code,
-          });
-        }
-      }
-    }
-    return { acquired: true, value, lockLost: controller.signal.aborted };
-  });
+  return withAdvisoryLock(
+    db,
+    { key: INGEST_LOCK_KEY, name: "ingest", lostError: () => new IngestLockLostError() },
+    task,
+    { logger: options.logger, heartbeatMs: options.heartbeatMs ?? INGEST_LOCK_HEARTBEAT_MS },
+  );
 }
