@@ -393,3 +393,47 @@ export async function listMatchCandidates(
   }
   return { offers, skipped };
 }
+
+export interface DigestCandidateQuery {
+  /** Offers first stored before this instant are not new any more (D-024). */
+  readonly firstSeenSince: Date;
+  /** Offers whose deadline is before this instant are left out. */
+  readonly now: Date;
+  /** Upper bound of rows read; the caller reports when it is reached. */
+  readonly limit: number;
+}
+
+/**
+ * Stored offers a daily digest may contain (`digest`, PR-05, D-024): not
+ * `closed`/`cancelled`, the deadline not passed (an unknown deadline stays),
+ * first stored at or after `firstSeenSince`. Ordered by deadline, soonest
+ * first (unknown last), then id, so a cut at `limit` keeps the most urgent.
+ * Whether a profile matches and was already sent an offer is decided by the
+ * caller. Rows failing the domain schema are returned in `skipped`, as in
+ * listMatchCandidates.
+ */
+export async function listDigestCandidates(
+  db: Kysely<Database>,
+  query: DigestCandidateQuery,
+): Promise<MatchCandidates> {
+  const rows = await db
+    .selectFrom("opportunities")
+    .selectAll()
+    .where("status", "not in", ["closed", "cancelled"])
+    .where((eb) => eb.or([eb("deadline", "is", null), eb("deadline", ">=", query.now)]))
+    .where("first_seen_at", ">=", query.firstSeenSince)
+    .orderBy(sql`deadline ASC NULLS LAST, id ASC`)
+    .limit(query.limit)
+    .execute();
+  const offers: Opportunity[] = [];
+  const skipped: SkippedRow[] = [];
+  for (const row of rows) {
+    try {
+      offers.push(toOpportunity(row));
+    } catch (error: unknown) {
+      if (!(error instanceof DomainError) || error.code !== "invalid_stored_row") throw error;
+      skipped.push({ id: row.id, fields: error.fields });
+    }
+  }
+  return { offers, skipped };
+}

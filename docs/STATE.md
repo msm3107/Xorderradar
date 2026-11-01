@@ -1,18 +1,14 @@
 # Current State
 
-Current phase: PHASE 1 — DATA PIPELINE
-Current PR: PR-04 — Matching Engine
-Status: PR-03 complete — Part C (normalization helpers) **MERGED in PR #7 (merge commit
-f41b49c)** after the owner review (docs follow-up ad42ff5). PR-04 (deterministic matching,
-company profile commands, `match:preview`) implemented: Code & Safety Review PASS with
-findings (M1, M2, L1–L5) → fix round → C&S re-review PASS (N1 Low) → N1 fix round → C&S
-PASS → Quality Review ACCEPT WITH NOTES (R1 STATE, O1–O6) → fix round → C&S PASS (L-a, L-b
-Low) → follow-up round → C&S PASS → Quality re-review ACCEPT; PR #8 opened (head 183da77).
-Owner review of PR #8 (live BZP data, 586 offers × 6 profiles): PASS with one Medium (a county
-widened a profile to other voivodeships) → owner-review round (region order, `profile:create`
-warnings) → C&S PASS (M1 docs vs code) → fix → C&S PASS (L1 wording, fixed by coordinator) →
-Quality ACCEPT WITH NOTES (STATE, warning advice) → fixes; pushed to PR #8 for the owner's
-re-review (not merged).
+Current phase: PHASE 2 — VALUE DELIVERY
+Current PR: PR-05 — Alert / Daily Digest
+Status: PR-04 **MERGED in PR #8 (merge commit f8f113a)** after the owner's re-review. PR-05
+(daily digest, `deliveries`, test/smtp senders) implemented: Code & Safety Review PASS with
+findings (M1 SMTP setup failures not stopped, L1–L4) → fix round → C&S PASS (optional L-A,
+L-B) → Quality Review ACCEPT WITH NOTES (cancellation caveat, pending rows on stderr, overflow
+notice placement, CPV wording, "Link: nie podano") → fix round 2 (+ L-A, L-B) → C&S PASS (M-1:
+L-A regressed a refused EHLO under STARTTLS) → fix round 3 → C&S PASS. PR opened for the
+owner's review (not merged).
 
 ## Completed
 
@@ -331,70 +327,114 @@ recorded in `docs/PR_PLAN.md` → PR-03 „Podział”; acceptance criteria 1–
     N1 (this status), N2 (`tenderId` → `null` cases), N3/N5 (README: `ingest` exit 1 cases;
     monitor freshness by the newest `succeeded` run), N6 (cancellation notices, open question
     below).
+- **PR-04 — Matching Engine** (`docs/PR_PLAN.md` → PR-04, AC1–AC7) — **MERGED in PR #8
+  (merge commit f8f113a)** after the owner's re-review. D-023 new (rules, profile schema,
+  `match:preview`).
+
+  - `src/matching/` (pure, no network/LLM; ESLint import allowlist: only `domain` and
+    `sources/normalize`, pinned by `tests/matching-dependency-guard.test.ts`):
+    - `match.ts` — `matchOpportunity(offer, profile)` → `{ score, matched, reasons }`. Points:
+      category +40 (`mvpCategoriesForCpv` ∩ profile categories), first keyword +30, more than one
+      keyword +10, region +20, each exclude −100. `matched` = score ≥ 50, no exclude, region not
+      `mismatch`. Missing CPV → reason "brak CPV — kategoria niesprawdzalna" (AC6; since PR-05:
+      "kategoria: ogłoszenie nie podaje kodu CPV").
+    - Region is three-valued (`match` / `mismatch` / `unknown` with an explicit reason), checked
+      in this order (D-023, changed 2026-10-31 after the owner's review): no regions in the
+      profile → +20 "bez ograniczeń"; no location → unknown (AC3); a known offer voivodeship
+      outside the profile's voivodeships → mismatch whatever the county (counties never widen a
+      profile with voivodeships); a known listed county → match; a listed voivodeship → match;
+      otherwise unknown (no offer voivodeship while the profile lists voivodeships, or "źródło nie podaje powiatu", AC5) or mismatch. Narrowing by county
+      inside a listed voivodeship is not implemented (no source gives counties yet); a
+      counties-only profile gets BZP offers from the whole country as unknown, and
+      `profile:create` warns about it. Counties compared by `countyKey` (`comparableText(normalizeCounty(…))`, "m. st." /
+      "m.st." / "miasto stołeczne" / "(miasto na prawach powiatu)" variants; AC7).
+    - `text.ts` — tokenizer and phrase search on `comparableText`: consecutive tokens; tokens
+      ≥ 4 letters match by stem (one final vowel dropped) as prefix; number and short tokens
+      exact only. Keyword de-duplication by maximum bipartite matching (each counted keyword has
+      a hit of its own; profile order; hit lists capped at the number of keywords).
+    - `format.ts` — Polish reason texts.
+  - `src/domain/vocabulary.ts` — `MVP_CATEGORIES`, `VOIVODESHIPS` (old exports kept as
+    re-exports). Profile schema: categories from the MVP list (≥ 1), canonical voivodeships,
+    keywords with a letter or digit and ≤ 10 tokens. Stored profiles are validated on read
+    (breaking rows → `invalid_stored_row`, fixed by hand; no `profile:update` yet).
+    `comparableText` drops `\p{Cf}` (soft hyphen).
+  - Repositories: `listMatchCandidates` (no `cancelled`/`closed`,
+    `published_at DESC NULLS LAST, id ASC`, limit; returns `{ offers, skipped }` — invalid
+    stored rows are skipped per row, the owner's PR-01 rule); `updateCompanyProfile` in one
+    transaction.
+  - CLI (`src/profile-commands.ts`): `profile:create <file.json>` (regular file, ≤ 64 KiB,
+    strict UTF-8, per-field messages without values; exit 2 bad file/profile, 1 duplicate
+    e-mail), `profile:show <id>`, `match:preview <id> [--limit N]` (default 100, max 1000;
+    deadline first, null last, past deadlines last with "(po terminie)"; summary "dopasowane X z
+    Y", skipped rows counted and logged by id; never prints contact data). README has a
+    copy-paste example profile (tested).
+  - Reviews: C&S PASS with findings (M1 region hid a mismatching voivodeship; M2 update could
+    write then throw; L1 number prefix match; L2 duplicate inflections; L3 cost; L4 unknown key
+    as "(root)"; L5 FIFO/symlink tests) → fix round → C&S PASS (N1: de-duplication looked only
+    at the first hit) → fix (maximum matching; also a flaky integration test made deterministic)
+    → C&S PASS → Quality ACCEPT WITH NOTES (R1 STATE; O1 past deadlines; O2 per-row skip; O3
+    error texts; O4 README example; O5/O6 docs) → fix round → C&S PASS (L-a zod `invalid_type`
+    can print "Infinity"; L-b `--limit` counts skipped rows) → follow-up → C&S PASS → Quality
+    re-review ACCEPT → PR #8.
+  - Owner review of PR #8 (2026-10-31): Medium — with "mazowieckie + powiat warszawski zachodni"
+    36 offers matched, 20 outside mazowieckie (region unknown, BZP gives no county) → fixed by
+    the region order above. QoL done: `profile:create` warns (stderr, exit 0) about counties
+    without voivodeships, keywords that only match their exact form (< 4 characters; advice: add
+    a longer stem next to the short word) and no include keywords (small contracts have no
+    CPV). Owner-round reviews: C&S PASS (M1: docs claimed narrowing the code did not do → code
+    now never widens, docs state the exact rule) → C&S PASS (L1 wording) → Quality ACCEPT WITH
+    NOTES (STATE lines; "replace" advice would lose noun forms) → fixes.
+  - Owner decisions still open (D-023): threshold 50; region `mismatch` rejects whatever the
+    score; narrowing by county inside a listed voivodeship (decide when a source gives
+    counties); counties-only profiles match nationwide as unknown (warned) — confirm before
+    PR-05 e-mails; stem rule (phrases need consecutive tokens; "auto" exclude
+    also removes "Automatyka"); validation on read; maximum-matching de-duplication (only affects
+    the +10 bonus and reason lines, never `matched`).
 
 ## In progress
 
-**PR-04 — Matching Engine** (`docs/PR_PLAN.md` → PR-04, AC1–AC7) — implemented; PR opened for
-the owner's review (not merged). D-023 new (rules, profile schema, `match:preview`).
+**PR-05 — Alert / Daily Digest** (`docs/PR_PLAN.md` → PR-05, AC1–AC4) — implemented; PR opened
+for the owner's review (not merged). D-010 Accepted (SMTP through nodemailer), D-024 new (digest
+rules, idempotency, failure classes, operator procedure for `pending` rows).
 
-- `src/matching/` (pure, no network/LLM; ESLint import allowlist: only `domain` and
-  `sources/normalize`, pinned by `tests/matching-dependency-guard.test.ts`):
-  - `match.ts` — `matchOpportunity(offer, profile)` → `{ score, matched, reasons }`. Points:
-    category +40 (`mvpCategoriesForCpv` ∩ profile categories), first keyword +30, more than one
-    keyword +10, region +20, each exclude −100. `matched` = score ≥ 50, no exclude, region not
-    `mismatch`. Missing CPV → reason "brak CPV — kategoria niesprawdzalna" (AC6).
-  - Region is three-valued (`match` / `mismatch` / `unknown` with an explicit reason), checked
-    in this order (D-023, changed 2026-10-31 after the owner's review): no regions in the
-    profile → +20 "bez ograniczeń"; no location → unknown (AC3); a known offer voivodeship
-    outside the profile's voivodeships → mismatch whatever the county (counties never widen a
-    profile with voivodeships); a known listed county → match; a listed voivodeship → match;
-    otherwise unknown (no offer voivodeship while the profile lists voivodeships, or "źródło nie podaje powiatu", AC5) or mismatch. Narrowing by county
-    inside a listed voivodeship is not implemented (no source gives counties yet); a
-    counties-only profile gets BZP offers from the whole country as unknown, and
-    `profile:create` warns about it. Counties compared by `countyKey` (`comparableText(normalizeCounty(…))`, "m. st." /
-    "m.st." / "miasto stołeczne" / "(miasto na prawach powiatu)" variants; AC7).
-  - `text.ts` — tokenizer and phrase search on `comparableText`: consecutive tokens; tokens
-    ≥ 4 letters match by stem (one final vowel dropped) as prefix; number and short tokens
-    exact only. Keyword de-duplication by maximum bipartite matching (each counted keyword has
-    a hit of its own; profile order; hit lists capped at the number of keywords).
-  - `format.ts` — Polish reason texts.
-- `src/domain/vocabulary.ts` — `MVP_CATEGORIES`, `VOIVODESHIPS` (old exports kept as
-  re-exports). Profile schema: categories from the MVP list (≥ 1), canonical voivodeships,
-  keywords with a letter or digit and ≤ 10 tokens. Stored profiles are validated on read
-  (breaking rows → `invalid_stored_row`, fixed by hand; no `profile:update` yet).
-  `comparableText` drops `\p{Cf}` (soft hyphen).
-- Repositories: `listMatchCandidates` (no `cancelled`/`closed`,
-  `published_at DESC NULLS LAST, id ASC`, limit; returns `{ offers, skipped }` — invalid
-  stored rows are skipped per row, the owner's PR-01 rule); `updateCompanyProfile` in one
-  transaction.
-- CLI (`src/profile-commands.ts`): `profile:create <file.json>` (regular file, ≤ 64 KiB,
-  strict UTF-8, per-field messages without values; exit 2 bad file/profile, 1 duplicate
-  e-mail), `profile:show <id>`, `match:preview <id> [--limit N]` (default 100, max 1000;
-  deadline first, null last, past deadlines last with "(po terminie)"; summary "dopasowane X z
-  Y", skipped rows counted and logged by id; never prints contact data). README has a
-  copy-paste example profile (tested).
-- Reviews: C&S PASS with findings (M1 region hid a mismatching voivodeship; M2 update could
-  write then throw; L1 number prefix match; L2 duplicate inflections; L3 cost; L4 unknown key
-  as "(root)"; L5 FIFO/symlink tests) → fix round → C&S PASS (N1: de-duplication looked only
-  at the first hit) → fix (maximum matching; also a flaky integration test made deterministic)
-  → C&S PASS → Quality ACCEPT WITH NOTES (R1 STATE; O1 past deadlines; O2 per-row skip; O3
-  error texts; O4 README example; O5/O6 docs) → fix round → C&S PASS (L-a zod `invalid_type`
-  can print "Infinity"; L-b `--limit` counts skipped rows) → follow-up → C&S PASS → Quality
-  re-review ACCEPT → PR #8.
-- Owner review of PR #8 (2026-10-31): Medium — with "mazowieckie + powiat warszawski zachodni"
-  36 offers matched, 20 outside mazowieckie (region unknown, BZP gives no county) → fixed by
-  the region order above. QoL done: `profile:create` warns (stderr, exit 0) about counties
-  without voivodeships, keywords that only match their exact form (< 4 characters; advice: add
-  a longer stem next to the short word) and no include keywords (small contracts have no
-  CPV). Owner-round reviews: C&S PASS (M1: docs claimed narrowing the code did not do → code
-  now never widens, docs state the exact rule) → C&S PASS (L1 wording) → Quality ACCEPT WITH
-  NOTES (STATE lines; "replace" advice would lose noun forms) → fixes.
-- Owner decisions still open (D-023): threshold 50; region `mismatch` rejects whatever the
-  score; narrowing by county inside a listed voivodeship (decide when a source gives
-  counties); counties-only profiles match nationwide as unknown (warned) — confirm before
-  PR-05 e-mails; stem rule (phrases need consecutive tokens; "auto" exclude
-  also removes "Automatyka"); validation on read; maximum-matching de-duplication (only affects
-  the +10 bonus and reason lines, never `matched`).
+- `digest [--dry-run] [--profile <id>]` (`src/notifications/run.ts`, CLI in `src/cli.ts`): one
+  JSON summary on stdout, exit 0 = ok / nothing to send / lock busy, exit 1 = any profile
+  failed, uncertain, `not_found`, `invalid_profile`, `not_run`, or a schema/DB problem. A stderr
+  line counts `pending` deliveries that need an operator decision (README „Wynik niepewny”).
+- Eligibility: status not `closed`/`cancelled`; `deadline` null or ≥ now; first seen within 7
+  days; ≤ 10 000 candidates; invalid stored rows skipped per row and counted. ≤ 50 offers per
+  e-mail, soonest deadline first; the overflow is announced under the heading and goes out on
+  the next days.
+- `deliveries` (migration `0005_deliveries`): unique `(profile_id, opportunity_id, transport)`,
+  status `pending`/`sent`/`failed`, attempts ≤ 3, safe `error_code` CHECK. At most once: a
+  profile with a `sent` or `pending` row on the Warsaw day is skipped; rows are claimed in one
+  committed transaction before sending; `pending` rows (crash or uncertain outcome) are never
+  resent automatically. Shared `withAdvisoryLock` (`src/infrastructure/db/advisory-lock.ts`,
+  extracted from the ingest lock).
+- E-mail (`src/notifications/digest.ts`, pure): subject with count and profile name only;
+  text + HTML, every source value escaped, links only http(s), missing values „nie podano”
+  (never invented); footer with the reason, the deadline/cancellation caveat and how to
+  unsubscribe (reply or operator sets `active=false`; token link in PR-06).
+- Senders (`src/notifications/sender.ts`): `test` (default) writes `.eml` + `.json` to
+  `EMAIL_OUTBOX_DIR` (0700/0600, all-or-nothing); `smtp` only with `EMAIL_MODE=smtp`,
+  `EMAIL_FROM`, `SMTP_URL` (smtps:// or smtp:// with STARTTLS required), TLS ≥ 1.2, timeouts,
+  one connection per message. Failure classes `transient`/`permanent`/`unreachable`/`setup`/
+  `uncertain`: setup, exhausted unreachable and uncertain stop the run without spending
+  attempts; the rest of the profiles become `not_run`.
+- Dependency: `nodemailer` 10.1.7 (MIT-0, no deps). Published 2026-10-18 — under the preferred
+  two-week age until 2026-11-01 18:24 UTC; < 10.1.4 has addressparser advisories.
+- Reviews: C&S PASS (M1 SMTP setup failures not stopped — N logins and attempts spent; L1
+  EHOSTUNREACH/ENETUNREACH uncertain; L2 kept, documented; L3 partial outbox files; L4 Markdown
+  code spans) → fixes → C&S PASS (L-A CONN reply at close ≠ setup; L-B 421 → unreachable) →
+  Quality ACCEPT WITH NOTES (cancellation caveat, pending visibility, overflow placement, CPV
+  wording, missing link) → fix round 2 → C&S PASS (M-1 refused EHLO under STARTTLS classified
+  permanent) → fix round 3 → C&S PASS.
+- Owner decisions open: merge after the nodemailer age or accept now; explicit confirmation
+  before any real `smtp` send; 50 per e-mail (Quality asks 20–30?); skip offers due within
+  24–48 h?; is reply-to-unsubscribe enough before PR-06 (sender identification,
+  `List-Unsubscribe`)?; plan item for BZP cancellation notices before the pilot; coder
+  deviations listed in D-024 (in-run retry only for not-delivered errors, `pending_today` skip,
+  `unreachable` class, uncertain stops the run, `send_*` error codes).
 
 ## Blockers
 
@@ -428,7 +468,7 @@ the owner's review (not merged). D-023 new (rules, profile schema, `match:previe
 
 ## Decisions made
 
-See `docs/DECISIONS.md` (D-001 … D-023). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
+See `docs/DECISIONS.md` (D-001 … D-024). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
 on `node:https` with pinned lookup, no HTTP library) accepted in PR-02 Part A; D-015 (first
 source: BZP through the official API) in PR-02 Part B; PR-03 Part A: D-016 (fingerprint and
 `content_hash` format), D-017 (`unchanged` writes nothing, no `last_seen_at`), D-018 (ingest
@@ -441,28 +481,34 @@ latest published update wins, provenance columns, skip reasons), D-019 (busy rep
 D-021 (ingest day ranges and automatic catch-up). PR-03 Part C: D-022 (offer details from
 `htmlBody`, normalization helpers, CPV → MVP dictionary); D-015/D-016 amended (offers read
 `htmlBody`; `content_hash` consequence of the new values). PR-04: D-023 (matching rules,
-region semantics, profile schema, `match:preview`).
+region semantics, profile schema, `match:preview`). PR-05: D-010 accepted (SMTP via
+nodemailer), D-024 (digest, `deliveries`, failure classes, `pending` procedure).
 
 ## Next action
 
-1. Owner re-reviews PR #8 after the owner-review round (decisions listed under In progress /
-   D-023) and merges it. Backfill still-open offers (PR #7 is merged) with
-   `ingest bzp --from … --to …` (≤ 31 days per call, README). Cosmetic nits left from Part B:
-   over-wide `ingest` help lines in `src/cli.ts`; two test titles still say "200 000"
-   (1 000 000 cases exist). Watch live runs for `too_large` on update pages
-   (`BZP_PAGE_SIZE` 25 kept; lower it if it happens).
+1. Owner reviews the PR-05 PR (decisions under In progress / D-024) and merges it. Before
+   real customers: confirm `smtp` explicitly (SECURITY §10/§14) and send one digest to an own
+   mailbox first. Optional follow-ups from the PR-05 Quality Review: cap the CPV codes repeated
+   in „Dlaczego pasuje”; Polish date format („3.11.2026, 11:00”); a different heading for a new
+   profile's first e-mail (up to 7 days of offers); the other „CPV spoza słownika … kategoria
+   niesprawdzalna” wording. Known limits: the stderr pending count misses profiles reported
+   `not_run`; a server that closes with an error reply at the greeting spends attempts (D-024).
+   Still from PR-04: backfill still-open offers with `ingest bzp --from … --to …` (≤ 31 days
+   per call, README); cosmetic nits from Part B (over-wide `ingest` help lines in
+   `src/cli.ts`; two test titles still say "200 000"); watch live runs for `too_large` on update
+   pages (`BZP_PAGE_SIZE` 25 kept).
 2. Owner verifies PR-02 AC1 outside the container (command and checklist under Blockers); a
    first live `ingest bzp --date <past weekday>` on the same machine is a useful follow-up
    check (exit 0, `inserted` > 0, a second run all `unchanged`; `skipped` > 0 and some
    `updated` from `NoticeUpdateNotice` when originals of that day's updates are stored).
-3. Next PR after PR-04: PR-05 (digest, `docs/ROADMAP.md`). Notes for it from the PR-04
-   reviews:
+3. Next PR after PR-05: PR-06 (Minimal User Interface, `docs/ROADMAP.md`; token unsubscribe
+   link). Notes carried from the PR-04 reviews (PR-05 status marked):
    - Matching cost: ~10–60 ms per offer × profile pair in the worst case (100 ten-token
      keywords, 10 000-char description); fine for 10–100 profiles × ≤ 1000 offers, measure
      before optimising (D-023).
-   - The digest must filter by deadline vs now (past deadlines out) and handle
-     `invalid_stored_row` per row, as `match:preview` does; `--limit`-style caps count skipped
-     rows.
+   - Done in PR-05: the digest filters by deadline vs now (past deadlines out) and skips
+     `invalid_stored_row` per row (counted). Matching cost re-measured at ~120 µs per pair on
+     typical data; tokenizing once per offer still deferred (measure on pilot data).
    - Owner decisions from the PR-04 review (threshold, counties-only profiles) may change the
      scoring before the digest relies on it.
    - Deferred from the owner's PR #8 review: tokenize each offer once per digest run instead
@@ -476,8 +522,8 @@ region semantics, profile schema, `match:preview`).
      the profile guidance.
    - Resolved in PR-04 (from the PR-03C reviews): `matching` depends on `sources/normalize`
      by an explicit ESLint allowlist (no new neutral module; vocabulary moved to
-     `src/domain`); `comparableText` drops `\p{Cf}` (soft hyphen); the "brak CPV — kategoria
-     niesprawdzalna" reason exists; small contracts (no CPV) match on title + description
+     `src/domain`); `comparableText` drops `\p{Cf}` (soft hyphen); the missing-CPV reason exists (worded
+     "kategoria: ogłoszenie nie podaje kodu CPV" since PR-05); small contracts (no CPV) match on title + description
      keywords — keyword-only ones reach 50 only with region match/unrestricted.
 
    Still deferred from the PR-03C reviews:
@@ -487,8 +533,7 @@ region semantics, profile schema, `match:preview`).
      `50` also catches vehicle/ship/aircraft repair (`501`/`502`); candidates `324` (it),
      `397`/`301` (wyposazenie). Do not map bare `45`/`452`; general construction must be
      matched by title/description keywords.
-   - The long description (≤ 10 000 chars) is for matching/detail; PR-05 should show a short
-     snippet in the digest.
+   - Done in PR-05: the digest shows a ~300-character description snippet cut on a word.
    - Field boundaries (D-022, C&S L-a): a description line numbered ≥ its label (e.g. "4.3)"
      inside 4.2.2) ends the field early — shorter description, never wrong data. Refine to
      boundaries within the same top-level section only if real notices show it.
@@ -507,8 +552,9 @@ region semantics, profile schema, `match:preview`).
 5. Open question for PR-03C/PR-05 (Quality Review N6): BZP cancellation notices (a tender
    withdrawn → status `cancelled`) have no plan item yet and are not handled by PR-03B
    (recorded in D-015). Without one the digest may show cancelled tenders as open; decide
-   whether to fetch and apply them like `NoticeUpdateNotice` (by `tenderId`), or record the
-   limitation for PR-05.
+   whether to fetch and apply them like `NoticeUpdateNotice` (by `tenderId`). PR-05 records
+   the limitation (D-024, README) and the e-mail footer says the procedure may have been
+   cancelled; since the digest now reaches customers, decide before the pilot.
 6. Open item from the PR-03B reviews (C&S L5, Quality Review): deadline changes of small
    contracts are effectively not applied. Both captured `SmallContractNotice` originals
    (fixture 2026-10-29) have `tenderId` = `null`, and updates are linked only by `tenderId`, so
@@ -621,7 +667,7 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
     domain schema); never trust it as a fetch target without SafeHttpClient's host/SSRF checks.
   - **PR-04/05:** list/digest reads must handle `invalid_stored_row` per row (skip + log the
     row id), so one inconsistent row does not abort the whole run. Done for
-    `listMatchCandidates`/`match:preview` in PR-04; PR-05 digest still to do.
+    `listMatchCandidates`/`match:preview` in PR-04 and for the digest in PR-05.
   - **PR-05/06:** stored URLs may still contain `'`, `` ` ``, `{`, `}` and percent-encoded
     controls — escape contextually on output (SECURITY §10).
   - **PR-07 CI:** set `CI`/`REQUIRE_DB_TESTS` with `TEST_DATABASE_URL`; without the URL the run
@@ -638,6 +684,17 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-01, PR-05 after fix round 3 (Node 22, pnpm 10.28.0, PostgreSQL 16):
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 1262/1262 tests passed in 37 files, DB tests included (PR-04:
+1105 in 32). `pnpm audit --prod`: no known vulnerabilities; full `pnpm audit`: unchanged (1
+moderate, dev-only minimatch via eslint). No real e-mail sent: tests use `*.invalid`, `[::1]`
+or a local fake SMTP server; C&S probed nodemailer's real EHLO error shapes on 127.0.0.1.
+Quality ran `digest` (dry run, real run, re-run, next day, pending row, 52-offer overflow,
+smtp to 127.0.0.1:1) in a temporary schema of radar_test with a scratch outbox; both removed
+afterwards. Existing tests changed only for the new migration/table lists (`0005_deliveries`),
+the shared lock helper and the deliberate CPV wording change.
 
 2026-10-31, PR-04 owner-review round of PR #8 (Node 22, pnpm 10.28.0, PostgreSQL 16):
 `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`

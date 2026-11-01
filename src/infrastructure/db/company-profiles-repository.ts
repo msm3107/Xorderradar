@@ -82,6 +82,41 @@ export async function getCompanyProfile(
   return row === undefined ? null : toCompanyProfile(row);
 }
 
+/** A stored profile left out of a list because it no longer satisfies the schema. */
+export interface SkippedProfile {
+  readonly id: string;
+  /** Field paths only, never values. */
+  readonly fields: readonly string[];
+}
+
+/**
+ * All active profiles, oldest first (then by id), for `digest`. A row that
+ * fails the schema does not abort the list: it is returned in `skipped` with
+ * its id and field paths.
+ */
+export async function listActiveCompanyProfiles(
+  db: Kysely<Database>,
+): Promise<{ readonly profiles: CompanyProfile[]; readonly skipped: SkippedProfile[] }> {
+  const rows = await db
+    .selectFrom("company_profiles")
+    .selectAll()
+    .where("active", "=", true)
+    .orderBy("created_at", "asc")
+    .orderBy("id", "asc")
+    .execute();
+  const profiles: CompanyProfile[] = [];
+  const skipped: SkippedProfile[] = [];
+  for (const row of rows) {
+    try {
+      profiles.push(toCompanyProfile(row));
+    } catch (error: unknown) {
+      if (!(error instanceof DomainError) || error.code !== "invalid_stored_row") throw error;
+      skipped.push({ id: row.id, fields: error.fields });
+    }
+  }
+  return { profiles, skipped };
+}
+
 /**
  * Updates the given fields only; returns null when the profile does not exist.
  * The merged row is validated inside the same transaction as the UPDATE: when

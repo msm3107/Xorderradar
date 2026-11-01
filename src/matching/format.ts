@@ -31,7 +31,7 @@ export function formatReason(reason: MatchReason): string {
       return `kategoria: niezgodna (oferta: ${reason.offerCategories.join(", ")})`;
     case "category_unverifiable":
       return reason.cpvCodes.length === 0
-        ? "brak CPV — kategoria niesprawdzalna"
+        ? "kategoria: ogłoszenie nie podaje kodu CPV"
         : `CPV spoza słownika (${reason.cpvCodes.join(", ")}) — kategoria niesprawdzalna`;
     case "keyword":
       return `słowo: ${reason.keyword} (${FIELD_NAMES[reason.field]})`;

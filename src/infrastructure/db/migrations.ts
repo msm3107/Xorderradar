@@ -196,4 +196,49 @@ export const migrations: Readonly<Record<string, Migration>> = {
       `.execute(db);
     },
   },
+
+  "0005_deliveries": {
+    async up(db: Kysely<unknown>) {
+      // One row per offer sent (or being sent) to a profile over one transport
+      // (D-024). The unique key makes delivery at-most-once: a row is claimed
+      // (pending) before the e-mail is sent and never inserted twice. Only a
+      // short error code is stored, never a server message or an address.
+      await sql`
+        CREATE TABLE deliveries (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          profile_id uuid NOT NULL,
+          opportunity_id uuid NOT NULL,
+          transport text NOT NULL,
+          digest_date date NOT NULL,
+          status text NOT NULL,
+          attempts integer NOT NULL DEFAULT 0,
+          error_code text,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          sent_at timestamptz,
+          -- Deleting a profile deletes its delivery history; offers are never deleted.
+          CONSTRAINT deliveries_profile_id_fkey
+            FOREIGN KEY (profile_id) REFERENCES company_profiles (id) ON DELETE CASCADE,
+          CONSTRAINT deliveries_opportunity_id_fkey
+            FOREIGN KEY (opportunity_id) REFERENCES opportunities (id),
+          CONSTRAINT deliveries_profile_opportunity_transport_key
+            UNIQUE (profile_id, opportunity_id, transport),
+          CONSTRAINT deliveries_transport_check CHECK (transport IN ('test', 'smtp')),
+          CONSTRAINT deliveries_status_check CHECK (status IN ('pending', 'sent', 'failed')),
+          CONSTRAINT deliveries_attempts_check CHECK (attempts >= 0),
+          CONSTRAINT deliveries_error_code_check
+            CHECK (error_code IS NULL OR error_code ~ '^[a-z][a-z0-9_]{0,63}$'),
+          CONSTRAINT deliveries_error_code_status_check
+            CHECK ((status = 'failed') = (error_code IS NOT NULL)),
+          CONSTRAINT deliveries_sent_at_check CHECK ((status = 'sent') = (sent_at IS NOT NULL))
+        )
+      `.execute(db);
+
+      // "Has this profile had its digest today?" (the unique key's index
+      // already serves lookups by profile).
+      await sql`
+        CREATE INDEX deliveries_profile_transport_date_idx
+          ON deliveries (profile_id, transport, digest_date)
+      `.execute(db);
+    },
+  },
 };

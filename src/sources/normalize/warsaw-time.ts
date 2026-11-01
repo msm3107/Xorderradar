@@ -71,3 +71,32 @@ export function warsawLocalToUtc(local: WarsawLocalTime): Date | null {
   const [only] = matches;
   return matches.length === 1 && only !== undefined ? only : null;
 }
+
+const warsawMinuteFormat = new Intl.DateTimeFormat("en-US", {
+  timeZone: "Europe/Warsaw",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+function warsawParts(instant: Date): (type: Intl.DateTimeFormatPartTypes) => string {
+  const parts = new Map(
+    warsawMinuteFormat.formatToParts(instant).map((part) => [part.type, part.value]),
+  );
+  return (type) => parts.get(type) ?? "??";
+}
+
+/** `YYYY-MM-DD HH:MM` in Poland's time (deadlines are Warsaw wall-clock times). */
+export function formatWarsawMinute(instant: Date): string {
+  const part = warsawParts(instant);
+  return `${part("year")}-${part("month")}-${part("day")} ${part("hour")}:${part("minute")}`;
+}
+
+/** The calendar day in Poland, `YYYY-MM-DD` (e.g. the digest's day). */
+export function warsawDay(instant: Date): string {
+  const part = warsawParts(instant);
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}

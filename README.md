@@ -63,6 +63,7 @@ Sprawdzenie `source:preview` (AC1): kod wyjścia 0, `normalized` > 0, a w logach
 | `profile:create <file.json>`                                                                | Zakłada profil firmy z pliku JSON (≤ 64 KiB, UTF-8) ze wszystkimi polami: `email`, `name`, `categories` (co najmniej jedna z: `bhp`, `elektryka`, `instalacje`, `it`, `ppoz`, `remonty`, `serwis`, `sprzatanie`, `szkolenia`, `wyposazenie`), `includeKeywords`, `excludeKeywords`, `voivodeships` (nazwy 16 województw, np. „Mazowieckie” albo „woj. mazowieckie” — zapisywane w postaci kanonicznej), `counties`, `active`. Region: znane województwo oferty spoza województw profilu → poza regionem, niezależnie od powiatu (powiaty nigdy nie poszerzają profilu z województwami). W obrębie województwa z listy decyduje województwo; zawężanie powiatem nie jest zaimplementowane (żadne źródło nie podaje jeszcze powiatu). Powiaty działają samodzielnie tylko przy nieznanym województwie oferty albo w profilu bez województw — BZP nie podaje powiatu, więc taki profil dostaje oferty BZP z całego kraju jako „nieznane” (wystarczą kategoria i słowo, 70 pkt). Po utworzeniu profilu ostrzeżenia na stderr (profil i tak jest zapisany, kod `0`): powiaty bez województw, słowa krótsze niż 4 znaki (pasuje tylko dokładna forma: „gaz” nie znajdzie „gazu”) i brak słów kluczowych (małe zamówienia BZP bez CPV nigdy nie pasują). Słowa dopasowują też formy odmienione (temat bez końcowej samogłoski), także wykluczające: wykluczenie „auto” usuwa też „Automatyka”; liczby tylko dokładnie; słowo ≤ 10 wyrazów. Nieznane pole → nazwa pola i lista dozwolonych. Wypisuje `{"status":"ok","id":"…"}`. Plik nieczytelny, za duży, niepoprawny JSON albo profil → kod `2` (do 5 ścieżek pól z opisem błędu, np. `email (missing)`, `categories.1 (not an allowed value)`, i dozwolone wartości przy kategoriach / województwach; bez wartości z pliku; baza nie jest otwierana); e-mail już użyty → `1`. Przykład pliku — niżej.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `profile:show <profileId>`                                                                  | Wypisuje profil jako JSON; nieznany id → `1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `match:preview <profileId> [--limit N]`                                                     | Dopasowuje najnowsze oferty (bez `closed` i `cancelled`; `--limit` ofert do odczytu, 1–1000, domyślnie 100) do profilu (D-023) i wypisuje tekstem dopasowane — po terminie (najbliższy pierwszy, bez terminu na końcu), potem wyniku — z wynikiem, tytułem, zamawiającym, terminem (czas polski), linkiem i powodami („dlaczego: kategoria: elektryka (CPV 45310000-3); słowo: oświetlenie (tytuł); region: mazowieckie”), na końcu „dopasowane X z Y”. Oferty po terminie — na samym końcu, z „(po terminie)”; nieprawidłowe zapisane wiersze ofert są pomijane (ostrzeżenie w logu, licznik w podsumowaniu, kod `0`), ale liczą się do `--limit`, więc ofert może być mniej niż N — ile pominięto, mówi podsumowanie. Bez danych kontaktowych; nic nie zapisuje ani nie wysyła. Działa też dla profilu nieaktywnego (z informacją o tym).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `digest [--dry-run] [--profile <profileId>]`                                                | Dzisiejszy digest (dzień w Polsce): każdy aktywny profil (albo tylko `--profile`) dostaje najwyżej jeden e-mail dziennie z nowymi dopasowanymi ofertami (pierwszy zapis w ostatnich 7 dniach, bez `closed`/`cancelled`, bez ofert po terminie — termin nieznany zostaje jako „nie podano”), których jeszcze nie dostał; najwyżej 50 na e-mail, najbliższy termin pierwszy (reszta w kolejnych dniach). Bez nowych ofert — bez e-maila. Domyślnie tryb `test`: e-mail trafia do plików w `EMAIL_OUTBOX_DIR`, nic nie jest wysyłane. `--dry-run`: tylko liczy, nic nie zapisuje ani nie wysyła. Wynik: jedna linia JSON (`status`, `digestDate`, `transport`, `profiles[]` z `status` i licznikami), bez adresów i tytułów. Kod `0`, gdy wszystko wysłano albo nie było czego wysłać, także gdy trwa inny `digest` (`"status":"skipped"`); `1`, gdy wysyłka się nie udała lub jej wynik jest niepewny, profil nie istnieje lub jest nieprawidłowy, są niewykonane migracje albo baza jest niedostępna. Szczegóły — niżej, „Digest (e-mail)”.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 Kody wyjścia: `0` — OK, `1` — błąd konfiguracji/wykonania (np. baza niedostępna), `2` — błędne
 użycie (komenda i argumenty są sprawdzane przed konfiguracją, więc błędne użycie zawsze daje `2`;
@@ -218,6 +219,64 @@ zawierać host, fragment URL-a lub dane — więc hasło z `DATABASE_URL` nie tr
 Nieoczekiwany błąd wewnętrzny kończy komendę kodem `1` ze stałym komunikatem
 `Internal error: the command failed unexpectedly.` (bez treści błędu i stack trace).
 
+### Digest (e-mail)
+
+`digest` uruchamiamy raz dziennie **po `ingest`**, np. o 07:30 czasu polskiego (ten sam
+crontab z `CRON_TZ=Europe/Warsaw`):
+
+```cron
+30 7 * * * cd /opt/radar-zamowien && node dist/main.js digest >>/var/log/radar/digest.log 2>&1
+```
+
+- **Tryb `test` (domyślny, `EMAIL_MODE=test`)** — nic nie wychodzi z maszyny: każdy e-mail to
+  plik `.eml` (gotowa wiadomość MIME) i `.json` (temat, tekst, HTML) w `EMAIL_OUTBOX_DIR`
+  (domyślnie `./outbox`, w `.gitignore`; katalog `0700`, pliki `0600` — zawierają adres
+  odbiorcy). Doręczenia zapisują się z transportem `test`, więc późniejsze przejście na `smtp`
+  wyśle oferty od nowa (jeśli nadal są nowe i przed terminem).
+- **Tryb `smtp` — tylko jawnie i po potwierdzeniu właściciela projektu** (wysyłka do
+  prawdziwych odbiorców, `docs/SECURITY.md` §10, §14): `EMAIL_MODE=smtp`, `EMAIL_FROM`
+  (obsługiwana skrzynka — odbiorcy rezygnują, odpowiadając na e-mail) i `SMTP_URL`
+  (`smtps://` albo `smtp://` z wymaganym STARTTLS). Brak lub błąd którejś zmiennej → kod
+  `1` przed otwarciem bazy, komunikat z nazwami zmiennych, bez wartości. Przed pierwszą
+  prawdziwą wysyłką: `digest --dry-run` (ile ofert dostałby każdy profil).
+- **Ponowne uruchomienie tego samego dnia nic nie wysyła** (`already_sent_today`); oferta
+  trafia do profilu najwyżej raz. Nieudana wysyłka (`failed`, np. odrzucenie przez serwer) jest
+  ponawiana przez kolejne uruchomienia (najwyżej 3 uruchomienia na ofertę); chwilowe błędy
+  (np. odpowiedź 4xx, brak połączenia) są ponawiane od razu w tym samym przebiegu, najwyżej
+  2 razy.
+- **Błąd konfiguracji lub serwera zatrzymuje przebieg** (`errorCode` w podsumowaniu, komunikat
+  `Digest stopped (…)`, kod `1`): `send_setup_failed` (logowanie, TLS/STARTTLS, odrzucony
+  nadawca `EMAIL_FROM`, niezapisywalny outbox — bez ponawiania), `send_server_unreachable`
+  (serwer nieosiągalny po ponowieniach), `send_outcome_unknown` (wynik niepewny, niżej).
+  Pozostałe profile dostają `not_run`; przy dwóch pierwszych próba się nie liczy, więc po
+  naprawie konfiguracji kolejne uruchomienie wyśle wszystkie oferty.
+- **Wynik niepewny** (`uncertain` — połączenie zerwane w trakcie wysyłki, albo przerwany
+  proces: `pending_today` / licznik `uncertain`) nie jest ponawiany automatycznie, żeby nie
+  wysłać e-maila dwa razy. Każdy przebieg, który widzi takie wiersze, wypisuje na stderr
+  `Digest: N deliveries are pending and need an operator decision …` (kod wyjścia bez zmian).
+  Sprawdź log serwera SMTP (tryb `test`: outbox), czy wiadomość
+  doszła, i zdecyduj (`docs/DECISIONS.md` D-024):
+
+  ```sql
+  SELECT profile_id, opportunity_id, digest_date FROM deliveries WHERE status = 'pending';
+  -- doszła:
+  UPDATE deliveries SET status = 'sent', sent_at = now(), attempts = attempts + 1
+    WHERE status = 'pending' AND profile_id = '…';
+  -- nie doszła (kolejny digest wyśle te oferty jak nowe):
+  DELETE FROM deliveries WHERE status = 'pending' AND profile_id = '…';
+  ```
+
+- **Rezygnacja:** odbiorca odpisuje lub pisze do operatora; operator wyłącza profil
+  (`UPDATE company_profiles SET active = false WHERE id = '…';`). Link wypisu z tokenem — PR-06.
+- Nakładające się uruchomienia są bezpieczne: drugie kończy się
+  `{"status":"skipped","reason":"lock_busy",…}`, komunikatem `Digest skipped: …` i kodem `0`.
+- **Termin:** „po terminie” liczy się z zapisanego terminu. Dla małych zamówień BZP i dni
+  niepobranych w kolejności termin może być nieaktualny (przedłużenie nie dotarło) — taki
+  przetarg może zostać pominięty. Odwołania postępowań (ogłoszenia BZP o unieważnieniu /
+  odwołaniu) nie są jeszcze pobierane, więc odwołany przetarg może trafić do digestu jako
+  otwarty. E-mail przypomina, że termin mógł się zmienić, a postępowanie zostać odwołane, i
+  każe sprawdzić ogłoszenie w źródle (D-024).
+
 ## Konfiguracja
 
 Aplikacja czyta konfigurację **wyłącznie ze zmiennych środowiskowych** procesu
@@ -239,6 +298,13 @@ Aplikacja czyta konfigurację **wyłącznie ze zmiennych środowiskowych** proce
   Opcjonalny dla `health`/`migrate`; komendy pobierające źródła (od PR-02) bez niego się nie
   uruchomią. Musi to być prawdziwy, obsługiwany kontakt — nie wymyślamy go. Błędna wartość →
   `Invalid environment configuration: CRAWLER_CONTACT` (bez wartości).
+- **E-mail (`digest`, PR-05):** `EMAIL_MODE` (`test` — domyślnie, albo `smtp`),
+  `EMAIL_FROM` (adres albo `Nazwa <adres>`; w trybie `test` domyślnie
+  `Radar Zamówień <radar@example.invalid>`), `SMTP_URL` (`smtps://użytkownik:hasło@host:465`
+  albo `smtp://…:587` ze STARTTLS; znaki specjalne w haśle zakodowane procentowo; bez ścieżki
+  i parametrów; nigdy nie wypisywany), `EMAIL_OUTBOX_DIR` (tryb `test`, domyślnie
+  `./outbox`). Czytane tylko przez `digest`; w trybie `smtp` `EMAIL_FROM` i `SMTP_URL` są
+  wymagane. Błąd → `Invalid e-mail configuration: <nazwy zmiennych>`.
 - **Produkcja / cron:** bezpośrednie `node dist/main.js …` **nie czyta** `.env`. Zmienne
   eksportuje środowisko uruchomieniowe (crontab, unit systemd, panel hostingu). Kto chce
   użyć pliku, podaje go jawnie: `node --env-file=/ścieżka/do/pliku dist/main.js health`.

@@ -154,14 +154,30 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
 - Dynamiczne identyfikatory (kolumny sortowania) tylko z allowlisty.
 - Ograniczenia integralności (unique, FK, CHECK) w bazie, nie tylko w kodzie.
 
-## 10. Output encoding & e-mail safety _(od PR-05/06)_
+## 10. Output encoding & e-mail safety _(e-mail od PR-05, UI od PR-06)_
 
-- Wszystkie dane ze źródeł escapowane kontekstowo w HTML e-maili i UI.
-- Nagłówki e-mail budowane przez bibliotekę (ochrona przed header injection); temat bez
-  surowych danych ze źródła lub po sanityzacji znaków nowej linii.
+- Wszystkie dane ze źródeł escapowane kontekstowo w HTML e-maili i UI. E-mail (PR-05,
+  `src/notifications/digest.ts`): każda wartość przez `escapeHtml` (`&`, `<`, `>`, `"`, `'`
+  i grawis), także w atrybucie `href` (zawsze w cudzysłowie); link tylko `http:`/`https:` po
+  `new URL` (inne schematy, np. `javascript:`, `data:`, i adresy względne → „Link: nie
+  podano”, bez `href`); znaki sterujące usunięte (`cleanText`). Test z wrogim tytułem i opisem (`tests/digest.test.ts`).
+- Nagłówki e-mail budowane przez bibliotekę (nodemailer, D-010; ochrona przed header
+  injection); temat bez surowych danych ze źródła lub po sanityzacji znaków nowej linii. PR-05:
+  temat zawiera tylko liczbę ofert i nazwę profilu (bez znaków sterujących, ≤ 80 znaków);
+  adresy przekazywane jako obiekty `{name, address}`, `EMAIL_FROM` walidowany (bez `"<>\` i
+  znaków sterujących w nazwie), jeden odbiorca na wiadomość, dostęp nodemailera do plików i
+  URL-i w treści wyłączony.
 - Domyślny tryb wysyłki: `test`. Wysyłka do prawdziwych odbiorców tylko w jawnie
   skonfigurowanym trybie `smtp` **i po potwierdzeniu właściciela projektu**.
+- SMTP (PR-05): TLS zawsze — `smtps://` albo `smtp://` z wymaganym STARTTLS (serwer bez
+  STARTTLS → błąd przed AUTH i kopertą, test z lokalnym serwerem), TLS ≥ 1.2, weryfikacja
+  certyfikatu włączona, timeouty połączenia, powitania, gniazda i DNS; `SMTP_URL` bez
+  parametrów zapytania (nodemailer czytałby z nich opcje TLS). Odrzucone logowanie, błąd
+  TLS/STARTTLS lub certyfikatu nie są ponawiane i zatrzymują przebieg po pierwszej próbie —
+  jedno nieudane logowanie na przebieg, nie jedno na profil (D-024).
 - Każdy e-mail zawiera informację, dlaczego odbiorca go dostaje, i sposób rezygnacji.
+- Testy nie wysyłają prawdziwych e-maili: fałszywy sender, outbox w katalogu tymczasowym albo
+  lokalny serwer na `127.0.0.1`; adresy wyłącznie pseudonimizowane (`*.invalid`).
 
 ## 11. Authentication & authorization _(od PR-06)_
 
@@ -189,6 +205,12 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
   Powody odrzuceń z `normalize` to stałe teksty z nazwami pól (bez wartości).
   Pominięte ogłoszenia o zmianie (od PR-03B) — tylko `sourceId`, `externalId`, `tenderId`
   (publiczne identyfikatory) i stały powód; nigdy treść `htmlBody`.
+- `digest` (od PR-05) loguje, wypisuje i zapisuje w `deliveries` wyłącznie identyfikatory
+  (`profileId`, `opportunityId`), statusy, liczniki, ścieżki pól i kody błędów wysyłki
+  (`smtp_<kod odpowiedzi lub błędu>`, `^[a-z][a-z0-9_]{0,63}$` — nigdy komunikat ani odpowiedź
+  serwera, które mogą zawierać adres). Nigdy adresów e-mail, tytułów, treści e-maili ani
+  `SMTP_URL`. Pliki outboxu (tryb `test`) zawierają adres i treść — katalog `0700`, pliki
+  `0600`, `outbox/` w `.gitignore`.
 - Komunikaty błędów dla użytkownika są bezpieczne; szczegóły tylko w logu.
 - Błędy bazy danych (od PR-01): CLI pokazuje tylko stały powód + kod SQLSTATE/errno, nigdy
   komunikatu sterownika/serwera; repozytoria zamieniają naruszenia ograniczeń na

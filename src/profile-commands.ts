@@ -12,7 +12,11 @@ import { formatReasons } from "./matching/format.js";
 import { countyKey, matchOpportunity, type MatchResult } from "./matching/match.js";
 import { MIN_INFLECTED_TOKEN_LENGTH, tokenize } from "./matching/text.js";
 import { normalizeVoivodeship } from "./sources/normalize/regions.js";
+import { formatWarsawMinute } from "./sources/normalize/warsaw-time.js";
 import { cleanText } from "./sources/normalize/whitespace.js";
+
+// Moved to the normalize helpers in PR-05 (the digest uses it too); still exported here.
+export { formatWarsawMinute };
 
 /**
  * Operator commands for company profiles and the match preview (PR-04,
@@ -284,23 +288,6 @@ export function profileWarnings(profile: CompanyProfileInput): string[] {
 /** The profile as `profile:show` prints it. */
 export function showProfile(profile: CompanyProfile): string {
   return `${JSON.stringify(profile)}\n`;
-}
-
-const warsawMinute = new Intl.DateTimeFormat("en-US", {
-  timeZone: "Europe/Warsaw",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
-
-/** `YYYY-MM-DD HH:MM` in Poland's time (deadlines are Warsaw wall-clock times). */
-export function formatWarsawMinute(instant: Date): string {
-  const parts = new Map(warsawMinute.formatToParts(instant).map((part) => [part.type, part.value]));
-  const part = (type: Intl.DateTimeFormatPartTypes) => parts.get(type) ?? "??";
-  return `${part("year")}-${part("month")}-${part("day")} ${part("hour")}:${part("minute")}`;
 }
 
 interface PreviewItem {

@@ -2,6 +2,10 @@ import type { ColumnType, Generated } from "kysely";
 import type { IngestionRunStatus } from "../../domain/ingestion-run.js";
 import type { OpportunityStatus } from "../../domain/opportunity.js";
 
+/** Mirrors deliveries_transport_check / deliveries_status_check (migration 0005). */
+export type DeliveryTransport = "test" | "smtp";
+export type DeliveryStatus = "pending" | "sent" | "failed";
+
 /**
  * Row types for the Kysely query builder. They mirror the SQL in
  * `migrations.ts` by hand (no codegen); integration tests catch drift.
@@ -91,9 +95,24 @@ export interface IngestionRunsTable {
   error_code: string | null;
 }
 
+export interface DeliveriesTable {
+  id: Generated<string>;
+  profile_id: string;
+  opportunity_id: string;
+  transport: DeliveryTransport;
+  /** Written as `YYYY-MM-DD`; select it as text (see IngestionRunsTable). */
+  digest_date: ColumnType<Date, string, string>;
+  status: DeliveryStatus;
+  attempts: number;
+  error_code: string | null;
+  created_at: Generated<Date>;
+  sent_at: Date | null;
+}
+
 export interface Database {
   sources: SourcesTable;
   opportunities: OpportunitiesTable;
   company_profiles: CompanyProfilesTable;
   ingestion_runs: IngestionRunsTable;
+  deliveries: DeliveriesTable;
 }
