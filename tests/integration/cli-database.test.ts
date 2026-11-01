@@ -51,6 +51,7 @@ describe.skipIf(skipWithoutDatabase)("CLI with a real database (PostgreSQL)", ()
           "0003_opportunities_tender_id",
           "0004_notice_updates",
           "0005_deliveries",
+          "0006_access",
         ],
       },
     });
@@ -74,6 +75,7 @@ describe.skipIf(skipWithoutDatabase)("CLI with a real database (PostgreSQL)", ()
         "0003_opportunities_tender_id",
         "0004_notice_updates",
         "0005_deliveries",
+        "0006_access",
       ],
     });
 

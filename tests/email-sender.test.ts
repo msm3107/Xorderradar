@@ -10,6 +10,8 @@ import {
   createSmtpSender,
   EmailSendError,
   mailOptions,
+  oneClickUnsubscribeUrl,
+  redactTokenLinks,
   sendWithRetry,
   unsubscribeMailto,
   writeAllOrNothing,
@@ -56,6 +58,44 @@ describe("createOutboxSender", () => {
     expect(mime).toMatch(/^Subject: /m);
     expect(mime).toContain("Content-Type: multipart/alternative");
     expect(JSON.parse(await readFile(join(outboxDir, json), "utf8"))).toEqual({ from, ...email });
+  });
+
+  it("keeps the token links in the .eml but redacts them in the .json copy", async () => {
+    const loginToken = "L0gin_Token-".padEnd(43, "x");
+    const unsubscribeToken = "Wypis_Token-".padEnd(43, "y");
+    const login = `https://radar.example.invalid/dostep/${loginToken}`;
+    const unsubscribe = `https://radar.example.invalid/wypis/${unsubscribeToken}`;
+    const outboxDir = join(dir, "outbox-redacted");
+    const sender = createOutboxSender({ outboxDir, from });
+    await sender.send({
+      ...email,
+      text: `Profil:\n${login}\nWypis:\n${unsubscribe}\n`,
+      html: `<p><a href="${login}">${login}</a></p>\n<p><a href="${unsubscribe}">${unsubscribe}</a></p>\n`,
+      unsubscribeUrl: unsubscribe,
+    });
+    sender.close();
+    const files = (await readdir(outboxDir)).sort();
+    const [eml, json] = files;
+    if (eml === undefined || json === undefined) throw new Error("files missing");
+
+    // Unfold quoted-printable soft line breaks before searching the MIME text.
+    const mimeText = (await readFile(join(outboxDir, eml), "utf8")).replace(/=\r?\n/g, "");
+    expect(mimeText).toContain(`/dostep/${loginToken}`);
+    expect(mimeText).toContain(`/wypis/${unsubscribeToken}`);
+
+    const copy = await readFile(join(outboxDir, json), "utf8");
+    expect(copy).not.toContain(loginToken);
+    expect(copy).not.toContain(unsubscribeToken);
+    const parsed = JSON.parse(copy) as { text: string; html: string };
+    expect(parsed.text).toBe(
+      "Profil:\nhttps://radar.example.invalid/dostep/[token]\n" +
+        "Wypis:\nhttps://radar.example.invalid/wypis/[token]\n",
+    );
+    expect(parsed.html).toContain(
+      '<a href="https://radar.example.invalid/dostep/[token]">' +
+        "https://radar.example.invalid/dostep/[token]</a>",
+    );
+    expect(parsed.html).not.toMatch(/\/(dostep|wypis)\/(?!\[token\])/);
   });
 
   it("reports an outbox that cannot be written as a setup failure", async () => {
@@ -414,5 +454,95 @@ describe("createSmtpSender against a server without STARTTLS", () => {
     expect(
       commands.filter((command) => ["AUTH", "MAIL", "RCPT", "DATA"].includes(command)),
     ).toEqual([]);
+  });
+});
+
+describe("one-click List-Unsubscribe (RFC 8058)", () => {
+  const token = "a".repeat(43);
+  const oneClick = `https://radar.example.invalid/wypis/${token}`;
+
+  async function mimeWith(unsubscribeUrl: string | undefined, sender = from) {
+    const transporter = createTransport({ streamTransport: true, buffer: true, newline: "unix" });
+    const info = await transporter.sendMail(
+      mailOptions(sender, {
+        ...email,
+        ...(unsubscribeUrl === undefined ? {} : { unsubscribeUrl }),
+      }),
+    );
+    if (!Buffer.isBuffer(info.message)) throw new Error("no buffer");
+    return headerLines(info.message.toString("utf8"));
+  }
+
+  it("puts the https link first, then the mailto:, and adds List-Unsubscribe-Post", async () => {
+    const lines = await mimeWith(oneClick);
+    expect(lines).toContain(
+      `List-Unsubscribe: <${oneClick}>, <mailto:radar@example.invalid?subject=wypis> (Wypisz)`,
+    );
+    expect(lines).toContain("List-Unsubscribe-Post: List-Unsubscribe=One-Click");
+    expect(lines.filter((line) => line.startsWith("List-Unsubscribe:"))).toHaveLength(1);
+  });
+
+  it("keeps the https link alone when the sender address is not plain", async () => {
+    const lines = await mimeWith(oneClick, { name: "Radar", address: "Radar <x@example.invalid>" });
+    expect(lines).toContain(`List-Unsubscribe: <${oneClick}>`);
+    expect(lines).toContain("List-Unsubscribe-Post: List-Unsubscribe=One-Click");
+  });
+
+  it("keeps the mailto-only header and no Post header without a link", async () => {
+    const lines = await mimeWith(undefined);
+    expect(lines).toContain(
+      "List-Unsubscribe: <mailto:radar@example.invalid?subject=wypis> (Wypisz)",
+    );
+    expect(lines.some((line) => line.startsWith("List-Unsubscribe-Post:"))).toBe(false);
+  });
+
+  it.each([
+    [oneClick, oneClick],
+    [`http://localhost:3000/wypis/${token}`, `http://localhost:3000/wypis/${token}`],
+    [
+      `https://radar.example.invalid:8443/wypis/${token}`,
+      `https://radar.example.invalid:8443/wypis/${token}`,
+    ],
+    [undefined, null],
+    [`http://radar.example.invalid/wypis/${token}`, null],
+    [`https://radar.example.invalid/dostep/${token}`, null],
+    [`https://radar.example.invalid/wypis/${token}?x=1`, null],
+    [`https://radar.example.invalid/wypis/${token}>, <https://evil.example.invalid`, null],
+    [`https://radar.example.invalid/wypis/${token}\r\nBcc: x@example.invalid`, null],
+    [`https://user@radar.example.invalid/wypis/${token}`, null],
+    [`https://RADAR.example.invalid/wypis/${token}`, null],
+    [`https://radar.example.invalid/wypis/${token.slice(1)}`, null],
+  ])("oneClickUnsubscribeUrl(%j) → %j", (value, expected) => {
+    expect(oneClickUnsubscribeUrl(value)).toBe(expected);
+  });
+
+  it.each([
+    // PUBLIC_BASE_URL is normalised to its origin, so an IDN host arrives as punycode.
+    [`https://xn--radar-zamwie-8hb15i.example.invalid/wypis/${token}`, true],
+    // An IPv6 literal host is not in the accepted form: the mailto: stays alone.
+    [`https://[2001:db8::1]/wypis/${token}`, false],
+  ])("oneClickUnsubscribeUrl accepts %j: %j", (value, accepted) => {
+    expect(oneClickUnsubscribeUrl(value)).toBe(accepted ? value : null);
+  });
+
+  it("drops a malformed link and its Post header, keeping the mailto:", async () => {
+    const lines = await mimeWith(`${oneClick}\r\nBcc: x@example.invalid`);
+    expect(lines).toContain(
+      "List-Unsubscribe: <mailto:radar@example.invalid?subject=wypis> (Wypisz)",
+    );
+    expect(lines.some((line) => line.startsWith("List-Unsubscribe-Post:"))).toBe(false);
+    expect(lines.some((line) => /^bcc:/i.test(line))).toBe(false);
+  });
+});
+
+describe("redactTokenLinks", () => {
+  const token = "T".repeat(43);
+
+  it("replaces only the 43-character token after /dostep/ and /wypis/", () => {
+    expect(
+      redactTokenLinks(`a https://x.invalid/dostep/${token} b /wypis/${token}" /profil/${token}`),
+    ).toBe(`a https://x.invalid/dostep/[token] b /wypis/[token]" /profil/${token}`);
+    expect(redactTokenLinks(`/dostep/${token.slice(1)}`)).toBe(`/dostep/${token.slice(1)}`);
+    expect(redactTokenLinks("bez linków")).toBe("bez linków");
   });
 });

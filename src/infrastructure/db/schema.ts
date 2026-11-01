@@ -109,10 +109,36 @@ export interface DeliveriesTable {
   sent_at: Date | null;
 }
 
+/** Mirrors access_tokens_purpose_check (migration 0006, D-026). */
+export type AccessTokenPurpose = "login" | "unsubscribe";
+
+export interface AccessTokensTable {
+  id: Generated<string>;
+  /** SHA-256 of the token, hex; the token itself is never stored. */
+  token_hash: string;
+  profile_id: string;
+  purpose: AccessTokenPurpose;
+  created_at: Generated<Date>;
+  expires_at: Date;
+  /** Set once when a login token is used; always null for unsubscribe tokens. */
+  used_at: Date | null;
+}
+
+export interface SessionsTable {
+  id: Generated<string>;
+  /** SHA-256 of the session id, hex; the id itself is only in the cookie. */
+  token_hash: string;
+  profile_id: string;
+  created_at: Generated<Date>;
+  expires_at: Date;
+}
+
 export interface Database {
   sources: SourcesTable;
   opportunities: OpportunitiesTable;
   company_profiles: CompanyProfilesTable;
   ingestion_runs: IngestionRunsTable;
   deliveries: DeliveriesTable;
+  access_tokens: AccessTokensTable;
+  sessions: SessionsTable;
 }

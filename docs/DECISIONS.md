@@ -63,7 +63,8 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
 - **Decyzja:** PR-00 dostarcza CLI (`health`). Wybór frameworka web (kierunek: lekki serwer
   HTTP z renderowaniem po stronie serwera; Next.js tylko jeśli realnie uprości PR-06)
   zapada w PR-06.
-- **Konsekwencje:** brak nieużywanych zależności i otwartych portów do PR-06.
+- **Konsekwencje:** brak nieużywanych zależności i otwartych portów do PR-06. Rozstrzygnięte
+  w PR-06A: `node:http` bez frameworka (D-025).
 
 ## D-007 — Dostęp do bazy i migracje: Kysely + pg
 
@@ -1086,6 +1087,25 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     odpowiedź. Stopka nie wspomina przycisku: Gmail i Outlook pokazują go według własnych
     reguł, a w trybie `test` nic nie dociera. Wypis jednym kliknięciem (RFC 8058,
     `List-Unsubscribe-Post`) wymaga endpointu HTTP — PR-06.
+  - **Linki web (zmiana w PR-06A, D-026):** gdy ustawiono `PUBLIC_BASE_URL`, każdy e-mail
+    dostaje dwa nowe tokeny profilu, wydawane po `--dry-run` i **przed** rezerwacją
+    (`claimDeliveries`) — błąd bazy przy wydawaniu nie zostawia więc wierszy `pending`.
+    Stopka zamiast akapitu „odpowiedz na wiadomość” ma dwa akapity z linkami: „Twój profil”
+    (`/dostep/<token>`, jednorazowy, 7 dni, z ostrzeżeniem, żeby nie przekazywać wiadomości
+    dalej) i wypis (`/wypis/<token>`, 60 dni, „albo odpowiedz na tę wiadomość”); link tylko
+    `http(s)`, w HTML przez `escapeHtml`. Nagłówki:
+    `List-Unsubscribe: <https://…/wypis/<token>>, <mailto:…?subject=wypis> (Wypisz)` i
+    `List-Unsubscribe-Post: List-Unsubscribe=One-Click` (RFC 8058). URL wypisu trafia do
+    nagłówka tylko w postaci kanonicznej (`https://host[:port]/wypis/<43 znaki>`, `http`
+    tylko loopback; `oneClickUnsubscribeUrl` w `sender.ts`) — inaczej sam `mailto`, bez
+    `List-Unsubscribe-Post`. Host IDN przechodzi: `PUBLIC_BASE_URL` jest sprowadzany do
+    originu, a więc do punycode (`xn--…`); sam `mailto` zostaje tylko przy hoście będącym
+    literałem IPv6 (`https://[…]`). Bez `PUBLIC_BASE_URL` treść i nagłówki są jak wyżej
+    (tylko `mailto`). W trybie `test` plik `.eml` to cały e-mail, więc zawiera linki z
+    tokenami (sekrety, jak skrzynka odbiorcy); czytelna kopia `.json` ma je zredagowane —
+    token zastąpiony `[token]` (`redactTokenLinks` w `sender.ts`: stały prefiks
+    `/dostep/` lub `/wypis/` i dokładnie 43 znaki tokenu). DKIM musi podpisywać oba
+    nagłówki (SECURITY §10).
   - **Wynik:** jedna linia JSON na stdout (`status` `ok`/`failed`, `digestDate`,
     `transport`, `dryRun`, `candidates`, `candidatesTruncated`, `skippedInvalidRows`,
     `errorCode` — powód zatrzymania albo `null`, `profiles[]` z `profileId`, `status`,
@@ -1116,3 +1136,120 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
   historię doręczeń (`ON DELETE CASCADE`); usunięcie oferty z doręczeniami jest blokowane
   (FK bez kaskady). Advisory lock jest wspólny dla bazy: testy biorące blokadę digestu są w
   jednym pliku (`tests/integration/digest.test.ts`).
+
+## D-025 — Serwer web: `node:http` bez frameworka
+
+- **Status:** Accepted (PR-06A; rozstrzyga D-006)
+- **Kontekst:** PR-06A potrzebuje kilku stron HTML renderowanych po stronie serwera (strona
+  główna, potwierdzenie logowania, profil, wypis), formularzy POST i ciasteczka sesji. Bez
+  JavaScriptu w przeglądarce i bez SPA (PR_PLAN). 10–100 klientów.
+- **Decyzja:** komenda `serve` (`src/web/server.ts`) na `node:http` z Node 22, **bez nowej
+  zależności**. Routing to stała tabela ścieżek (`/`, `/styl.css`, `/dostep`,
+  `/dostep/<token>`, `/profil`, `/profil/wypisz`, `/wyloguj`, `/wypis/<token>`); nieznana
+  ścieżka → 404, zła metoda → 405 z `Allow`. Strony to funkcje zwracające HTML
+  (`src/web/pages.ts`), każda wartość przez wspólny `escapeHtml`
+  (`src/infrastructure/html.ts`, ten sam co w e-mailu). Formularze tylko
+  `application/x-www-form-urlencoded` (opcjonalnie `charset=utf-8`), czytane przez
+  `URLSearchParams` z dokładnie oczekiwanymi polami (bez duplikatów, UTF-8 ścisłe). Jedyny
+  wyjątek: POST wypisu RFC 8058 przyjmuje też `multipart/form-data` (D-026), czytany własnym
+  minimalnym parserem (`src/web/multipart.ts`, bez zależności).
+  Nasłuch domyślnie `127.0.0.1:3000` (`WEB_HOST`, `WEB_PORT`); TLS, HSTS i dostęp z internetu
+  zapewnia reverse proxy (PR-07). `PUBLIC_BASE_URL` (wymagany, `https://`; `http://` tylko
+  loopback poza produkcją, sam origin) jest źródłem linków i dozwolonego `Origin`.
+  Zatrzymanie: SIGINT/SIGTERM → `server.close()` + zamknięcie bezczynnych połączeń,
+  wymuszone po 10 s.
+- **Limity (SECURITY §11):** ciało ≤ 8 KB (`Content-Length` i strumień; inaczej 413), inny typ
+  treści → 415 (poza wyjątkiem wyżej), nagłówki ≤ 8 KB i ≤ 50, `headersTimeout` 10 s,
+  `requestTimeout` 15 s (sprawdzane co 1 s — `connectionsCheckingInterval`; domyślne 30 s
+  rozciągałoby oba limity do ok. 30 s), `keepAliveTimeout` 5 s, bezczynne gniazdo 30 s,
+  ≤ 100 żądań na połączenie, wymagany `Host`. Każda odpowiedź: CSP
+  `default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+  `Cache-Control: no-store` (poza arkuszem stylów).
+- **Odrzucone alternatywy:** Next.js (SSR + bundler + duża powierzchnia zależności dla kilku
+  stron i formularzy); Fastify/Express/Hono (routing i parsowanie, których potrzebujemy
+  w kilkudziesięciu liniach; każda zależność to aktualizacje i audyt — SECURITY §13);
+  silnik szablonów (szablony to funkcje TypeScript ze sprawdzanymi typami).
+- **Konsekwencje:** więcej kodu własnego w warstwie HTTP (parsowanie, limity, nagłówki), w
+  całości pokryty testami na prawdziwym serwerze (`tests/web-server.test.ts`,
+  `tests/integration/web.test.ts`). Jeśli PR-06B lub późniejsze ekrany realnie przerosną ten
+  model (wiele formularzy, walidacja pól, upload), wybór frameworka wraca jako nowa decyzja.
+
+## D-026 — Dostęp do profilu: tokeny z e-maila, sesja w ciasteczku, CSRF, wypis jednym kliknięciem
+
+- **Status:** Accepted (PR-06A)
+- **Kontekst:** klient nie ma hasła ani konta; dostęp do profilu i wypis muszą działać z
+  e-maila (PR_PLAN PR-06A). Skanery poczty otwierają linki z wiadomości (GET), więc GET nie
+  może niczego zużywać ani zmieniać.
+- **Decyzja:**
+  - **Tokeny** (`access_tokens`, migracja `0006_access`; `src/infrastructure/db/access-repository.ts`):
+    32 bajty z CSPRNG (256 bitów), base64url (43 znaki); w bazie wyłącznie SHA-256 (hex,
+    unikalny). Szybki hash wystarcza — wejście jest losowe, nie jest hasłem. Ważność zawsze
+    według zegara bazy (`now()`) w tym samym zapytaniu, które token czyta lub zużywa.
+    - `login` — jednorazowy, 7 dni. GET `/dostep/<token>` tylko sprawdza (bez zapisu) i
+      pokazuje stronę z przyciskiem „Zaloguj się” (formularz POST `/dostep` z tokenem w polu
+      ukrytym). POST zużywa token jednym warunkowym
+      `UPDATE … SET used_at = now() WHERE used_at IS NULL AND expires_at > now() RETURNING`
+      i w tej samej transakcji tworzy sesję → 303 na `/profil`. Dwa równoległe POST-y: wygrywa
+      jeden.
+    - `unsubscribe` — wielokrotny (idempotentny), 60 dni, jeden na e-mail. GET `/wypis/<token>`
+      pokazuje tylko stronę z przyciskiem; POST z ciałem dokładnie
+      `List-Unsubscribe=One-Click` (RFC 8058; ten sam formularz wysyła przycisk na stronie)
+      albo `multipart/form-data` z dokładnie jedną częścią `name="List-Unsubscribe"` o treści
+      `One-Click` (RFC 8058 §3.2: dostawca poczty SHOULD wysłać multipart, MAY urlencoded)
+      ustawia `active = false` jednym `UPDATE` bez ciasteczka i bez CSRF — token w ścieżce jest
+      uwierzytelnieniem. Ponowny wypis niczego nie zmienia (także `updated_at`).
+    - Każdy nieważny token (nieznany, zużyty, wygasły, zły kształt, zły cel) → ta sama
+      neutralna strona 404, bez wskazania powodu.
+    - Wydawane w każdym e-mailu `digest` (D-024, przy ustawionym `PUBLIC_BASE_URL`) i przez
+      `access:link <profileId>` (link na stdout — dla operatora, np. pierwszego dostępu).
+      Link jest sekretem: kto ma e-mail lub wydruk, ma dostęp do profilu (jednorazowo, 7 dni).
+  - **Sesja** (`sessions`): identyfikator 256-bitowy, w bazie SHA-256; wygasa po 30 dniach od
+    utworzenia (bez przedłużania), sprawdzane po stronie serwera przy każdym żądaniu.
+    Ciasteczko `__Host-radar_sesja=<id>; Path=/; Max-Age=2592000; HttpOnly; Secure; SameSite=Lax`.
+    Profil pochodzi **wyłącznie** z sesji (żadnego identyfikatora profilu w URL ani formularzu).
+    Wyloguj (POST `/wyloguj`) usuwa wiersz i czyści ciasteczko. Nowe logowanie usuwa
+    poprzednią sesję tej przeglądarki.
+  - **CSRF:** token synchronizujący na każdym POST z sesją (`/wyloguj`, `/profil/wypisz`):
+    `HMAC-SHA256(id sesji, "radar-csrf-v1")`, base64url — wyprowadzany z sekretu sesji, więc
+    bez osobnego stanu i bez klucza w konfiguracji; porównanie `timingSafeEqual`. Brak lub
+    zły token → 403. POST logowania chroni sam token logowania; POST wypisu RFC 8058 — token w
+    ścieżce. Dodatkowo każdy POST poza wypisem z nagłówkiem `Origin` innym niż origin
+    `PUBLIC_BASE_URL` → 403 (wypis RFC 8058 wysyła serwer poczty, który może podać dowolny
+    `Origin`; nic poza dezaktywacją nie robi). `SameSite=Lax` jest trzecią warstwą.
+  - **Sprzątanie:** `serve` przy starcie i co godzinę (timer w tym samym procesie, bez
+    nakładania się przebiegów) usuwa do 1000 wygasłych tokenów i do 1000 wygasłych sesji
+    (`deleteExpiredAccess`). Bez crona i bez osobnego procesu; zaległości schodzą w kolejnych
+    godzinach. Bez `serve` wiersze rosną o dwa tokeny na e-mail — pomijalne.
+  - **Ograniczenia w bazie:** `profile_id` z `ON DELETE CASCADE` (usunięcie profilu usuwa jego
+    tokeny i sesje), unikalny hash, `CHECK` na kształt hasha, cel (`login`/`unsubscribe`),
+    `expires_at > created_at` i górną granicę ważności (7 / 60 / 30 dni), `used_at` tylko
+    dla `login`; indeksy na `profile_id` i `expires_at`.
+  - **Logi** (`http request`): metoda, nazwa trasy, status i czas — nigdy URL, token,
+    ciasteczko, nagłówki ani dane profilu (SECURITY §12).
+- **Brak limitu żądań:** zgadywanie 256-bitowego tokenu jest niewykonalne, a każde żądanie
+  jest ograniczone rozmiarem i czasem (D-025). Ochrona przed zalewem żądań należy do reverse
+  proxy (PR-07). Wrócić do tego, gdy pojawi się „wyślij mi link e-mailem” (wysyłka na
+  żądanie wymaga limitu) — decyzja właściciela, poza PR-06A.
+- **Odrzucone alternatywy:** hasła/konta (poza zakresem MVP); JWT lub podpisane ciasteczko
+  bez tabeli (brak natychmiastowego wylogowania i unieważnienia); token zużywany na GET
+  (zużyłby go skaner poczty); token CSRF w osobnym ciasteczku (double submit — więcej stanu,
+  bez zysku przy sesji po stronie serwera); bcrypt/argon2 dla tokenów (zbędny koszt dla
+  losowych sekretów).
+- **Konsekwencje:** przekazanie e-maila dalej daje dostęp do profilu (ostrzeżenie w stopce).
+  Token w ścieżce URL trafia do logów dostępu reverse proxy — proxy nie może logować ścieżek
+  tych tras albo musi je przycinać (PR-07, SECURITY §11).
+- **Multipart w wypisie (RFC 8058 §3.2):** dostawca poczty SHOULD wysłać ciało jako
+  `multipart/form-data`, więc `/wypis/<token>` przyjmuje oba typy; pozostałe trasy dalej tylko
+  urlencoded (inny typ → 415). Parser (`src/web/multipart.ts`) jest własny, bo potrzebne jest
+  jedno krótkie pole w ciele ≤ 8 KB: boundary z parametru `Content-Type` (może być w
+  cudzysłowie) według RFC 2046 (1–70 dozwolonych znaków, bez spacji na końcu), ramki
+  `--boundary` ze zdjętymi CRLF, preambuła, epilog i inne części ignorowane, każda część musi
+  mieć dokładnie jeden `Content-Disposition: form-data` z `name`. Wszystko, czego nie da się
+  sparsować (brak lub zły boundary, brak ramki zamykającej, nagłówek bez dwukropka lub
+  zawinięty), brak pola, pole dwa razy albo inna wartość → 400, tak samo jak w urlencoded.
+  Bez wyrażeń regularnych na ciele (tylko `indexOf`). Odpowiedź to zawsze 200 ze stroną (albo
+  neutralne 404), nigdy przekierowanie (RFC 8058 §3.2 MUST NOT). Uwaga: przykład w RFC 8058
+  §8.3 drukuje linie ramek jako sam boundary, bez prefiksu `--` z RFC 2046 — dosłownie wzięty
+  nie jest poprawnym multipart i dostaje 400; przyjmujemy jego poprawną postać
+  (`--` + boundary), którą wysyłają biblioteki multipart.

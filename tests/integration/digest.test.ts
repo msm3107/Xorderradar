@@ -13,6 +13,10 @@ import {
 } from "../../src/cli.js";
 import type { CompanyProfile, CompanyProfileInput } from "../../src/domain/company-profile.js";
 import type { OpportunityDraft } from "../../src/domain/opportunity.js";
+import {
+  consumeLoginToken,
+  hashSecretToken,
+} from "../../src/infrastructure/db/access-repository.js";
 import { createCompanyProfile } from "../../src/infrastructure/db/company-profiles-repository.js";
 import { migrateToLatest } from "../../src/infrastructure/db/database.js";
 import { upsertOpportunity } from "../../src/infrastructure/db/opportunities-repository.js";
@@ -751,5 +755,123 @@ describe.skipIf(skipWithoutDatabase)("digest (PostgreSQL)", () => {
     // Deleting a profile deletes its delivery history.
     await sql`DELETE FROM company_profiles WHERE id = ${profile.id}`.execute(schema.db);
     expect(await deliveries()).toEqual([]);
+  });
+
+  describe("web links (PR-06A)", () => {
+    const BASE = "https://radar.example.invalid";
+
+    async function tokens() {
+      return schema.db
+        .selectFrom("access_tokens")
+        .select(["purpose", "profile_id", "token_hash", "used_at"])
+        .select(sql<number>`extract(epoch FROM expires_at - created_at)::int`.as("ttl"))
+        .orderBy("purpose")
+        .execute();
+    }
+
+    it("puts a login link and a one-click unsubscribe link into each e-mail with PUBLIC_BASE_URL", async () => {
+      await store();
+      const sender = fakeSender();
+      const result = await run([], {
+        digest: { createSender: () => sender.sender },
+        env: { PUBLIC_BASE_URL: BASE },
+      });
+      expect(result.code).toBe(ExitCode.Ok);
+      const email = sender.sent[0]?.email;
+      if (email === undefined) throw new Error("no e-mail");
+      const login = new RegExp(`${BASE}/dostep/([A-Za-z0-9_-]{43})`).exec(email.text)?.[1];
+      const unsubscribe = new RegExp(`${BASE}/wypis/([A-Za-z0-9_-]{43})`).exec(email.text)?.[1];
+      if (login === undefined || unsubscribe === undefined) throw new Error("links missing");
+      expect(email.unsubscribeUrl).toBe(`${BASE}/wypis/${unsubscribe}`);
+      expect(email.text).toContain("Twój profil");
+      expect(email.html).toContain(`<a href="${BASE}/dostep/${login}">`);
+      expect(email.html).toContain(`<a href="${BASE}/wypis/${unsubscribe}">`);
+      // Stored as hashes only, for the profile, with their lifetimes; never printed.
+      expect(await tokens()).toEqual([
+        {
+          purpose: "login",
+          profile_id: profile.id,
+          token_hash: hashSecretToken(login),
+          used_at: null,
+          ttl: 7 * 24 * 3600,
+        },
+        {
+          purpose: "unsubscribe",
+          profile_id: profile.id,
+          token_hash: hashSecretToken(unsubscribe),
+          used_at: null,
+          ttl: 60 * 24 * 3600,
+        },
+      ]);
+      expect(result.stderr).not.toContain(login);
+      expect(result.stderr).not.toContain(unsubscribe);
+      expect(await consumeLoginToken(schema.db, login)).toMatchObject({ profileId: profile.id });
+    });
+
+    it("writes both List-Unsubscribe headers to the outbox copy", async () => {
+      await store();
+      const outbox = join(dir, "outbox-links");
+      const result = await run([], {
+        digest: { createSender: defaultDigestDeps.createSender },
+        env: {
+          EMAIL_MODE: "test",
+          EMAIL_OUTBOX_DIR: outbox,
+          EMAIL_FROM: "radar@example.invalid",
+          PUBLIC_BASE_URL: BASE,
+        },
+      });
+      expect(result.code).toBe(ExitCode.Ok);
+      const eml = (await readdir(outbox)).find((file) => file.endsWith(".eml"));
+      const message = await readFile(join(outbox, eml ?? ""), "utf8");
+      const head = (message.split("\n\n")[0] ?? "").replace(/\n[ \t]+/g, " ");
+      expect(head).toMatch(
+        new RegExp(
+          `^List-Unsubscribe: <${BASE}/wypis/[A-Za-z0-9_-]{43}>, ` +
+            "<mailto:radar@example\\.invalid\\?subject=wypis> \\(Wypisz\\)$",
+          "m",
+        ),
+      );
+      expect(head).toContain("List-Unsubscribe-Post: List-Unsubscribe=One-Click");
+    });
+
+    it("keeps the reply-only e-mail and issues no token without PUBLIC_BASE_URL", async () => {
+      await store();
+      const sender = fakeSender();
+      const result = await run([], { digest: { createSender: () => sender.sender } });
+      expect(result.code).toBe(ExitCode.Ok);
+      const email = sender.sent[0]?.email;
+      expect(email?.unsubscribeUrl).toBeUndefined();
+      expect(email?.text).not.toContain("Twój profil");
+      expect(email?.text).toContain("odpowiedz na tę wiadomość lub napisz do operatora serwisu");
+      expect(await tokens()).toEqual([]);
+    });
+
+    it("issues no token in a dry run or when there is nothing to send", async () => {
+      expect((await run([], { env: { PUBLIC_BASE_URL: BASE } })).code).toBe(ExitCode.Ok);
+      await store();
+      expect((await run(["--dry-run"], { env: { PUBLIC_BASE_URL: BASE } })).code).toBe(ExitCode.Ok);
+      expect(await tokens()).toEqual([]);
+    });
+
+    it("refuses an invalid PUBLIC_BASE_URL before sending anything", async () => {
+      await store();
+      let stderr = "";
+      const code = await runCli(
+        ["digest"],
+        {
+          env: {
+            NODE_ENV: "test",
+            DATABASE_URL: schema.url,
+            PUBLIC_BASE_URL: "http://radar.example.invalid",
+          },
+          stdout: () => undefined,
+          stderr: (text) => (stderr += text),
+        },
+        defaultCliDeps,
+      );
+      expect(code).toBe(ExitCode.Failure);
+      expect(stderr).toBe("Invalid web configuration: PUBLIC_BASE_URL\n");
+      expect(await deliveries()).toEqual([]);
+    });
   });
 });

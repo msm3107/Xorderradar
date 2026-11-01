@@ -11,6 +11,12 @@ export interface OutgoingEmail {
   readonly subject: string;
   readonly text: string;
   readonly html: string;
+  /**
+   * The one-click unsubscribe link of this e-mail (RFC 8058, D-024), when
+   * PUBLIC_BASE_URL is set: put first into List-Unsubscribe, with
+   * List-Unsubscribe-Post. A secret; never logged.
+   */
+  readonly unsubscribeUrl?: string;
 }
 
 /** Delivers e-mails over one transport (D-010). Injected into the CLI, so tests never send. */
@@ -199,12 +205,34 @@ export function unsubscribeMailto(address: string): string | null {
   return `mailto:${encodeURIComponent(local)}@${encodeURIComponent(domain)}?subject=wypis`;
 }
 
+/** An https link to /wypis/<token>, or http only on a loopback host (development). */
+const ONE_CLICK_URL =
+  /^(?:https:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?|http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?)\/wypis\/[A-Za-z0-9_-]{43}$/;
+
+/**
+ * The one-click unsubscribe URL when it is exactly the form the web access
+ * serves (checked again: it goes into a header); null otherwise, and then
+ * the message carries the mailto: alone rather than a doubtful link.
+ */
+export function oneClickUnsubscribeUrl(value: string | undefined): string | null {
+  if (value === undefined || !ONE_CLICK_URL.test(value)) return null;
+  return URL.parse(value)?.href === value ? value : null;
+}
+
 /**
  * The nodemailer message of both senders, so the outbox shows exactly the
- * headers an SMTP send would carry.
+ * headers an SMTP send would carry. List-Unsubscribe (RFC 2369) is one
+ * header: the https one-click link first when there is one (RFC 8058, with
+ * List-Unsubscribe-Post), then the mailto: to the operator. DKIM must sign
+ * both headers for providers to honour one-click (docs/SECURITY.md §10).
  */
 export function mailOptions(from: EmailAddress, email: OutgoingEmail) {
-  const unsubscribe = unsubscribeMailto(from.address);
+  const mailto = unsubscribeMailto(from.address);
+  const oneClick = oneClickUnsubscribeUrl(email.unsubscribeUrl);
+  const links = [
+    ...(oneClick === null ? [] : [{ url: oneClick }]),
+    ...(mailto === null ? [] : [{ url: mailto, comment: "Wypisz" }]),
+  ];
   return {
     from: { name: from.name, address: from.address },
     // An object, not a string: nodemailer does not parse it for more recipients.
@@ -212,18 +240,34 @@ export function mailOptions(from: EmailAddress, email: OutgoingEmail) {
     subject: email.subject,
     text: email.text,
     html: email.html,
-    // A mail client's "unsubscribe" button sends this e-mail to the operator; one-click
-    // unsubscribe (RFC 8058, List-Unsubscribe-Post) needs an HTTP endpoint: PR-06.
-    ...(unsubscribe === null
+    // A nested array: nodemailer joins its entries into one header.
+    ...(links.length === 0 ? {} : { list: { unsubscribe: [links] } }),
+    ...(oneClick === null
       ? {}
-      : { list: { unsubscribe: { url: unsubscribe, comment: "Wypisz" } } }),
+      : { headers: { "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" } }),
   };
+}
+
+/**
+ * The secret path segment of a login or unsubscribe link (web access,
+ * PR-06A): a fixed prefix and exactly the 43-character token shape, so the
+ * pattern has no nested or open-ended repetition.
+ */
+const TOKEN_LINK_PATH = /\/(dostep|wypis)\/[A-Za-z0-9_-]{43}/g;
+
+/**
+ * The text with the token of every `/dostep/<token>` and `/wypis/<token>`
+ * link replaced by `[token]`: the readable outbox copy shows where the links
+ * are without holding the secrets (the `.eml` keeps them — it is the e-mail).
+ */
+export function redactTokenLinks(text: string): string {
+  return text.replace(TOKEN_LINK_PATH, "/$1/[token]");
 }
 
 /**
  * `test` mode: every e-mail becomes `<time>-<uuid>.eml` (the full MIME
  * message, as it would be sent) and `<time>-<uuid>.json` (the same content,
- * readable) in `outboxDir`. File names never contain message data; files are
+ * readable, with the token links redacted) in `outboxDir`. File names never contain message data; files are
  * created exclusively (`wx`) and readable by the owner only. Nothing is sent.
  */
 export function createOutboxSender(config: {
@@ -251,8 +295,8 @@ export function createOutboxSender(config: {
           from: config.from,
           to: email.to,
           subject: email.subject,
-          text: email.text,
-          html: email.html,
+          text: redactTokenLinks(email.text),
+          html: redactTokenLinks(email.html),
         };
         await writeAllOrNothing([
           { path: `${base}.eml`, data: info.message },

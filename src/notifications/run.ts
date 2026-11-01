@@ -2,6 +2,7 @@ import type { Kysely } from "kysely";
 import type { CompanyProfile } from "../domain/company-profile.js";
 import { DomainError } from "../domain/errors.js";
 import type { Opportunity } from "../domain/opportunity.js";
+import { issueAccessToken } from "../infrastructure/db/access-repository.js";
 import { withAdvisoryLock, type LockResult } from "../infrastructure/db/advisory-lock.js";
 import {
   getCompanyProfile,
@@ -19,7 +20,8 @@ import type { Database, DeliveryTransport } from "../infrastructure/db/schema.js
 import type { Logger } from "../infrastructure/logger.js";
 import { matchOpportunity } from "../matching/match.js";
 import { warsawDay } from "../sources/normalize/warsaw-time.js";
-import { buildDigest, type DigestItem } from "./digest.js";
+import { loginUrl, unsubscribeUrl } from "../web/links.js";
+import { buildDigest, type DigestItem, type DigestLinks } from "./digest.js";
 import { sendWithRetry, type EmailSender, type SendFailureKind } from "./sender.js";
 
 /**
@@ -162,6 +164,12 @@ export interface DigestRunDeps {
   /** Aborted when the run's lock is lost: no further profile is started. */
   readonly signal: AbortSignal;
   readonly retryDelaysMs?: readonly number[];
+  /**
+   * PUBLIC_BASE_URL (an origin), when set: every e-mail gets a login link
+   * and a one-click unsubscribe link (PR-06A). null keeps the reply-only
+   * footer and the mailto-only List-Unsubscribe.
+   */
+  readonly publicBaseUrl?: string | null;
 }
 
 export interface DigestRunOptions {
@@ -232,6 +240,21 @@ async function selectProfiles(
   }
 }
 
+/** A fresh login token and unsubscribe token for one e-mail; null without PUBLIC_BASE_URL. */
+async function issueLinks(
+  db: Kysely<Database>,
+  profileId: string,
+  publicBaseUrl: string | null,
+): Promise<DigestLinks | null> {
+  if (publicBaseUrl === null) return null;
+  const login = await issueAccessToken(db, profileId, "login");
+  const unsubscribe = await issueAccessToken(db, profileId, "unsubscribe");
+  return {
+    profileUrl: loginUrl(publicBaseUrl, login.token),
+    unsubscribeUrl: unsubscribeUrl(publicBaseUrl, unsubscribe.token),
+  };
+}
+
 /**
  * One profile: skip it when today's digest is done (or its outcome is
  * unknown); else match, leave out offers already delivered (or given up
@@ -285,6 +308,9 @@ async function digestProfile(
   if (dryRun || deps.sender === null)
     return done({ ...counts, status: "dry_run", claimed: selected.length });
 
+  // Issued before the claim, so a database failure here leaves no claimed
+  // row pending; tokens of an e-mail never sent just expire unused.
+  const links = await issueLinks(db, profile.id, deps.publicBaseUrl ?? null);
   const claimedIds = new Set(
     await claimDeliveries(db, {
       ...key,
@@ -299,10 +325,17 @@ async function digestProfile(
   const ids = items.map((item) => item.offer.id);
   const claimed = { ...counts, claimed: items.length };
 
-  const email = buildDigest(profile, items, deps.now, { overflow: counts.overflow });
+  const email = buildDigest(profile, items, deps.now, {
+    overflow: counts.overflow,
+    ...(links === null ? {} : { links }),
+  });
   const result = await sendWithRetry(
     deps.sender,
-    { to: profile.email, ...email },
+    {
+      to: profile.email,
+      ...email,
+      ...(links === null ? {} : { unsubscribeUrl: links.unsubscribeUrl }),
+    },
     {
       sleep: deps.sleep,
       signal: deps.signal,

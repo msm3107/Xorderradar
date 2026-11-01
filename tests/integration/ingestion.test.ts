@@ -886,6 +886,7 @@ describe.skipIf(skipWithoutDatabase)("recordIngestionRun and migration 0002 (Pos
       "0003_opportunities_tender_id",
       "0004_notice_updates",
       "0005_deliveries",
+      "0006_access",
     ]);
     expect(await getSource(schema.db, "bzp")).toMatchObject({
       name: "BZP (wyłączone przez operatora)",

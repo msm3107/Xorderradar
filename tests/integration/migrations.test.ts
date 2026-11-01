@@ -32,14 +32,17 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
       "0003_opportunities_tender_id",
       "0004_notice_updates",
       "0005_deliveries",
+      "0006_access",
     ]);
     expect(await tablesInSchema()).toEqual([
+      "access_tokens",
       "company_profiles",
       "deliveries",
       "ingestion_runs",
       "kysely_migration",
       "kysely_migration_lock",
       "opportunities",
+      "sessions",
       "sources",
     ]);
   });
@@ -56,6 +59,7 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
       "0003_opportunities_tender_id",
       "0004_notice_updates",
       "0005_deliveries",
+      "0006_access",
     ]);
   });
 
@@ -120,6 +124,7 @@ describe.skipIf(skipWithoutDatabase)("migrations: concurrent runs (PostgreSQL)",
       "0003_opportunities_tender_id",
       "0004_notice_updates",
       "0005_deliveries",
+      "0006_access",
     ]);
   });
 });

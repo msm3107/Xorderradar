@@ -181,7 +181,15 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
   `src/notifications/sender.ts` przyjmuje tylko jeden zwykły adres — bez białych znaków, CR/LF,
   nawiasów i cudzysłowów — i koduje go procentowo, inaczej nagłówka nie ma; nodemailer
   dodatkowo usuwa znaki sterujące z URL-a; testy z próbą header injection). Wypis jednym
-  kliknięciem (RFC 8058, `List-Unsubscribe-Post`, endpoint HTTP) — PR-06.
+  kliknięciem (RFC 8058) — od PR-06A, gdy ustawiono `PUBLIC_BASE_URL`:
+  `List-Unsubscribe: <https://…/wypis/<token>>, <mailto:…>` i
+  `List-Unsubscribe-Post: List-Unsubscribe=One-Click`; URL tylko w postaci kanonicznej
+  (`oneClickUnsubscribeUrl`, inaczej sam `mailto` bez `List-Unsubscribe-Post`); stopka ma ten
+  sam link `https` (D-024, D-026). **DKIM musi podpisywać oba nagłówki**
+  (`List-Unsubscribe` i `List-Unsubscribe-Post`) — wymaganie RFC 8058 i dużych skrzynek;
+  do sprawdzenia w konfiguracji serwera SMTP przed wysyłką do prawdziwych odbiorców (PR-07).
+- UI (PR-06A, `src/web/pages.ts`): każda wartość przez ten sam `escapeHtml`
+  (`src/infrastructure/html.ts`), bez inline JS i stylów (CSP niżej, §11).
 - Testy nie wysyłają prawdziwych e-maili: fałszywy sender, outbox w katalogu tymczasowym albo
   lokalny serwer na `127.0.0.1`; adresy wyłącznie pseudonimizowane (`*.invalid`).
 
@@ -190,6 +198,43 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
 - Autoryzacja po stronie serwera dla każdego profilu/zasobu; deny by default.
 - Tokeny dostępu losowe (CSPRNG), przechowywane jako hash, z wygaśnięciem i unieważnieniem.
 - Ciasteczka `HttpOnly; Secure; SameSite=Lax`; ochrona CSRF dla formularzy.
+
+Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
+
+- **Bez haseł.** Dostęp przez link z e-maila `digest` albo z `access:link <profileId>`
+  (operator). Link jest sekretem: kto ma e-mail lub wydruk komendy, ma dostęp do profilu.
+- **Tokeny:** 256 bitów z CSPRNG, base64url; w bazie tylko SHA-256 (`access_tokens`,
+  `sessions`), ważność według zegara bazy. Logowanie: jednorazowe, 7 dni, GET niczego nie
+  zużywa (strona z przyciskiem), POST zużywa atomowo (warunkowy `UPDATE … RETURNING`) i
+  otwiera sesję. Wypis: wielokrotny, 60 dni. Każdy nieważny token → ta sama neutralna
+  strona 404. Usunięcie profilu usuwa tokeny i sesje (`ON DELETE CASCADE`).
+- **Sesja:** `__Host-radar_sesja`, `HttpOnly; Secure; SameSite=Lax; Path=/`, 30 dni od
+  logowania bez przedłużania, sprawdzana w bazie przy każdym żądaniu; wylogowanie usuwa
+  wiersz. Profil wyłącznie z sesji — w URL-ach i formularzach nie ma identyfikatora profilu.
+  Nieznana ścieżka → 404, zła metoda → 405.
+- **CSRF:** token synchronizujący (HMAC-SHA256 z id sesji) na każdym POST z sesją,
+  porównanie w stałym czasie; POST logowania chroni token logowania, POST wypisu RFC 8058 —
+  token w ścieżce (bez ciasteczka, robi tylko `active = false`). `Origin` różny od origin
+  `PUBLIC_BASE_URL` → 403 (poza wypisem RFC 8058).
+- **Twardnienie HTTP:** ciało ≤ 8 KB (413), tylko `application/x-www-form-urlencoded`
+  (inaczej 415); wyjątek: POST wypisu RFC 8058 przyjmuje też `multipart/form-data` (RFC 8058
+  §3.2 — SHOULD), czytany własnym ścisłym parserem bez zależności (`src/web/multipart.ts`:
+  boundary według RFC 2046, dokładnie jedna część `List-Unsubscribe` = `One-Click`, wszystko
+  niepoprawne → 400, bez regexów na ciele; D-026). Wypis odpowiada 200 ze stroną, nigdy
+  przekierowaniem (RFC 8058 MUST NOT). Nagłówki ≤ 8 KB / 50, timeouty nagłówków 10 s,
+  żądania 15 s (Node sprawdza je co 1 s — `connectionsCheckingInterval`), keep-alive 5 s,
+  gniazda 30 s. Nagłówki odpowiedzi: CSP
+  `default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
+  `nosniff`, `Referrer-Policy: no-referrer` (token z URL nie wycieka w `Referer`),
+  `Cache-Control: no-store`.
+- **Bez limitu żądań w aplikacji:** tokenów 256-bitowych nie da się zgadnąć, a każde żądanie
+  jest ograniczone rozmiarem i czasem; zalew żądań zatrzymuje reverse proxy (PR-07). Funkcja
+  „wyślij mi link e-mailem” (otwarta decyzja właściciela) będzie wymagać limitu.
+- **Reverse proxy (PR-07):** `serve` słucha domyślnie na `127.0.0.1:3000` czystym HTTP; TLS,
+  HSTS i przekierowanie z `http` robi proxy. Tokeny są w ścieżkach `/dostep/…` i `/wypis/…`
+  — proxy **nie może** zapisywać tych ścieżek w logach dostępu (wyłączony log albo ścieżka
+  przycięta).
+- **Sprzątanie:** `serve` co godzinę usuwa wygasłe tokeny i sesje (po 1000 na przebieg).
 
 ## 12. Logging policy
 
@@ -216,7 +261,19 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
   (`smtp_<kod odpowiedzi lub błędu>`, `^[a-z][a-z0-9_]{0,63}$` — nigdy komunikat ani odpowiedź
   serwera, które mogą zawierać adres). Nigdy adresów e-mail, tytułów, treści e-maili ani
   `SMTP_URL`. Pliki outboxu (tryb `test`) zawierają adres i treść — katalog `0700`, pliki
-  `0600`, `outbox/` w `.gitignore`.
+  `0600`, `outbox/` w `.gitignore`. Linki z tokenami (PR-06A) nie trafiają do logów. Plik
+  `.eml` to cały e-mail, więc **zawiera sekretne linki** (`/dostep/<token>`,
+  `/wypis/<token>`); czytelna kopia `.json` ma je zredagowane (`/dostep/[token]`,
+  `/wypis/[token]`).
+- `serve` (od PR-06A) loguje jedno zdarzenie na żądanie (`http request`): metoda (znana albo
+  `OTHER`), nazwa trasy (`home`, `login_link`, `unsubscribe`, `not_found`…), status i czas.
+  Nigdy URL, ścieżki ani zapytania (zawierają tokeny), ciasteczek, nagłówków, treści
+  formularzy, adresu klienta, identyfikatora ani danych profilu. Błąd obsługi →
+  `http request failed` z nazwą trasy i kodem błędu bazy (bez komunikatu). Klient, który
+  przerwał połączenie w trakcie wysyłania ciała (albo został odcięty przez timeout), →
+  `http request aborted` (poziom `info`, tylko `route` i `reason: "aborted"`) — nie jest
+  błędem bazy ani odpowiedzią 500. `access:link` wypisuje link
+  wyłącznie na stdout (ostrzeżenie na stderr), nigdy do logu.
 - Komunikaty błędów dla użytkownika są bezpieczne; szczegóły tylko w logu.
 - Błędy bazy danych (od PR-01): CLI pokazuje tylko stały powód + kod SQLSTATE/errno, nigdy
   komunikatu sterownika/serwera; repozytoria zamieniają naruszenia ograniczeń na
