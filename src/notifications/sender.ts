@@ -181,7 +181,30 @@ export async function writeAllOrNothing(
 /** Options every transport gets: no file or URL content in a message, one recipient. */
 const MESSAGE_LIMITS = { disableFileAccess: true, disableUrlAccess: true } as const;
 
-function message(from: EmailAddress, email: OutgoingEmail) {
+/** One plain address: local part, "@", domain; no white space, brackets, quotes or controls. */
+const PLAIN_ADDRESS = /^([^\s<>()",;:\\@\p{Cc}]+)@([^\s<>()",;:\\@\p{Cc}]+)$/u;
+
+/**
+ * The `mailto:` URL of the List-Unsubscribe header (RFC 2369): a message to
+ * the sender's bare address — never its display name — with the subject
+ * "wypis". The address is validated configuration (EMAIL_FROM); it goes into
+ * a header, so it is checked again and percent-encoded here, and anything
+ * that is not one plain address gives null: no header rather than a guessed one.
+ */
+export function unsubscribeMailto(address: string): string | null {
+  const parts = PLAIN_ADDRESS.exec(address);
+  const local = parts?.[1];
+  const domain = parts?.[2];
+  if (local === undefined || domain === undefined) return null;
+  return `mailto:${encodeURIComponent(local)}@${encodeURIComponent(domain)}?subject=wypis`;
+}
+
+/**
+ * The nodemailer message of both senders, so the outbox shows exactly the
+ * headers an SMTP send would carry.
+ */
+export function mailOptions(from: EmailAddress, email: OutgoingEmail) {
+  const unsubscribe = unsubscribeMailto(from.address);
   return {
     from: { name: from.name, address: from.address },
     // An object, not a string: nodemailer does not parse it for more recipients.
@@ -189,6 +212,11 @@ function message(from: EmailAddress, email: OutgoingEmail) {
     subject: email.subject,
     text: email.text,
     html: email.html,
+    // A mail client's "unsubscribe" button sends this e-mail to the operator; one-click
+    // unsubscribe (RFC 8058, List-Unsubscribe-Post) needs an HTTP endpoint: PR-06.
+    ...(unsubscribe === null
+      ? {}
+      : { list: { unsubscribe: { url: unsubscribe, comment: "Wypisz" } } }),
   };
 }
 
@@ -212,7 +240,7 @@ export function createOutboxSender(config: {
     transport: "test",
     async send(email) {
       try {
-        const info = await transporter.sendMail(message(config.from, email));
+        const info = await transporter.sendMail(mailOptions(config.from, email));
         if (!Buffer.isBuffer(info.message)) throw new Error("stream transport returned no buffer");
         await mkdir(config.outboxDir, { recursive: true, mode: 0o700 });
         const base = join(
@@ -280,7 +308,7 @@ export function createSmtpSender(config: {
     transport: "smtp",
     async send(email) {
       try {
-        await transporter.sendMail(message(config.from, email));
+        await transporter.sendMail(mailOptions(config.from, email));
       } catch (error: unknown) {
         throw classifySmtpError(error);
       }

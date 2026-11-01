@@ -7,8 +7,10 @@ Status: PR-04 **MERGED in PR #8 (merge commit f8f113a)** after the owner's re-re
 findings (M1 SMTP setup failures not stopped, L1–L4) → fix round → C&S PASS (optional L-A,
 L-B) → Quality Review ACCEPT WITH NOTES (cancellation caveat, pending rows on stderr, overflow
 notice placement, CPV wording, "Link: nie podano") → fix round 2 (+ L-A, L-B) → C&S PASS (M-1:
-L-A regressed a refused EHLO under STARTTLS) → fix round 3 → C&S PASS. PR opened for the
-owner's review (not merged).
+L-A regressed a refused EHLO under STARTTLS) → fix round 3 → C&S PASS. PR #9 opened for the
+owner's review (not merged). Owner review of PR #9: PASS, no blockers (AC1–AC4 met, nodemailer
+age and lockfile integrity checked, end-to-end run on real data) with three suggestions →
+owner-review round (`List-Unsubscribe` mailto header) → C&S PASS (optional L-1).
 
 ## Completed
 
@@ -421,15 +423,24 @@ rules, idempotency, failure classes, operator procedure for `pending` rows).
   one connection per message. Failure classes `transient`/`permanent`/`unreachable`/`setup`/
   `uncertain`: setup, exhausted unreachable and uncertain stop the run without spending
   attempts; the rest of the profiles become `not_run`.
-- Dependency: `nodemailer` 10.1.7 (MIT-0, no deps). Published 2026-10-18 — under the preferred
-  two-week age until 2026-11-01 18:24 UTC; < 10.1.4 has addressparser advisories.
+- Dependency: `nodemailer` 10.1.7 (MIT-0, no deps). Published 2026-10-18; the owner accepted
+  its age and checked the lockfile integrity in the PR #9 review; < 10.1.4 has addressparser
+  advisories.
+- Owner-review round of PR #9: every e-mail (SMTP and the test-mode `.eml`) carries
+  `List-Unsubscribe: <mailto:<EMAIL_FROM>?subject=wypis> (Wypisz)` (RFC 2369) built by the
+  shared `mailOptions`/`unsubscribeMailto` in `src/notifications/sender.ts`: only the bare,
+  strictly validated address (no display name), local part and domain percent-encoded, header
+  left out when the address is not one plain address; nodemailer also strips control
+  characters and `<>`. Tests cover the header line, the `.eml`, 11 address cases and a CRLF
+  Bcc injection. One-click unsubscribe (RFC 8058 `List-Unsubscribe-Post`) → PR-06. C&S PASS;
+  optional L-1: the README header example omits the ` (Wypisz)` comment.
 - Reviews: C&S PASS (M1 SMTP setup failures not stopped — N logins and attempts spent; L1
   EHOSTUNREACH/ENETUNREACH uncertain; L2 kept, documented; L3 partial outbox files; L4 Markdown
   code spans) → fixes → C&S PASS (L-A CONN reply at close ≠ setup; L-B 421 → unreachable) →
   Quality ACCEPT WITH NOTES (cancellation caveat, pending visibility, overflow placement, CPV
   wording, missing link) → fix round 2 → C&S PASS (M-1 refused EHLO under STARTTLS classified
   permanent) → fix round 3 → C&S PASS.
-- Owner decisions open: merge after the nodemailer age or accept now; explicit confirmation
+- Owner decisions open (nodemailer age: accepted by the owner): explicit confirmation
   before any real `smtp` send; 50 per e-mail (Quality asks 20–30?); skip offers due within
   24–48 h?; is reply-to-unsubscribe enough before PR-06 (sender identification,
   `List-Unsubscribe`)?; plan item for BZP cancellation notices before the pilot; coder
@@ -486,17 +497,26 @@ nodemailer), D-024 (digest, `deliveries`, failure classes, `pending` procedure).
 
 ## Next action
 
-1. Owner reviews the PR-05 PR (decisions under In progress / D-024) and merges it. Before
-   real customers: confirm `smtp` explicitly (SECURITY §10/§14) and send one digest to an own
-   mailbox first. Optional follow-ups from the PR-05 Quality Review: cap the CPV codes repeated
-   in „Dlaczego pasuje”; Polish date format („3.11.2026, 11:00”); a different heading for a new
-   profile's first e-mail (up to 7 days of offers); the other „CPV spoza słownika … kategoria
-   niesprawdzalna” wording. Known limits: the stderr pending count misses profiles reported
-   `not_run`; a server that closes with an error reply at the greeting spends attempts (D-024).
-   Still from PR-04: backfill still-open offers with `ingest bzp --from … --to …` (≤ 31 days
-   per call, README); cosmetic nits from Part B (over-wide `ingest` help lines in
-   `src/cli.ts`; two test titles still say "200 000"); watch live runs for `too_large` on update
-   pages (`BZP_PAGE_SIZE` 25 kept).
+1. Owner re-checks PR #9 after the `List-Unsubscribe` round and merges it. Pilot follow-ups
+   from the owner's PR #9 review (not in PR-05; owner to choose the PR):
+   - Matching calibration (changes PR-04 scoring): in the owner's real-data run 7 of 26 offers
+     matched only on a description keyword, several false positives (agricultural tractor,
+     excavator/forklift, telescopic loader via „oświetlenie”/„elektryczne”). Options: fewer
+     points for a description-only keyword hit (e.g. 15), and/or a `profile:create` hint to add
+     exclude words („ciągnik”, „pojazd”, „dostawa”). Needs calibration on pilot profiles.
+   - Operator commands `deliveries:pending` and `deliveries:resolve <profileId> --sent|--failed`
+     instead of the manual SQL in README „Wynik niepewny”.
+   - README example of the `List-Unsubscribe` header without ` (Wypisz)` (C&S L-1, cosmetic).
+   - Before real customers: confirm `smtp` explicitly (SECURITY §10/§14) and send one digest to an own
+     mailbox first. Optional follow-ups from the PR-05 Quality Review: cap the CPV codes repeated
+     in „Dlaczego pasuje”; Polish date format („3.11.2026, 11:00”); a different heading for a new
+     profile's first e-mail (up to 7 days of offers); the other „CPV spoza słownika … kategoria
+     niesprawdzalna” wording. Known limits: the stderr pending count misses profiles reported
+     `not_run`; a server that closes with an error reply at the greeting spends attempts (D-024).
+     Still from PR-04: backfill still-open offers with `ingest bzp --from … --to …` (≤ 31 days
+     per call, README); cosmetic nits from Part B (over-wide `ingest` help lines in
+     `src/cli.ts`; two test titles still say "200 000"); watch live runs for `too_large` on update
+     pages (`BZP_PAGE_SIZE` 25 kept).
 2. Owner verifies PR-02 AC1 outside the container (command and checklist under Blockers); a
    first live `ingest bzp --date <past weekday>` on the same machine is a useful follow-up
    check (exit 0, `inserted` > 0, a second run all `unchanged`; `skipped` > 0 and some
@@ -684,6 +704,13 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-01, PR-05 owner-review round of PR #9 (`List-Unsubscribe`; Node 22, pnpm 10.28.0,
+PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 1276/1276 tests passed in 37 files, DB tests included. `pnpm
+audit`: unchanged (1 moderate, dev-only minimatch via eslint). C&S checked the header
+construction against the installed nodemailer 10.1.7 source; no existing test changed; no
+network sends (streamTransport and a temporary outbox only).
 
 2026-11-01, PR-05 after fix round 3 (Node 22, pnpm 10.28.0, PostgreSQL 16):
 `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`

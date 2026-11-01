@@ -1077,7 +1077,15 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     zostać odwołane (odwołania BZP nie są pobierane), dlaczego odbiorca dostaje e-mail, jak
     zrezygnować
     (odpowiedź na wiadomość / kontakt z operatorem — operator ustawia `active = false`; link
-    z tokenem — PR-06).
+    z tokenem — PR-06). Nagłówek `List-Unsubscribe: <mailto:…?subject=wypis> (Wypisz)` (RFC
+    2369; opcja `list` nodemailera, wspólne `mailOptions` obu senderów, więc `.eml` w trybie
+    `test` pokazuje ten sam nagłówek): sam adres z `EMAIL_FROM` (w trybie `test` bez
+    `EMAIL_FROM` — ten sam zastępczy `radar@example.invalid` co w `From`), kodowany
+    procentowo; adres, który nie jest jednym zwykłym adresem → bez nagłówka. Przycisk
+    wypisu w programie pocztowym wysyła więc e-mail na skrzynkę operatora, obsługiwany jak
+    odpowiedź. Stopka nie wspomina przycisku: Gmail i Outlook pokazują go według własnych
+    reguł, a w trybie `test` nic nie dociera. Wypis jednym kliknięciem (RFC 8058,
+    `List-Unsubscribe-Post`) wymaga endpointu HTTP — PR-06.
   - **Wynik:** jedna linia JSON na stdout (`status` `ok`/`failed`, `digestDate`,
     `transport`, `dryRun`, `candidates`, `candidatesTruncated`, `skippedInvalidRows`,
     `errorCode` — powód zatrzymania albo `null`, `profiles[]` z `profileId`, `status`,

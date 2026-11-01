@@ -267,7 +267,12 @@ crontab z `CRON_TZ=Europe/Warsaw`):
   ```
 
 - **Rezygnacja:** odbiorca odpisuje lub pisze do operatora; operator wyłącza profil
-  (`UPDATE company_profiles SET active = false WHERE id = '…';`). Link wypisu z tokenem — PR-06.
+  (`UPDATE company_profiles SET active = false WHERE id = '…';`). Każdy e-mail (także plik
+  `.eml` w trybie `test`) ma nagłówek
+  `List-Unsubscribe: <mailto:<adres z EMAIL_FROM>?subject=wypis>` (sam adres, bez nazwy) —
+  przycisk „Anuluj subskrypcję” w Gmailu czy Outlooku (jeśli program go pokaże) wysyła e-mail
+  „wypis” na skrzynkę `EMAIL_FROM`, obsługiwany jak odpowiedź. Wypis jednym kliknięciem
+  (RFC 8058, `List-Unsubscribe-Post`) i link z tokenem — PR-06.
 - Nakładające się uruchomienia są bezpieczne: drugie kończy się
   `{"status":"skipped","reason":"lock_busy",…}`, komunikatem `Digest skipped: …` i kodem `0`.
 - **Termin:** „po terminie” liczy się z zapisanego terminu. Dla małych zamówień BZP i dni

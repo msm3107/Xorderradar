@@ -175,7 +175,13 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
   parametrów zapytania (nodemailer czytałby z nich opcje TLS). Odrzucone logowanie, błąd
   TLS/STARTTLS lub certyfikatu nie są ponawiane i zatrzymują przebieg po pierwszej próbie —
   jedno nieudane logowanie na przebieg, nie jedno na profil (D-024).
-- Każdy e-mail zawiera informację, dlaczego odbiorca go dostaje, i sposób rezygnacji.
+- Każdy e-mail zawiera informację, dlaczego odbiorca go dostaje, i sposób rezygnacji. PR-05:
+  stopka (odpowiedź / kontakt z operatorem) i nagłówek `List-Unsubscribe` z `mailto:` na sam
+  adres `EMAIL_FROM` (bez nazwy, `?subject=wypis`; `unsubscribeMailto` w
+  `src/notifications/sender.ts` przyjmuje tylko jeden zwykły adres — bez białych znaków, CR/LF,
+  nawiasów i cudzysłowów — i koduje go procentowo, inaczej nagłówka nie ma; nodemailer
+  dodatkowo usuwa znaki sterujące z URL-a; testy z próbą header injection). Wypis jednym
+  kliknięciem (RFC 8058, `List-Unsubscribe-Post`, endpoint HTTP) — PR-06.
 - Testy nie wysyłają prawdziwych e-maili: fałszywy sender, outbox w katalogu tymczasowym albo
   lokalny serwer na `127.0.0.1`; adresy wyłącznie pseudonimizowane (`*.invalid`).
 

@@ -2,13 +2,16 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTransport } from "nodemailer";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   classifySmtpError,
   createOutboxSender,
   createSmtpSender,
   EmailSendError,
+  mailOptions,
   sendWithRetry,
+  unsubscribeMailto,
   writeAllOrNothing,
   type EmailSender,
   type OutgoingEmail,
@@ -65,6 +68,68 @@ describe("createOutboxSender", () => {
     );
     expect(failure).toBeInstanceOf(EmailSendError);
     expect(failure).toMatchObject({ code: "outbox_write_failed", kind: "setup" });
+  });
+});
+
+/** The MIME message nodemailer builds from mailOptions (what both senders hand over). */
+async function mime(sender: { name: string; address: string }): Promise<string> {
+  const transporter = createTransport({ streamTransport: true, buffer: true, newline: "unix" });
+  const info = await transporter.sendMail(mailOptions(sender, email));
+  if (!Buffer.isBuffer(info.message)) throw new Error("no buffer");
+  return info.message.toString("utf8");
+}
+
+function headerLines(message: string): string[] {
+  const head = message.split("\n\n")[0] ?? "";
+  // Unfold continuation lines, so every header is one line.
+  return head.replace(/\n[ \t]+/g, " ").split("\n");
+}
+
+describe("List-Unsubscribe", () => {
+  it("is a mailto: to the bare sender address, without the display name", async () => {
+    const lines = headerLines(await mime(from));
+    expect(lines).toContain(
+      "List-Unsubscribe: <mailto:radar@example.invalid?subject=wypis> (Wypisz)",
+    );
+    const header = lines.find((line) => line.startsWith("List-Unsubscribe:")) ?? "";
+    expect(header).not.toContain("Radar");
+  });
+
+  it("is in the outbox copy too, as an SMTP send would carry it", async () => {
+    const outboxDir = join(dir, "outbox-unsubscribe");
+    await createOutboxSender({ outboxDir, from }).send(email);
+    const files = (await readdir(outboxDir)).filter((file) => file.endsWith(".eml"));
+    const [eml] = files;
+    if (eml === undefined) throw new Error("no .eml");
+    expect(headerLines(await readFile(join(outboxDir, eml), "utf8"))).toContain(
+      "List-Unsubscribe: <mailto:radar@example.invalid?subject=wypis> (Wypisz)",
+    );
+  });
+
+  it.each([
+    ["radar@example.invalid", "mailto:radar@example.invalid?subject=wypis"],
+    // Percent-encoded where the URL needs it.
+    ["radar+wypis@example.invalid", "mailto:radar%2Bwypis@example.invalid?subject=wypis"],
+    ["a?b&c=d#e@example.invalid", "mailto:a%3Fb%26c%3Dd%23e@example.invalid?subject=wypis"],
+    // Header injection or anything but one plain address: no header at all.
+    ["radar@example.invalid\r\nBcc: x@example.invalid", null],
+    ["radar@example.invalid\nBcc:x@example.invalid", null],
+    ["radar@example.invalid>, <mailto:x@example.invalid", null],
+    ["Radar <radar@example.invalid>", null],
+    ["radar@example.invalid (komentarz)", null],
+    ["radar@@example.invalid", null],
+    ["radar", null],
+    ["", null],
+  ])("%j → %s", (address, url) => {
+    expect(unsubscribeMailto(address)).toBe(url);
+  });
+
+  it("is left out, and nothing injected, when the address is not plain", async () => {
+    const lines = headerLines(
+      await mime({ name: "Radar", address: "radar@example.invalid\r\nBcc: x@example.invalid" }),
+    );
+    expect(lines.some((line) => line.startsWith("List-Unsubscribe:"))).toBe(false);
+    expect(lines.some((line) => /^bcc:/i.test(line))).toBe(false);
   });
 });
 
