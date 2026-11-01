@@ -333,6 +333,14 @@ jeśli wymagany prawnie; inaczej PR-06).
 SameSite=Lax`, CSRF dla formularzy. Bez haseł w MVP.
 - **PR-06B — Ekrany:** formularz profilu, lista dopasowań z wyjaśnieniem, link do źródła.
   Renderowanie po stronie serwera, dostępne formularze, czytelne stany puste/błędu.
+  Kryteria z review PR-06A (właściciel):
+  - przycisk „Włącz ponownie powiadomienia” na `/profil` (POST + CSRF), aby przypadkowy
+    wypis (np. przez skaner bezpieczeństwa poczty) nie wymagał operatora;
+  - ochrona przed login-CSRF na `POST /dostep`: odrzucać `Sec-Fetch-Site: cross-site` albo
+    wymagać `Origin`/`Sec-Fetch-Site` na tej trasie — zanim formularz profilu zacznie
+    przyjmować dane;
+  - zmiana e-maila w profilu unieważnia pozostałe sesje i tokeny profilu (ponowne użycie
+    `revokeProfileAccess`, z zachowaniem bieżącej sesji).
 
 **Kryteria akceptacji (łącznie):** użytkownik bez instrukcji ustawia profil i widzi wyniki;
 autoryzacja po stronie serwera dla każdego zasobu; brak dashboardu analitycznego.

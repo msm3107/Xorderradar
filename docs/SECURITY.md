@@ -207,7 +207,9 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   `sessions`), ważność według zegara bazy. Logowanie: jednorazowe, 7 dni, GET niczego nie
   zużywa (strona z przyciskiem), POST zużywa atomowo (warunkowy `UPDATE … RETURNING`) i
   otwiera sesję. Wypis: wielokrotny, 60 dni. Każdy nieważny token → ta sama neutralna
-  strona 404. Usunięcie profilu usuwa tokeny i sesje (`ON DELETE CASCADE`).
+  strona 404. Usunięcie profilu usuwa tokeny i sesje (`ON DELETE CASCADE`). Unieważnienie
+  na żądanie: `access:revoke <profileId>` usuwa w jednej transakcji wszystkie tokeny i sesje
+  profilu (przekazany e-mail, zgubione urządzenie); profil bez zmian, na stdout tylko liczby.
 - **Sesja:** `__Host-radar_sesja`, `HttpOnly; Secure; SameSite=Lax; Path=/`, 30 dni od
   logowania bez przedłużania, sprawdzana w bazie przy każdym żądaniu; wylogowanie usuwa
   wiersz. Profil wyłącznie z sesji — w URL-ach i formularzach nie ma identyfikatora profilu.

@@ -817,6 +817,10 @@ release failed`. `ingest` i `digest` nie blokują się wzajemnie.
 - `access:link <profileId>` (PR-06A) — wydaje link logowania (jednorazowy, 7 dni) i wypisuje
   `{"status":"ok","url":…,"expiresAt":…}` na stdout (ostrzeżenie „link jest sekretem” na
   stderr). Wymaga `PUBLIC_BASE_URL`; nieznany profil → kod 1. Link jest tylko na stdout.
+- `access:revoke <profileId>` (PR-06A) — usuwa w jednej transakcji wszystkie tokeny (logowania
+  i wypisu) i sesje profilu (`revokeProfileAccess`); `company_profiles` bez zmian. Wypisuje
+  `{"status":"ok","tokens":…,"sessions":…}`. Kontrola schematu jak w `access:link`, bez
+  `PUBLIC_BASE_URL`; nieznany profil → kod 1.
 - `digest` przy ustawionym `PUBLIC_BASE_URL` dodaje do e-maili linki (§4.5).
 - Planowany harmonogram (przykład w README; ten PR nie dodaje artefaktu cron/wdrożenia):
   `ingest` raz dziennie ok. 06:00 Europe/Warsaw bez opcji dnia (nadrabianie: zwykle tylko

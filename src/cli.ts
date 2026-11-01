@@ -19,6 +19,8 @@ import {
   getProfileStatus,
   issueAccessToken,
   type IssuedToken,
+  revokeProfileAccess,
+  type RevokedAccess,
 } from "./infrastructure/db/access-repository.js";
 import {
   createDatabase,
@@ -144,6 +146,12 @@ export interface CliDatabase {
    * commands need not provide it.
    */
   issueLoginToken?(profileId: string): Promise<IssuedToken | null>;
+  /**
+   * Deletes every token and session of the profile (`access:revoke`) and
+   * returns the counts; null when the profile does not exist. Optional only
+   * so that stubs for the other commands need not provide it.
+   */
+  revokeProfileAccess?(profileId: string): Promise<RevokedAccess | null>;
   /**
    * Starts the web server on this pool (`serve`, src/web/server.ts).
    * Optional only so that stubs for the other commands need not provide it.
@@ -280,6 +288,8 @@ export function openCliDatabase(
       (await getProfileStatus(db, profileId)) === null
         ? null
         : issueAccessToken(db, profileId, "login"),
+    revokeProfileAccess: async (profileId) =>
+      (await getProfileStatus(db, profileId)) === null ? null : revokeProfileAccess(db, profileId),
     startWebServer: (webOptions) => startWebServer({ db, ...webOptions }),
   };
 }
@@ -387,6 +397,12 @@ Commands:
             link is a secret: whoever opens it gets into the profile; hand it over only
             to the profile's owner. Requires PUBLIC_BASE_URL. Exit 1 when the profile
             does not exist.
+  access:revoke <profileId>
+            End every login and unsubscribe link and every session of the profile at once
+            (e.g. after a forwarded e-mail or a lost device) and print the counts as JSON.
+            The profile and its notifications stay as they are; a new link comes from
+            access:link or the next digest. Requires an up-to-date schema (migrate). Exit 1
+            when the profile does not exist.
 `;
 
 type Command =
@@ -399,7 +415,8 @@ type Command =
   | "match:preview"
   | "digest"
   | "serve"
-  | "access:link";
+  | "access:link"
+  | "access:revoke";
 const commands: readonly Command[] = [
   "health",
   "migrate",
@@ -411,6 +428,7 @@ const commands: readonly Command[] = [
   "digest",
   "serve",
   "access:link",
+  "access:revoke",
 ];
 
 function isCommand(value: string): value is Command {
@@ -449,7 +467,7 @@ interface DigestArgs {
 
 type Invocation =
   | { readonly command: "health" | "migrate" | "serve" }
-  | { readonly command: "access:link"; readonly profileId: string }
+  | { readonly command: "access:link" | "access:revoke"; readonly profileId: string }
   | { readonly command: "source:preview"; readonly preview: PreviewArgs }
   | { readonly command: "ingest"; readonly ingest: IngestArgs }
   | { readonly command: "profile:create"; readonly file: string }
@@ -647,7 +665,7 @@ function parseInvocation(
     if (extra.length > 0) return `Unexpected argument: ${JSON.stringify(extra[0])}`;
     return { command, file };
   }
-  if (command === "profile:show" || command === "access:link") {
+  if (command === "profile:show" || command === "access:link" || command === "access:revoke") {
     const [id, ...extra] = rest;
     const profileId = parseProfileId(id);
     if (profileId === null) return `Command "${command}" needs a profile id (uuid).`;
@@ -790,6 +808,8 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
       case "access:link":
         if (publicBaseUrl === null) throw new Error("PUBLIC_BASE_URL was not loaded");
         return await runAccessLink(invocation.profileId, publicBaseUrl, database, io);
+      case "access:revoke":
+        return await runAccessRevoke(invocation.profileId, database, io);
     }
   } finally {
     await database.close();
@@ -1310,7 +1330,7 @@ async function runDigestCommand(
   return ExitCode.Failure;
 }
 
-/** The schema check `serve` and `access:link` share; a message when not ready, else null. */
+/** The schema check `serve`, `access:link` and `access:revoke` share; a message when not ready, else null. */
 async function schemaNotReady(database: CliDatabase): Promise<string | null> {
   if (database.pendingMigrations === undefined) throw new Error("database cannot check migrations");
   const pending = await database.pendingMigrations();
@@ -1416,6 +1436,41 @@ async function runAccessLink(
   io.stderr(
     "The link is a secret: whoever opens it gets into the profile. It works once, " +
       "for 7 days; hand it over only to the profile's owner.\n",
+  );
+  return ExitCode.Ok;
+}
+
+/**
+ * `access:revoke`: deletes every token and session of the profile (one
+ * transaction) and prints the counts as one JSON line. Never prints or logs
+ * a token, hash or address; the profile itself is left as it is.
+ */
+async function runAccessRevoke(
+  profileId: string,
+  database: CliDatabase,
+  io: CliIo,
+): Promise<ExitCode> {
+  if (database.revokeProfileAccess === undefined) throw new Error("database cannot revoke access");
+  let revoked: RevokedAccess | null;
+  try {
+    const notReady = await schemaNotReady(database);
+    if (notReady !== null) {
+      io.stderr(`Access not revoked: ${notReady}.\n`);
+      return ExitCode.Failure;
+    }
+    revoked = await database.revokeProfileAccess(profileId);
+  } catch (error: unknown) {
+    const failure = describeDatabaseFailure(error);
+    if (failure.reason === "unknown") throw error;
+    io.stderr(`Access not revoked: database ${formatDatabaseFailure(failure)}\n`);
+    return ExitCode.Failure;
+  }
+  if (revoked === null) {
+    io.stderr("Profile not found.\n");
+    return ExitCode.Failure;
+  }
+  io.stdout(
+    `${JSON.stringify({ status: "ok", tokens: revoked.tokens, sessions: revoked.sessions })}\n`,
   );
   return ExitCode.Ok;
 }

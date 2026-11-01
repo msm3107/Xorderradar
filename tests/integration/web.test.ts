@@ -560,4 +560,122 @@ describe.skipIf(skipWithoutDatabase)("web access (PostgreSQL)", () => {
     expect(missing).toBe(ExitCode.Failure);
     expect(missingErr).toBe("Profile not found.\n");
   });
+
+  describe("access:revoke", () => {
+    async function revoke(profileId: string) {
+      let stdout = "";
+      let stderr = "";
+      const code = await runCli(
+        ["access:revoke", profileId],
+        {
+          // No PUBLIC_BASE_URL: revoking builds no links.
+          env: { NODE_ENV: "test", DATABASE_URL: schema.url },
+          stdout: (text) => (stdout += text),
+          stderr: (text) => (stderr += text),
+        },
+        defaultCliDeps,
+      );
+      return { code, stdout, stderr };
+    }
+
+    async function rowCounts(profileId: string) {
+      const tokens = await schema.db
+        .selectFrom("access_tokens")
+        .select("id")
+        .where("profile_id", "=", profileId)
+        .execute();
+      const sessions = await schema.db
+        .selectFrom("sessions")
+        .select("id")
+        .where("profile_id", "=", profileId)
+        .execute();
+      return { tokens: tokens.length, sessions: sessions.length };
+    }
+
+    it("ends every link and session of the profile at once and nothing else", async () => {
+      // This profile: two sessions (their login tokens are used up), one unused
+      // login link and one unsubscribe link.
+      const first = await login();
+      const second = await login();
+      const loginLink = await issueAccessToken(schema.db, profile.id, "login");
+      const unsubscribeLink = await issueAccessToken(schema.db, profile.id, "unsubscribe");
+      // Another profile, whose access must survive (tenant isolation).
+      const other = await createCompanyProfile(schema.db, {
+        ...profileInput,
+        email: "biuro@example.invalid",
+        name: "Anna Nowak",
+      });
+      const otherLogin = await issueAccessToken(schema.db, other.id, "login");
+      const otherSession = await consumeLoginToken(
+        schema.db,
+        (await issueAccessToken(schema.db, other.id, "login")).token,
+      );
+      const otherUnsubscribe = await issueAccessToken(schema.db, other.id, "unsubscribe");
+      expect(otherSession).not.toBeNull();
+      const otherCookie = `${SESSION_COOKIE}=${otherSession?.sessionToken ?? ""}`;
+      const otherBefore = await rowCounts(other.id);
+      expect(otherBefore).toEqual({ tokens: 3, sessions: 1 });
+      const profileBefore = await schema.db
+        .selectFrom("company_profiles")
+        .select(["active", "updated_at"])
+        .where("id", "=", profile.id)
+        .executeTakeFirstOrThrow();
+
+      const result = await revoke(profile.id);
+      expect(result.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(result.stdout)).toEqual({ status: "ok", tokens: 4, sessions: 2 });
+      expect(result.stderr).toBe("");
+      for (const secret of [first.token, second.token, loginLink.token, unsubscribeLink.token]) {
+        expect(result.stdout).not.toContain(secret);
+        expect(result.stdout).not.toContain(hashSecretToken(secret));
+      }
+      expect(result.stdout).not.toContain(EMAIL);
+      expect(await rowCounts(profile.id)).toEqual({ tokens: 0, sessions: 0 });
+
+      // Every link and browser of the profile stops working.
+      const neutral = await invalidLinkBody();
+      const loginPage = await fetch(`${url}/dostep/${loginLink.token}`);
+      expect(loginPage.status).toBe(404);
+      expect(await loginPage.text()).toBe(neutral);
+      expect((await post("/dostep", `token=${loginLink.token}`, { origin: BASE })).status).toBe(
+        404,
+      );
+      expect((await fetch(`${url}/wypis/${unsubscribeLink.token}`)).status).toBe(404);
+      expect(
+        (await post(`/wypis/${unsubscribeLink.token}`, "List-Unsubscribe=One-Click")).status,
+      ).toBe(404);
+      for (const { cookie } of [first, second]) {
+        expect((await fetch(`${url}/profil`, { headers: { cookie } })).status).toBe(401);
+      }
+      // The profile itself is untouched: still active, same updated_at.
+      expect(
+        await schema.db
+          .selectFrom("company_profiles")
+          .select(["active", "updated_at"])
+          .where("id", "=", profile.id)
+          .executeTakeFirstOrThrow(),
+      ).toEqual(profileBefore);
+
+      // The other profile keeps its links and session.
+      expect(await rowCounts(other.id)).toEqual(otherBefore);
+      expect((await fetch(`${url}/dostep/${otherLogin.token}`)).status).toBe(200);
+      expect((await fetch(`${url}/wypis/${otherUnsubscribe.token}`)).status).toBe(200);
+      expect((await fetch(`${url}/profil`, { headers: { cookie: otherCookie } })).status).toBe(200);
+
+      // Revoking again finds nothing to delete.
+      const again = await revoke(profile.id);
+      expect(again.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(again.stdout)).toEqual({ status: "ok", tokens: 0, sessions: 0 });
+    });
+
+    it("exits 1 for a profile that does not exist and deletes nothing", async () => {
+      await login();
+      await issueAccessToken(schema.db, profile.id, "unsubscribe");
+      const result = await revoke("00000000-0000-4000-8000-0000000000ff");
+      expect(result.code).toBe(ExitCode.Failure);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe("Profile not found.\n");
+      expect(await rowCounts(profile.id)).toEqual({ tokens: 2, sessions: 1 });
+    });
+  });
 });

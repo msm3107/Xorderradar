@@ -19,6 +19,7 @@ async function run(
     pending?: string[];
     listenError?: Error;
     profileExists?: boolean;
+    revokeError?: Error;
   } = {},
 ) {
   const calls = {
@@ -26,6 +27,7 @@ async function run(
     started: [] as Omit<WebServerOptions, "db">[],
     serverClosed: 0,
     issued: [] as string[],
+    revoked: [] as string[],
   };
   let stop = (): void => undefined;
   const database: CliDatabase = {
@@ -57,6 +59,11 @@ async function run(
           ? null
           : { token: TOKEN, expiresAt: new Date("2026-11-08T06:00:00.000Z") },
       );
+    },
+    revokeProfileAccess: (profileId) => {
+      calls.revoked.push(profileId);
+      if (options.revokeError !== undefined) return Promise.reject(options.revokeError);
+      return Promise.resolve(options.profileExists === false ? null : { tokens: 3, sessions: 2 });
     },
   };
   const web: CliWebDeps = {
@@ -199,4 +206,72 @@ describe("access:link", () => {
       expect(result.calls.issued).toEqual([]);
     },
   );
+});
+
+describe("access:revoke", () => {
+  it("prints the counts as one JSON line and nothing secret", async () => {
+    const result = await run(["access:revoke", PROFILE_ID]);
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(JSON.parse(result.stdout)).toEqual({ status: "ok", tokens: 3, sessions: 2 });
+    expect(result.stdout.split("\n")).toHaveLength(2);
+    expect(result.stderr).toBe("");
+    expect(result.calls.revoked).toEqual([PROFILE_ID]);
+    expect(result.calls.issued).toEqual([]);
+    expect(result.calls.closed).toBe(1);
+  });
+
+  it("does not need PUBLIC_BASE_URL", async () => {
+    const result = await run(["access:revoke", PROFILE_ID], {
+      env: { PUBLIC_BASE_URL: undefined },
+    });
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(result.calls.revoked).toEqual([PROFILE_ID]);
+  });
+
+  it("exits 1 for a profile that does not exist", async () => {
+    const result = await run(["access:revoke", PROFILE_ID], { profileExists: false });
+    expect(result.code).toBe(ExitCode.Failure);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("Profile not found.\n");
+  });
+
+  it("exits 1 naming only the reason and code when the database is unreachable", async () => {
+    const refused = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), {
+      code: "ECONNREFUSED",
+    });
+    const result = await run(["access:revoke", PROFILE_ID], { revokeError: refused });
+    expect(result.code).toBe(ExitCode.Failure);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("Access not revoked: database unreachable (ECONNREFUSED)\n");
+    expect(result.stderr).not.toContain("127.0.0.1");
+    expect(result.calls.closed).toBe(1);
+  });
+
+  it("does not revoke on an outdated schema", async () => {
+    const result = await run(["access:revoke", PROFILE_ID], { pending: ["0006_access"] });
+    expect(result.code).toBe(ExitCode.Failure);
+    expect(result.stderr).toBe(
+      "Access not revoked: the database schema is not up to date; run `migrate`.\n",
+    );
+    expect(result.calls.revoked).toEqual([]);
+    expect(result.calls.closed).toBe(1);
+  });
+
+  it.each([[[]], [["nie-uuid"]], [[PROFILE_ID, "extra"]], [["--profile", PROFILE_ID]]])(
+    "is a usage error for %j (exit 2) without opening the database",
+    async (rest) => {
+      const result = await run(["access:revoke", ...rest]);
+      expect(result.code).toBe(ExitCode.Usage);
+      expect(result.stderr).toContain("Usage:");
+      expect(result.calls.revoked).toEqual([]);
+      expect(result.calls.closed).toBe(0);
+    },
+  );
+
+  it("is listed in the help text", async () => {
+    const result = await run(["--help"]);
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(result.stdout).toContain("access:revoke <profileId>");
+    expect(result.stdout).toContain("The profile and its notifications stay as they are");
+  });
 });

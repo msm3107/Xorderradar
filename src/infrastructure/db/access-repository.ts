@@ -224,6 +224,40 @@ export async function getProfileStatus(
   return row ?? null;
 }
 
+/** What `revokeProfileAccess` deleted. */
+export interface RevokedAccess {
+  readonly tokens: number;
+  readonly sessions: number;
+}
+
+/**
+ * `access:revoke`: deletes every token (login and unsubscribe, used or not)
+ * and every session of the profile, in one transaction, so each e-mail link
+ * and signed-in browser stops working at once (a forwarded digest, a lost
+ * device; D-026). The profile row itself is not touched.
+ *
+ * Tokens go first: a login racing with the revoke either has its token
+ * deleted under it (the conditional UPDATE then finds nothing) or holds the
+ * token row until it commits, so its new session is already visible to the
+ * sessions DELETE (a new snapshot per statement in READ COMMITTED).
+ */
+export async function revokeProfileAccess(
+  db: Kysely<Database>,
+  profileId: string,
+): Promise<RevokedAccess> {
+  return db.transaction().execute(async (trx) => {
+    const tokens = await trx
+      .deleteFrom("access_tokens")
+      .where("profile_id", "=", profileId)
+      .executeTakeFirst();
+    const sessions = await trx
+      .deleteFrom("sessions")
+      .where("profile_id", "=", profileId)
+      .executeTakeFirst();
+    return { tokens: Number(tokens.numDeletedRows), sessions: Number(sessions.numDeletedRows) };
+  });
+}
+
 /** Expired rows deleted per table and call, so one cleanup is a short statement. */
 export const ACCESS_CLEANUP_BATCH = 1000;
 

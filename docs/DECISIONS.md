@@ -1237,6 +1237,8 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
   bez zysku przy sesji po stronie serwera); bcrypt/argon2 dla tokenów (zbędny koszt dla
   losowych sekretów).
 - **Konsekwencje:** przekazanie e-maila dalej daje dostęp do profilu (ostrzeżenie w stopce).
+  Reakcja na przekazany e-mail albo zgubione urządzenie: `access:revoke <profileId>` (usuwa
+  naraz wszystkie tokeny i sesje profilu; profil bez zmian).
   Token w ścieżce URL trafia do logów dostępu reverse proxy — proxy nie może logować ścieżek
   tych tras albo musi je przycinać (PR-07, SECURITY §11).
 - **Multipart w wypisie (RFC 8058 §3.2):** dostawca poczty SHOULD wysłać ciało jako

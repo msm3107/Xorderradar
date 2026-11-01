@@ -8,7 +8,10 @@ implemented: Code & Safety Review PASS (M-1 docs claimed the outbox `.json` had 
 links; L-1 timeouts enforced only every 30 s; L-2 client aborts logged as DB failures; L-3
 literal RFC 8058 §8.3 framing; L-4 IDN note) → fix round → C&S PASS → Quality Review ACCEPT
 (should-fix: how to get a new link, way back after unsubscribing) → copy round → C&S PASS →
-Quality ACCEPT. PR opened for the owner's review (not merged).
+Quality ACCEPT. PR #10 opened; owner review PASS (no blockers) → owner follow-up
+`access:revoke <profileId>` + three PR-06B criteria → C&S PASS → Quality ACCEPT → polish
+round (named result type, DB-unreachable test, README/D-026 lines, apostrophe-safe psql
+lookup) → C&S PASS. Not merged.
 
 ## Completed
 
@@ -472,6 +475,10 @@ unsubscribe); D-024 amended (digest footer links and `List-Unsubscribe` https + 
   `claimDeliveries`; a dry run issues none. The outbox `.json` copy shows the links as
   `[token]`; the `.eml` keeps them (secret).
 - `access:link <profileId>`: prints the login link on stdout, a "secret" warning on stderr.
+- `access:revoke <profileId>` (owner review of PR #10): deletes every access token (login and
+  unsubscribe) and every session of the profile in one transaction (tokens first), prints
+  only `{"status":"ok","tokens":N,"sessions":M}`; profile and notifications untouched; no
+  `PUBLIC_BASE_URL` needed; unknown profile → 1. Tenant isolation tested end to end.
 - Hardening: 8 KB body (413), urlencoded only (415; multipart only on `/wypis`), headers
   10 s / request 15 s (`connectionsCheckingInterval` 1 s), 8 KB headers, Host required; CSP,
   nosniff, no-referrer, no-store; hourly cleanup of expired rows in batches of 1000; graceful
@@ -479,14 +486,23 @@ unsubscribe); D-024 amended (digest footer links and `List-Unsubscribe` https + 
   is `http request aborted` (info, route + reason only).
 - Pages tell the customer how to get back in (reply to the last e-mail → operator sends a new
   link) and how to undo an unsubscribe; README „Obsługa klienta” gives the operator the
-  `access:link` and `UPDATE company_profiles SET active = true` steps.
+  `access:link`, `access:revoke` and `UPDATE company_profiles SET active = true` steps, plus a
+  psql `\prompt` lookup of `profileId` by e-mail (safe for an apostrophe in the address).
 - No new dependencies.
 - Reviews: C&S PASS (M-1 outbox `.json` held token links contrary to the docs; L-1 Node checks
   the timeouts every 30 s by default; L-2 client aborts logged as DB failures; L-3 literal
   §8.3 framing → 400; L-4 IDN note wrong) → fix round (redaction, 1 s check interval,
   `RequestAbortedError`, docs) → C&S PASS (live probes: header 10.01 s, body/drip 15.01 s) →
   Quality ACCEPT (should-fix: re-entry sentence, way back after unsubscribe; README operator
-  note) → copy round → C&S PASS → Quality ACCEPT.
+  note) → copy round → C&S PASS → Quality ACCEPT. Owner review of PR #10: PASS, no blockers;
+  follow-up `access:revoke` → C&S PASS → Quality ACCEPT (should-fix: say that old one-click
+  links stop working; D-026 line; e-mail lookup) → polish round → C&S PASS (L-1: an apostrophe
+  broke the lookup literal) → README `\prompt` fix → C&S PASS.
+- PR-06B acceptance criteria added from the owner's review (`docs/PR_PLAN.md`): „Włącz ponownie
+  powiadomienia” on `/profil` (POST + CSRF); login-CSRF protection on `POST /dostep`
+  (`Sec-Fetch-Site`/`Origin`) before the profile form accepts data; an e-mail change revokes the
+  profile's other sessions and tokens (needs a `revokeProfileAccess` variant that keeps the
+  current session).
 - Owner decisions open: TTLs (login 7, unsubscribe 60, session 30 days); a self-service
   "e-mail me a link" form (needs anti-enumeration and rate limiting); leniency for the literal
   RFC 8058 §8.3 example framing on `/wypis` only (body has no security role there; strict
@@ -555,9 +571,9 @@ D-024 amended (footer links, `List-Unsubscribe` https + mailto).
    lasts 30 days on this device; a "Wypisano" confirmation line on `/profil` after unsubscribing;
    the company name on the unsubscribe confirm page; a link back to `/profil` on error pages;
    the 404 page repeats „został już użyty albo wygasł” (drop „Aktualny link znajdziesz…” there);
-   a README query to find a `profileId` by e-mail. For PR-07: runbook lines on revoking access
-   (`DELETE FROM sessions` / `access_tokens WHERE profile_id = …`) after a forwarded e-mail or
-   an owner change, monitoring the reply-to mailbox, the proxy must not log `/dostep` and
+   plus the three owner criteria now in `docs/PR_PLAN.md` → PR-06B. For PR-07: runbook lines on
+   revoking access (`access:revoke <profileId>`) after a forwarded e-mail or an owner change,
+   monitoring the reply-to mailbox, the proxy must not log `/dostep` and
    `/wypis` paths, TLS/HSTS and rate limiting at the proxy.
    Pilot follow-ups from the owner's PR #9 review (owner to choose the PR):
    - Matching calibration (changes PR-04 scoring): in the owner's real-data run 7 of 26 offers
@@ -764,6 +780,17 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-01, PR-06A owner follow-up `access:revoke` (Node 22, pnpm 10.28.0, PostgreSQL 16):
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 1526/1526 tests passed in 43 files, DB tests included. Full
+`pnpm audit`: unchanged (1 moderate, dev-only minimatch via eslint). No dependency changes.
+Integration test: revoked login/unsubscribe links → 404, sessions → 401, other profile's
+tokens and session still work, exact counts, repeat → 0/0. Quality ran `digest` (test mode),
+`serve`, `access:link` and `access:revoke` end to end in a temporary schema, removed. C&S and
+the coder ran read-only psql probes of the README lookup (apostrophe, injection string,
+backslash). No e-mail sent; existing tests only gained new describe blocks and a stub option;
+no assertion weakened. Working-tree fingerprint unchanged across every reviewer run.
 
 2026-11-01, PR-06A after the copy round (Node 22, pnpm 10.28.0, PostgreSQL 16):
 `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
