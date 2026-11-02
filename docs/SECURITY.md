@@ -189,7 +189,11 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
   (`List-Unsubscribe` i `List-Unsubscribe-Post`) — wymaganie RFC 8058 i dużych skrzynek;
   do sprawdzenia w konfiguracji serwera SMTP przed wysyłką do prawdziwych odbiorców (PR-07).
 - UI (PR-06A, `src/web/pages.ts`): każda wartość przez ten sam `escapeHtml`
-  (`src/infrastructure/html.ts`), bez inline JS i stylów (CSP niżej, §11).
+  (`src/infrastructure/html.ts`), bez inline JS i stylów (CSP niżej, §11). PR-06B: strona
+  `/dopasowania` pokazuje oferty przez ten sam `digestItemView` co e-mail (link tylko
+  `http(s)`, `rel="noopener noreferrer"`), a formularz profilu odsyła wysłane wartości
+  escapowane (także w `<textarea>`); wartości pól wyboru spoza zamkniętych list nie są
+  odsyłane. Testy z wrogim tytułem, URL-em `javascript:` i wartościami formularza.
 - Testy nie wysyłają prawdziwych e-maili: fałszywy sender, outbox w katalogu tymczasowym albo
   lokalny serwer na `127.0.0.1`; adresy wyłącznie pseudonimizowane (`*.invalid`).
 
@@ -215,9 +219,39 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   wiersz. Profil wyłącznie z sesji — w URL-ach i formularzach nie ma identyfikatora profilu.
   Nieznana ścieżka → 404, zła metoda → 405.
 - **CSRF:** token synchronizujący (HMAC-SHA256 z id sesji) na każdym POST z sesją,
-  porównanie w stałym czasie; POST logowania chroni token logowania, POST wypisu RFC 8058 —
-  token w ścieżce (bez ciasteczka, robi tylko `active = false`). `Origin` różny od origin
-  `PUBLIC_BASE_URL` → 403 (poza wypisem RFC 8058).
+  porównanie w stałym czasie; POST wypisu RFC 8058 chroni token w ścieżce (bez ciasteczka,
+  robi tylko `active = false`). `Origin` różny od origin `PUBLIC_BASE_URL` → 403 (poza
+  wypisem RFC 8058).
+- **Login-CSRF (PR-06B, D-027):** `POST /dostep` nie ma sesji, więc nie ma tokenu CSRF —
+  obca strona mogłaby zalogować przeglądarkę ofiary na profil atakującego (a ofiara wpisałaby
+  w nim swoje dane). Dlatego ta trasa wymaga dowodu, że formularz pochodzi z naszej strony:
+  `Origin` równy origin `PUBLIC_BASE_URL`, albo — gdy `Origin` brak — nagłówek
+  `Sec-Fetch-Site` o wartości `same-origin`. Wartości `cross-site`, `same-site` i `none`,
+  `Origin` równy `null`, obcy `Origin` oraz brak obu nagłówków → 403, token nie jest
+  zużywany. Klient bez obu nagłówków (bardzo stara przeglądarka, skrypt) nie zaloguje się —
+  świadomy koszt.
+- **Zmiana e-maila (PR-06B, D-027):** zapis nowego adresu i unieważnienie dostępu w jednej
+  transakcji: wszystkie tokeny profilu (logowanie i wypis, także w e-mailach wysłanych na
+  stary adres) oraz wszystkie sesje profilu poza bieżącą są usuwane; profil nie zmienia
+  `active`. Zmiana innych pól niczego nie unieważnia. **Nowy adres nie jest potwierdzany
+  wiadomością:** kto ma sesję (np. przekazany link), może przekierować powiadomienia na
+  dowolny adres; formularz wymaga wpisania adresu dwa razy (ochrona przed literówką, nie przed
+  nadużyciem). Adres zajęty przez inny profil → błąd przy polu, co ujawnia posiadaczowi
+  sesji, że adres jest w systemie (bez nazwy tego profilu). W transakcji zmiany bieżąca sesja
+  jest sprawdzana ponownie (usunięta lub wygasła w międzyczasie → nic nie zapisane, 401).
+  Digest wydaje linki tylko, gdy profil wciąż ma adres, na który wysyła (inaczej status
+  `address_changed` i brak e-maila), więc po zmianie nie wyśle na stary adres nowych tokenów;
+  bez `PUBLIC_BASE_URL` (e-mail bez linków) przebieg trwający w chwili zmiany może jeszcze
+  wysłać jeden e-mail na stary adres. Kolejność blokad zmiany adresu jest bez cyklu
+  względem logowania, wylogowania, `access:revoke` i digestu (D-027). `/profil` pokazuje
+  bieżący adres powiadomień (zescapowany, z bazy dla profilu sesji), nigdy dawnego.
+- **Formularz profilu (PR-06B):** sesja + CSRF + `Origin`, ciało ≤ 64 KB (tylko ta trasa) i
+  ≤ 64 pary pól, tylko znane pola (pola pojedyncze dokładnie raz), walidacja schematem domeny;
+  profil wyłącznie z sesji. `active` nie jest polem formularza (osobne przyciski
+  `/profil/wypisz` i `/profil/wlacz`, oba idempotentne). Komunikat po zapisie:
+  `__Host-radar_komunikat` (`HttpOnly; Secure; SameSite=Lax`, 60 s), jedno słowo z
+  zamkniętej listy — nigdy dane (także adres e-mail); podrobione ciasteczko może najwyżej
+  wyświetlić „Zapisano”.
 - **Twardnienie HTTP:** ciało ≤ 8 KB (413), tylko `application/x-www-form-urlencoded`
   (inaczej 415); wyjątek: POST wypisu RFC 8058 przyjmuje też `multipart/form-data` (RFC 8058
   §3.2 — SHOULD), czytany własnym ścisłym parserem bez zależności (`src/web/multipart.ts`:
@@ -227,11 +261,23 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   żądania 15 s (Node sprawdza je co 1 s — `connectionsCheckingInterval`), keep-alive 5 s,
   gniazda 30 s. Nagłówki odpowiedzi: CSP
   `default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
-  `nosniff`, `Referrer-Policy: no-referrer` (token z URL nie wycieka w `Referer`),
-  `Cache-Control: no-store`.
-- **Bez limitu żądań w aplikacji:** tokenów 256-bitowych nie da się zgadnąć, a każde żądanie
-  jest ograniczone rozmiarem i czasem; zalew żądań zatrzymuje reverse proxy (PR-07). Funkcja
-  „wyślij mi link e-mailem” (otwarta decyzja właściciela) będzie wymagać limitu.
+  `nosniff`, `Referrer-Policy: strict-origin` (`Referer` niesie tylko origin, więc token z
+  URL nie wycieka w `Referer`, także do logów własnego proxy; PR-06A miał `no-referrer`, przy
+  którym przeglądarki wysyłają w formularzach `Origin: null` i kontrola `Origin` odrzucała
+  każdy formularz — poprawione w PR-06B), `Cache-Control: no-store`.
+- **Bez limitu żądań w aplikacji:** tokenów 256-bitowych nie da się zgadnąć, a każde żądanie jest
+  ograniczone rozmiarem i czasem; zalew żądań zatrzymuje reverse proxy (PR-07). Wyjątek kosztowy
+  (PR-06B, D-027): `/dopasowania` liczy dopasowanie na żądanie w wątku procesu `serve` (zmierzone
+  lokalnie: ok. 0,8 s przy 5 000 kandydatów i typowym profilu, do kilkunastu sekund przy limicie 10
+  000 i maksymalnym profilu). Liczenie oddaje pętlę zdarzeń po każdych ok. 20 ms pracy, więc
+  pozostałe żądania są obsługiwane, a proces liczy najwyżej jedną listę naraz. Kolejne żądanie
+  czeka w ograniczonej kolejce FIFO (najwyżej 8 żądań i 3 s; rozłączony klient wypada z niej bez
+  liczenia, bez pozostawionych timerów i nasłuchów); pełna kolejka albo upływ czasu → 503 z
+  `Retry-After`. To jedno miejsce jest **wspólne dla wszystkich klientów**: posiadacz sesji
+  ponawiający żądania może je zajmować i inni klienci czekają wtedy albo dostają 503 (reszta stron
+  działa).
+  Dostępne tylko z sesją; limit dla tej trasy na proxy — PR-07. Funkcja „wyślij mi link e-mailem”
+  (otwarta decyzja właściciela) będzie wymagać limitu.
 - **Reverse proxy (PR-07):** `serve` słucha domyślnie na `127.0.0.1:3000` czystym HTTP; TLS,
   HSTS i przekierowanie z `http` robi proxy. Tokeny są w ścieżkach `/dostep/…` i `/wypis/…`
   — proxy **nie może** zapisywać tych ścieżek w logach dostępu (wyłączony log albo ścieżka

@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { setImmediate as onNextLoop } from "node:timers";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CompanyProfile } from "../src/domain/company-profile.js";
 import type { Opportunity } from "../src/domain/opportunity.js";
 import { matchOpportunity } from "../src/matching/match.js";
+import { MATCH_YIELD_AFTER_MS, matchingItems } from "../src/notifications/candidates.js";
 import {
   buildDigest,
   escapeHtml,
@@ -292,8 +294,11 @@ describe("web links in the digest (PR-06A)", () => {
     expect(text).toContain(
       `Aby zrezygnować z powiadomień, otwórz ten link (albo odpowiedz na tę wiadomość): ${links.unsubscribeUrl}\n`,
     );
-    expect(html).toContain(`<a href="${links.profileUrl}">${links.profileUrl}</a>`);
-    expect(html).toContain(`<a href="${links.unsubscribeUrl}">${links.unsubscribeUrl}</a>`);
+    // HTML: short link texts (PR-06B); the text part keeps the URLs (above).
+    expect(html).toContain(`<a href="${links.profileUrl}">Otwórz swój profil</a>`);
+    expect(html).toContain(`<a href="${links.unsubscribeUrl}">Wypisz się z powiadomień</a>`);
+    expect(html).not.toContain(`>${links.profileUrl}<`);
+    expect(html).not.toContain(`>${links.unsubscribeUrl}<`);
     expect(text).not.toContain("napisz do operatora");
   });
 
@@ -314,5 +319,61 @@ describe("web links in the digest (PR-06A)", () => {
     expect(odd.text).not.toContain("javascript:");
     expect(odd.text).not.toContain("Twój profil");
     expect(odd.html).toContain('<a href="https://a.invalid/w?x=%22%3C">');
+  });
+});
+
+describe("matchingItems (shared by the digest and /dopasowania)", () => {
+  // Some match, some are in another region, some lack the keyword.
+  const offers = Array.from({ length: 405 }, (_, index) =>
+    offer(
+      index % 3 === 1
+        ? { location: { voivodeship: "opolskie" } }
+        : index % 3 === 2
+          ? { title: `Dostawa papieru ${String(index)}`, description: null }
+          : {},
+    ),
+  );
+
+  it("returns the matching offers in order, with their reasons, as matching each does", async () => {
+    const expected = offers.flatMap((value) => {
+      const result = matchOpportunity(value, profile);
+      return result.matched ? [{ offer: value, reasons: result.reasons }] : [];
+    });
+    expect(expected.length).toBeGreaterThan(0);
+    expect(expected.length).toBeLessThan(offers.length);
+    expect(await matchingItems(profile, offers)).toEqual(expected);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Matches `offers` with a clock advancing `stepMs` per reading; counts event-loop turns. */
+  async function turnsWhileMatching(stepMs: number) {
+    let clock = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => (clock += stepMs));
+    let turns = 0;
+    let stopped = false;
+    const countTurn = (): void => {
+      turns += 1;
+      if (!stopped) onNextLoop(countTurn);
+    };
+    onNextLoop(countTurn);
+    const items = await matchingItems(profile, offers);
+    stopped = true;
+    return { turns, items };
+  }
+
+  it(`lets the event loop run once ${String(MATCH_YIELD_AFTER_MS)} ms of matching have passed`, async () => {
+    const expected = await matchingItems(profile, offers);
+    // Slow matching (each offer "takes" the whole budget): yields all along the list.
+    const slow = await turnsWhileMatching(MATCH_YIELD_AFTER_MS);
+    expect(slow.turns).toBeGreaterThanOrEqual(offers.length / 4);
+    expect(slow.items).toEqual(expected);
+    // Fast matching (the budget is never spent): the list is matched without yielding.
+    vi.restoreAllMocks();
+    const fast = await turnsWhileMatching(0);
+    expect(fast.turns).toBe(0);
+    expect(fast.items).toEqual(expected);
   });
 });

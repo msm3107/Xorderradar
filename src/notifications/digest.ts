@@ -58,34 +58,39 @@ const CPV_CODES_SHOWN = 5;
 const SUBJECT_NAME_MAX_CHARS = 80;
 const NOT_GIVEN = "nie podano";
 
-interface Field {
+export interface DigestField {
   readonly label: string;
   readonly value: string;
   /** Set for a link: an http(s) URL, also the value shown. */
   readonly href?: string;
 }
 
-interface ItemModel {
+/** One offer as shown: its title and labelled fields, cleaned, not escaped yet. */
+export interface DigestItemView {
   readonly title: string;
-  readonly fields: readonly Field[];
+  readonly fields: readonly DigestField[];
 }
 
-/** A footer paragraph, optionally ending with a link (shown as its URL in the text part). */
+/**
+ * A footer paragraph, optionally ending with a link: shown as its URL in the
+ * text part, as `linkText` in the HTML part.
+ */
 interface FooterParagraph {
   readonly text: string;
   readonly href?: string;
+  readonly linkText?: string;
 }
 
 interface DigestModel {
   readonly heading: string;
   /** Shown right under the heading: matching offers left for later e-mails. */
   readonly overflowNotice: string | null;
-  readonly items: readonly ItemModel[];
+  readonly items: readonly DigestItemView[];
   readonly footer: readonly FooterParagraph[];
 }
 
 /** Polish plural form for `count`: one, few (2–4, not 12–14), many. */
-function plural(count: number, one: string, few: string, many: string): string {
+export function plural(count: number, one: string, few: string, many: string): string {
   if (count === 1) return one;
   const lastDigit = count % 10;
   const lastTwo = count % 100;
@@ -162,8 +167,11 @@ function safeLink(value: string): string | null {
   return url !== null && (url.protocol === "https:" || url.protocol === "http:") ? url.href : null;
 }
 
-/** Soonest deadline first (unknown last), then the latest published (unknown last), then id. */
-function digestOrder(a: DigestItem, b: DigestItem): number {
+/**
+ * Soonest deadline first (unknown last), then the latest published (unknown
+ * last), then id. Also the order of the web page of matches (PR-06B).
+ */
+export function digestOrder(a: DigestItem, b: DigestItem): number {
   const deadlineA = a.offer.deadline?.getTime() ?? Number.POSITIVE_INFINITY;
   const deadlineB = b.offer.deadline?.getTime() ?? Number.POSITIVE_INFINITY;
   if (deadlineA !== deadlineB) return deadlineA < deadlineB ? -1 : 1;
@@ -173,8 +181,12 @@ function digestOrder(a: DigestItem, b: DigestItem): number {
   return a.offer.id < b.offer.id ? -1 : a.offer.id > b.offer.id ? 1 : 0;
 }
 
-function itemModel({ offer, reasons }: DigestItem): ItemModel {
-  const fields: Field[] = [
+/**
+ * One offer's title and fields, as the digest shows them; also used by the
+ * web page of matches (PR-06B), so both show an offer the same way.
+ */
+export function digestItemView({ offer, reasons }: DigestItem): DigestItemView {
+  const fields: DigestField[] = [
     { label: "Zamawiający", value: offer.issuerName },
     { label: "Lokalizacja", value: formatLocation(offer.location) },
     {
@@ -241,6 +253,7 @@ function digestModel(
               "Twój profil (link jednorazowy, ważny 7 dni; nie przekazuj tej wiadomości " +
               "dalej — link daje dostęp do profilu):",
             href: profileUrl,
+            linkText: "Otwórz swój profil",
           },
         ]),
     unsubscribeUrl === null
@@ -252,12 +265,13 @@ function digestModel(
       : {
           text: "Aby zrezygnować z powiadomień, otwórz ten link (albo odpowiedz na tę wiadomość):",
           href: unsubscribeUrl,
+          linkText: "Wypisz się z powiadomień",
         },
   ];
   return {
     heading: `Znaleźliśmy dziś ${newOffers(items.length)} ${matching(items.length)} do Twojej firmy.`,
     overflowNotice: options.overflow > 0 ? overflowNotice(options.overflow) : null,
-    items: [...items].sort(digestOrder).map(itemModel),
+    items: [...items].sort(digestOrder).map(digestItemView),
     footer,
   };
 }
@@ -280,7 +294,7 @@ function renderText(model: DigestModel): string {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
-function renderField(field: Field): string {
+function renderField(field: DigestField): string {
   const value =
     field.href === undefined
       ? escapeHtml(field.value)
@@ -310,7 +324,8 @@ function renderHtml(model: DigestModel, subject: string): string {
         `<p>${escapeHtml(paragraph.text)}` +
         (paragraph.href === undefined
           ? ""
-          : ` <a href="${escapeHtml(paragraph.href)}">${escapeHtml(paragraph.href)}</a>`) +
+          : ` <a href="${escapeHtml(paragraph.href)}">` +
+            `${escapeHtml(paragraph.linkText ?? paragraph.href)}</a>`) +
         "</p>",
     ),
     "</div></body></html>",

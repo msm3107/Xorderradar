@@ -1,7 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Kysely } from "kysely";
+import { DomainError } from "../domain/errors.js";
 import {
+  activateProfile,
   consumeLoginToken,
   deactivateProfile,
   deleteExpiredAccess,
@@ -10,11 +12,25 @@ import {
   getProfileStatus,
   isUsableAccessToken,
   SESSION_TTL_MS,
+  unsubscribeTokenProfileName,
   unsubscribeWithToken,
 } from "../infrastructure/db/access-repository.js";
+import {
+  getCompanyProfile,
+  getProfileSettings,
+  updateProfileSettings,
+} from "../infrastructure/db/company-profiles-repository.js";
 import { describeDatabaseFailure } from "../infrastructure/db/errors.js";
 import type { Database } from "../infrastructure/db/schema.js";
 import type { Logger } from "../infrastructure/logger.js";
+import {
+  DIGEST_NEW_DAYS,
+  matchingItems,
+  readDigestCandidates,
+} from "../notifications/candidates.js";
+import { digestItemView, digestOrder } from "../notifications/digest.js";
+import { formatWarsawMinute } from "../sources/normalize/warsaw-time.js";
+import { createMatchesSlot, type MatchesSlot } from "./matches-slot.js";
 import { multipartBoundary, multipartFieldValues } from "./multipart.js";
 import {
   errorPage,
@@ -22,24 +38,42 @@ import {
   invalidLinkPage,
   loginConfirmPage,
   loginRequiredPage,
+  loginRefusedPage,
+  matchesBusyPage,
+  matchesPage,
+  matchesUnavailablePage,
   type Page,
   profilePage,
+  settingsPage,
   STYLESHEET,
   unsubscribeConfirmPage,
   unsubscribedPage,
 } from "./pages.js";
 import {
+  DUPLICATE_EMAIL_ERRORS,
+  formValuesFromStored,
+  formValuesFromSubmission,
+  PROFILE_FORM_MULTIPLE_FIELDS,
+  PROFILE_FORM_SINGLE_FIELDS,
+  validateProfileForm,
+} from "./profile-form.js";
+import {
+  clearedNoticeCookie,
   clearedSessionCookie,
   csrfMatches,
   csrfTokenFor,
+  loginRequestAllowed,
+  noticeCookie,
   originAllowed,
+  readNoticeCookie,
   readSessionCookie,
   SESSION_COOKIE,
   sessionCookie,
+  type Notice,
 } from "./session.js";
 
 /**
- * The web access (PR-06A, D-025, D-026): plain node:http, no framework.
+ * The web access (PR-06A, PR-06B; D-025, D-026, D-027): plain node:http, no framework.
  * Deny by default — a request is served only when its path matches one of
  * the routes below and its method is one the route allows; the profile is
  * taken only from the session, never from the URL or a form. TLS is the
@@ -49,6 +83,23 @@ import {
 
 /** Largest accepted request body: the forms here carry one or two short fields. */
 export const MAX_BODY_BYTES = 8 * 1024;
+/**
+ * The profile form's own limit (D-027): up to 100 keywords of up to 100
+ * characters in two lists, plus counties, urlencoded (a Polish letter takes
+ * 6 bytes). Typical Polish text needs about 1.5 bytes per character, so full
+ * lists fit; every other route keeps MAX_BODY_BYTES.
+ */
+export const PROFILE_FORM_MAX_BYTES = 64 * 1024;
+/** Most `name=value` pairs in the profile form: 7 fields, 10 categories, 16 voivodeships. */
+export const PROFILE_FORM_MAX_FIELDS = 64;
+/** Matching offers shown on /dopasowania; the rest are counted (as in the digest). */
+export const MATCHES_SHOWN = 50;
+/** Retry-After of the 503 when the wait for the /dopasowania slot is refused or runs out. */
+export const MATCHES_RETRY_AFTER_SECONDS = 5;
+/** Longest wait for the /dopasowania slot before the 503 (D-027). */
+export const MATCHES_MAX_WAIT_MS = 3000;
+/** Most requests waiting for the /dopasowania slot; one more gets the 503 at once. */
+export const MATCHES_MAX_WAITERS = 8;
 /** How often `serve` deletes expired tokens and sessions (bounded batches). */
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 /** How long `close()` waits for open requests before cutting the connections. */
@@ -66,7 +117,10 @@ type RouteName =
   | "login_link"
   | "login"
   | "profile"
+  | "profile_settings"
   | "profile_unsubscribe"
+  | "profile_resubscribe"
+  | "matches"
   | "logout"
   | "unsubscribe";
 
@@ -91,8 +145,14 @@ function matchRoute(path: string): RouteMatch | null {
       return { name: "login", allow: FORM };
     case "/profil":
       return { name: "profile", allow: PAGE };
+    case "/profil/ustawienia":
+      return { name: "profile_settings", allow: [...PAGE, "POST"] };
     case "/profil/wypisz":
       return { name: "profile_unsubscribe", allow: FORM };
+    case "/profil/wlacz":
+      return { name: "profile_resubscribe", allow: FORM };
+    case "/dopasowania":
+      return { name: "matches", allow: PAGE };
     case "/wyloguj":
       return { name: "logout", allow: FORM };
   }
@@ -136,7 +196,10 @@ function send(res: ServerResponse, reply: Reply): void {
   res.setHeader("Content-Length", body.length);
   res.setHeader("Content-Security-Policy", CONTENT_SECURITY_POLICY);
   res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader("Referrer-Policy", "no-referrer");
+  // strict-origin: our own form POSTs keep a real `Origin` (no-referrer would
+  // make browsers send `Origin: null`), and a Referer is the origin only —
+  // never a path with a token in it, not even to our own proxy's logs.
+  res.setHeader("Referrer-Policy", "strict-origin");
   // Pages may hold a token or a session's data: no cache may keep them.
   res.setHeader("Cache-Control", reply.cacheable === true ? "public, max-age=3600" : "no-store");
   for (const [name, value] of Object.entries(reply.headers ?? {})) res.setHeader(name, value);
@@ -232,6 +295,72 @@ export function parseForm(
   return Object.fromEntries(values);
 }
 
+export interface MultiValueForm<S extends string, M extends string> {
+  readonly single: Readonly<Record<S, string>>;
+  readonly multiple: Readonly<Record<M, readonly string[]>>;
+}
+
+/**
+ * Parses a urlencoded body with checkbox groups strictly: valid UTF-8, at
+ * most `maxFields` pairs, only the named fields; each `single` field exactly
+ * once, each `multiple` field any number of times (also none). null for
+ * anything else (a 400).
+ */
+export function parseMultiValueForm<S extends string, M extends string>(
+  body: Buffer,
+  single: readonly S[],
+  multiple: readonly M[],
+  maxFields: number,
+): MultiValueForm<S, M> | null {
+  let text: string;
+  try {
+    text = utf8.decode(body);
+  } catch {
+    return null;
+  }
+  const values = new Map<string, string>();
+  const lists = new Map<string, string[]>(multiple.map((name) => [name, []]));
+  let count = 0;
+  for (const [name, value] of new URLSearchParams(text)) {
+    count++;
+    if (count > maxFields) return null;
+    const list = lists.get(name);
+    if (list !== undefined) {
+      list.push(value);
+      continue;
+    }
+    if (!(single as readonly string[]).includes(name) || values.has(name)) return null;
+    values.set(name, value);
+  }
+  if (values.size !== single.length) return null;
+  return {
+    single: Object.fromEntries(values) as Record<S, string>,
+    multiple: Object.fromEntries(lists) as Record<M, string[]>,
+  };
+}
+
+/**
+ * The value of `name` when it occurs exactly once in a urlencoded body of at
+ * most `maxFields` pairs; "" otherwise (repeated, absent, too many pairs or
+ * not UTF-8).
+ */
+function singleFieldValue(body: Buffer, name: string, maxFields: number): string {
+  let text: string;
+  try {
+    text = utf8.decode(body);
+  } catch {
+    return "";
+  }
+  const values: string[] = [];
+  let count = 0;
+  for (const [field, value] of new URLSearchParams(text)) {
+    count++;
+    if (count > maxFields) return "";
+    if (field === name) values.push(value);
+  }
+  return values.length === 1 ? (values[0] ?? "") : "";
+}
+
 export interface WebServerOptions {
   readonly db: Kysely<Database>;
   /** PUBLIC_BASE_URL's origin: the only `Origin` a form POST may carry. */
@@ -242,21 +371,42 @@ export interface WebServerOptions {
   readonly port: number;
   /** Interval of the expired-row cleanup; null turns it off (tests). Default: hourly. */
   readonly cleanupIntervalMs?: number | null;
+  /** Longest wait for the /dopasowania slot (tests). Default: MATCHES_MAX_WAIT_MS. */
+  readonly matchesMaxWaitMs?: number;
+  /** Most requests waiting for the /dopasowania slot (tests). Default: MATCHES_MAX_WAITERS. */
+  readonly matchesMaxWaiters?: number;
 }
 
 export interface WebServer {
   readonly host: string;
   readonly port: number;
+  /** Requests waiting for the /dopasowania slot now (tests). */
+  readonly matchesWaiting: number;
   /** Stops accepting connections, lets open requests finish (bounded), then resolves. */
   close(): Promise<void>;
 }
 
-/** The handling of one request: a reply, decided without writing anything yet. */
+/** State one server shares between its requests. */
+interface ServerState {
+  /**
+   * Matching is CPU work in this one process (D-027): one /dopasowania list
+   * at a time keeps the other requests answered; a concurrent one waits
+   * briefly in FIFO order, or gets 503.
+   */
+  readonly matches: MatchesSlot;
+}
+
+/**
+ * The handling of one request: a reply, decided without writing anything yet
+ * (`res` is only watched for the client hanging up, never written here).
+ */
 async function handle(
   req: IncomingMessage,
+  res: ServerResponse,
   route: RouteMatch,
   method: Method,
   options: WebServerOptions,
+  state: ServerState,
 ): Promise<Reply> {
   const { db } = options;
 
@@ -279,18 +429,49 @@ async function handle(
       }
       case "unsubscribe": {
         const token = route.token ?? "";
-        const usable = await isUsableAccessToken(db, token, "unsubscribe");
-        return pageReply(usable ? unsubscribeConfirmPage(token) : invalidLinkPage());
+        const name = await unsubscribeTokenProfileName(db, token);
+        return pageReply(name === null ? invalidLinkPage() : unsubscribeConfirmPage(token, name));
       }
       case "profile": {
         const session = await currentSession(req, db);
         if (session === null) return unauthenticated(req);
         const profile = await getProfileStatus(db, session.profileId);
         if (profile === null) return unauthenticated(req);
-        return pageReply(profilePage(profile, csrfTokenFor(session.token)));
+        // The notice of the form just saved is shown once, then cleared.
+        const notice = readNoticeCookie(req.headers.cookie);
+        return pageReply(
+          profilePage(profile, csrfTokenFor(session.token), notice),
+          notice === null ? undefined : { "Set-Cookie": clearedNoticeCookie() },
+        );
+      }
+      case "profile_settings": {
+        const session = await currentSession(req, db);
+        if (session === null) return unauthenticated(req);
+        const stored = await getProfileSettings(db, session.profileId);
+        if (stored === null) return unauthenticated(req);
+        return pageReply(settingsPage(formValuesFromStored(stored), csrfTokenFor(session.token)));
+      }
+      case "matches": {
+        const session = await currentSession(req, db);
+        if (session === null) return unauthenticated(req);
+        const slot = await state.matches.acquire(res);
+        // A client already gone or gone while waiting: nothing computed, nothing to release.
+        if (slot === "gone") throw new RequestAbortedError();
+        if (slot !== "acquired") {
+          return pageReply(matchesBusyPage(), {
+            "Retry-After": String(MATCHES_RETRY_AFTER_SECONDS),
+          });
+        }
+        try {
+          return await matchesReply(db, session.profileId, new Date(), () => unauthenticated(req));
+        } finally {
+          // Also after an error; a client gone meanwhile does not stop the work.
+          state.matches.release();
+        }
       }
       case "login":
       case "profile_unsubscribe":
+      case "profile_resubscribe":
       case "logout":
         // Unreachable: these routes allow POST only (checked by the caller).
         return pageReply(errorPage(405));
@@ -301,7 +482,10 @@ async function handle(
   // with no cookie and possibly a foreign Origin; the unguessable token in the
   // path is the authorization. Every other form must come from our own pages.
   if (route.name !== "unsubscribe" && !originAllowed(req.headers.origin, options.publicBaseUrl)) {
-    return { ...pageReply(errorPage(403)), close: true };
+    return {
+      ...pageReply(route.name === "login" ? loginRefusedPage() : errorPage(403)),
+      close: true,
+    };
   }
   // Forms are urlencoded. Only the one-click unsubscribe also takes
   // multipart/form-data: RFC 8058 §3.2 says a provider SHOULD send that.
@@ -310,15 +494,27 @@ async function handle(
   if (multipart === null && !isFormContentType(contentType)) {
     return { ...pageReply(errorPage(415)), close: true };
   }
+  const limit = route.name === "profile_settings" ? PROFILE_FORM_MAX_BYTES : MAX_BODY_BYTES;
   const declared = req.headers["content-length"];
-  if (declared !== undefined && Number(declared) > MAX_BODY_BYTES) {
+  if (declared !== undefined && Number(declared) > limit) {
     return { ...pageReply(errorPage(413)), close: true };
   }
-  const body = await readBody(req, MAX_BODY_BYTES);
+  const body = await readBody(req, limit);
   if (body === null) return { ...pageReply(errorPage(413)), close: true };
 
   switch (route.name) {
     case "login": {
+      // Login CSRF: there is no session yet, so no CSRF token; the request
+      // must provably come from our own confirmation page (session.ts).
+      if (
+        !loginRequestAllowed(
+          req.headers.origin,
+          req.headers["sec-fetch-site"],
+          options.publicBaseUrl,
+        )
+      ) {
+        return pageReply(loginRefusedPage());
+      }
       const form = parseForm(body, ["token"]);
       if (form === null) return pageReply(errorPage(400));
       const opened = await consumeLoginToken(db, form.token ?? "");
@@ -341,7 +537,10 @@ async function handle(
       // 200 with a page, never a redirect: RFC 8058 §3.2 forbids one here.
       return pageReply(done ? unsubscribedPage() : invalidLinkPage());
     }
+    case "profile_settings":
+      return saveProfileSettings(req, body, db);
     case "profile_unsubscribe":
+    case "profile_resubscribe":
     case "logout": {
       // A form without exactly one csrf field counts as a missing token: 403.
       const submitted = parseForm(body, ["csrf"])?.csrf ?? "";
@@ -356,13 +555,17 @@ async function handle(
           headers: { Location: "/", "Set-Cookie": clearedSessionCookie() },
         };
       }
-      await deactivateProfile(db, session.profileId);
-      return { status: 303, body: "", headers: { Location: "/profil" } };
+      // Both idempotent: a repeated click changes nothing.
+      const unsubscribe = route.name === "profile_unsubscribe";
+      if (unsubscribe) await deactivateProfile(db, session.profileId);
+      else await activateProfile(db, session.profileId);
+      return redirectToProfile(unsubscribe ? "wypisano" : "wlaczono");
     }
     case "home":
     case "stylesheet":
     case "login_link":
     case "profile":
+    case "matches":
       // Unreachable: these routes do not allow POST (checked by the caller).
       return pageReply(errorPage(405));
   }
@@ -380,6 +583,98 @@ function isOneClickBody(body: Buffer, multipart: { readonly boundary: string | n
   if (multipart.boundary === null) return false;
   const values = multipartFieldValues(body, multipart.boundary, "List-Unsubscribe");
   return values?.length === 1 && values[0] === "One-Click";
+}
+
+/** 303 to /profil, which then shows `notice` once. */
+function redirectToProfile(notice: Notice): Reply {
+  return {
+    status: 303,
+    body: "",
+    headers: { Location: "/profil", "Set-Cookie": noticeCookie(notice) },
+  };
+}
+
+/**
+ * POST /profil/ustawienia (D-027): CSRF first, then the domain schema. An
+ * invalid form is shown again with the submitted values (400); a valid one
+ * is saved — with the revocation of other access when the e-mail changes —
+ * and answered with 303 to /profil. Concurrent saves: the last one wins.
+ */
+async function saveProfileSettings(
+  req: IncomingMessage,
+  body: Buffer,
+  db: Kysely<Database>,
+): Promise<Reply> {
+  const form = parseMultiValueForm(
+    body,
+    PROFILE_FORM_SINGLE_FIELDS,
+    PROFILE_FORM_MULTIPLE_FIELDS,
+    PROFILE_FORM_MAX_FIELDS,
+  );
+  const session = await currentSession(req, db);
+  if (session === null) return unauthenticated(req);
+  // CSRF before the form's own rules, as on the other forms: a body without
+  // exactly one csrf field is a missing token (403); a valid token with
+  // fields that are not this form's is a 400.
+  const submitted = form?.single.csrf ?? singleFieldValue(body, "csrf", PROFILE_FORM_MAX_FIELDS);
+  if (!csrfMatches(session.token, submitted)) return pageReply(errorPage(403));
+  if (form === null) return pageReply(errorPage(400));
+  const csrf = csrfTokenFor(session.token);
+  const stored = await getProfileSettings(db, session.profileId);
+  if (stored === null) return unauthenticated(req);
+  const values = formValuesFromSubmission(form.single, form.multiple);
+  const result = validateProfileForm(values, stored.email);
+  if (!result.ok) return pageReply(settingsPage(values, csrf, result.errors));
+  try {
+    const saved = await updateProfileSettings(
+      db,
+      session.profileId,
+      result.settings,
+      session.token,
+    );
+    if (saved === null) return unauthenticated(req);
+    return redirectToProfile(saved.emailChanged ? "zmieniono_email" : "zapisano");
+  } catch (error: unknown) {
+    if (
+      error instanceof DomainError &&
+      error.code === "duplicate" &&
+      error.constraint === "company_profiles_email_key"
+    ) {
+      return pageReply(settingsPage(values, csrf, DUPLICATE_EMAIL_ERRORS));
+    }
+    throw error;
+  }
+}
+
+/** GET /dopasowania: the digest's candidates and rules for this one profile (D-027). */
+async function matchesReply(
+  db: Kysely<Database>,
+  profileId: string,
+  now: Date,
+  missing: () => Reply,
+): Promise<Reply> {
+  // A stored row the schema refuses cannot be matched; the form can correct it.
+  const profile = await getCompanyProfile(db, profileId).catch((error: unknown) => {
+    if (error instanceof DomainError && error.code === "invalid_stored_row")
+      return "invalid" as const;
+    throw error;
+  });
+  if (profile === "invalid") return pageReply(matchesUnavailablePage());
+  if (profile === null) return missing();
+  const candidates = await readDigestCandidates(db, now);
+  const items = (await matchingItems(profile, candidates.offers)).sort(digestOrder);
+  return pageReply(
+    matchesPage({
+      active: profile.active,
+      hasVoivodeships: profile.voivodeships.length > 0,
+      hasCounties: profile.counties.length > 0,
+      stateAt: formatWarsawMinute(now),
+      windowDays: DIGEST_NEW_DAYS,
+      items: items.slice(0, MATCHES_SHOWN).map(digestItemView),
+      more: Math.max(0, items.length - MATCHES_SHOWN),
+      truncated: candidates.truncated,
+    }),
+  );
 }
 
 interface Session {
@@ -410,6 +705,12 @@ function unauthenticated(req: IncomingMessage): Reply {
  */
 export async function startWebServer(options: WebServerOptions): Promise<WebServer> {
   const { logger } = options;
+  const state: ServerState = {
+    matches: createMatchesSlot({
+      maxWaitMs: options.matchesMaxWaitMs ?? MATCHES_MAX_WAIT_MS,
+      maxWaiters: options.matchesMaxWaiters ?? MATCHES_MAX_WAITERS,
+    }),
+  };
 
   const server = createServer(
     {
@@ -450,23 +751,26 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         });
         return;
       }
-      handle(req, route, rawMethod as Method, options).then(finish, (error: unknown) => {
-        if (error instanceof RequestAbortedError) {
-          // No reply can reach the client; no access line with a made-up status.
-          logger.info("http request aborted", { route: route.name, reason: "aborted" });
-          res.destroy();
-          return;
-        }
-        logger.error("http request failed", {
-          route: route.name,
-          ...describeDatabaseFailure(error),
-        });
-        if (res.headersSent) {
-          res.destroy();
-          return;
-        }
-        finish({ ...pageReply(errorPage(500)), close: true });
-      });
+      handle(req, res, route, rawMethod as Method, options, state).then(
+        finish,
+        (error: unknown) => {
+          if (error instanceof RequestAbortedError) {
+            // No reply can reach the client; no access line with a made-up status.
+            logger.info("http request aborted", { route: route.name, reason: "aborted" });
+            res.destroy();
+            return;
+          }
+          logger.error("http request failed", {
+            route: route.name,
+            ...describeDatabaseFailure(error),
+          });
+          if (res.headersSent) {
+            res.destroy();
+            return;
+          }
+          finish({ ...pageReply(errorPage(500)), close: true });
+        },
+      );
     },
   );
   server.keepAliveTimeout = 5_000;
@@ -508,6 +812,9 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   return {
     host: address.address,
     port: address.port,
+    get matchesWaiting() {
+      return state.matches.waiting;
+    },
     close: async () => {
       if (timer !== null) clearInterval(timer);
       await new Promise<void>((resolve) => {

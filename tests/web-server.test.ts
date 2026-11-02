@@ -11,7 +11,19 @@ import {
   STYLESHEET,
   unsubscribedPage,
 } from "../src/web/pages.js";
-import { MAX_BODY_BYTES, parseForm, startWebServer, type WebServer } from "../src/web/server.js";
+import {
+  PROFILE_FORM_MULTIPLE_FIELDS,
+  PROFILE_FORM_SINGLE_FIELDS,
+} from "../src/web/profile-form.js";
+import {
+  MAX_BODY_BYTES,
+  parseForm,
+  parseMultiValueForm,
+  PROFILE_FORM_MAX_BYTES,
+  PROFILE_FORM_MAX_FIELDS,
+  startWebServer,
+  type WebServer,
+} from "../src/web/server.js";
 
 /*
  * The web server's request handling that needs no database: routing, method
@@ -49,12 +61,45 @@ describe("parseForm", () => {
   });
 });
 
+describe("parseMultiValueForm", () => {
+  const body = (text: string) => Buffer.from(text, "utf8");
+  const parse = (text: string, maxFields = 10) =>
+    parseMultiValueForm(body(text), ["a", "b"], ["list"], maxFields);
+
+  it("reads each single field once and any number of list values, also none", () => {
+    expect(parse("a=1&b=%C5%BC+x")).toEqual({
+      single: { a: "1", b: "ż x" },
+      multiple: { list: [] },
+    });
+    expect(parse("list=x&a=&list=y&b=2&list=x")).toEqual({
+      single: { a: "", b: "2" },
+      multiple: { list: ["x", "y", "x"] },
+    });
+  });
+
+  it.each(["", "a=1", "a=1&a=2&b=3", "a=1&b=2&c=3", "a=1&b=2&List=x"])("refuses %j", (text) => {
+    expect(parse(text)).toBeNull();
+  });
+
+  it("refuses more pairs than allowed and invalid UTF-8", () => {
+    expect(parse("a=1&b=2&list=x", 3)).not.toBeNull();
+    expect(parse("a=1&b=2&list=x&list=y", 3)).toBeNull();
+    expect(parseMultiValueForm(Buffer.from([0x61, 0x3d, 0xff]), ["a"], [], 10)).toBeNull();
+  });
+
+  it("fits the whole profile form within its field limit", () => {
+    const fields = PROFILE_FORM_SINGLE_FIELDS.length + 10 + 16;
+    expect(fields).toBeLessThanOrEqual(PROFILE_FORM_MAX_FIELDS);
+    expect(PROFILE_FORM_MULTIPLE_FIELDS).toEqual(["categories", "voivodeships"]);
+  });
+});
+
 describe("pages", () => {
   it("are Polish, with no script and no inline style", () => {
     for (const page of [
       homePage(),
       errorPage(404),
-      profilePage({ name: "X", active: true }, "c"),
+      profilePage({ name: "X", email: "kontakt@example.invalid", active: true }, "c"),
     ]) {
       expect(page.html).toContain('<html lang="pl">');
       expect(page.html).not.toMatch(/<script|\sstyle=|<style|\son[a-z]+=/i);
@@ -63,7 +108,10 @@ describe("pages", () => {
   });
 
   it("escape the profile name and use real buttons in POST forms", () => {
-    const page = profilePage({ name: `<img src=x onerror="alert(1)">&'`, active: true }, 'c&"');
+    const page = profilePage(
+      { name: `<img src=x onerror="alert(1)">&'`, email: "kontakt@example.invalid", active: true },
+      'c&"',
+    );
     expect(page.html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;&amp;&#39;");
     expect(page.html).not.toContain("<img");
     expect(page.html).toContain('value="c&amp;&quot;"');
@@ -73,7 +121,10 @@ describe("pages", () => {
   });
 
   it("offer no unsubscribe form for an inactive profile", () => {
-    const page = profilePage({ name: "Jan Kowalski", active: false }, "c");
+    const page = profilePage(
+      { name: "Jan Kowalski", email: "kontakt@example.invalid", active: false },
+      "c",
+    );
     expect(page.html).toContain("wyłączone");
     expect(page.html).not.toContain("/profil/wypisz");
     expect(page.html).toContain('action="/wyloguj"');
@@ -87,7 +138,9 @@ describe("pages", () => {
   it("tell the customer how to get a new link where a link is the way in", () => {
     const invalid = invalidLinkPage();
     expect(invalid.status).toBe(404);
-    expect(invalid.html).toContain("Aktualny link znajdziesz w najnowszej wiadomości");
+    expect(invalid.html).toContain("<p>Ten link nie działa.</p>");
+    // One way back, not two (quality review PR-06B).
+    expect(invalid.html).not.toContain("Aktualny link znajdziesz w najnowszej wiadomości");
     const loginRequired = loginRequiredPage();
     expect(loginRequired.status).toBe(401);
     expect(loginRequired.html).toContain("Użyj linku „Twój profil” z ostatniej wiadomości");
@@ -103,11 +156,17 @@ describe("pages", () => {
     const unsubscribed = unsubscribedPage();
     expect(unsubscribed.html).toContain("Powiadomienia e-mail zostały wyłączone");
     expect(unsubscribed.html).toContain(`<p>${resubscribeHint}</p>`);
-    const inactive = profilePage({ name: "Jan Kowalski", active: false }, "c");
-    expect(inactive.html).toContain(`<p>${resubscribeHint}</p>`);
-    expect(profilePage({ name: "Jan Kowalski", active: true }, "c").html).not.toContain(
-      resubscribeHint,
+    // Signed in, the way back is the re-enable button itself (PR-06B), not the hint.
+    const inactive = profilePage(
+      { name: "Jan Kowalski", email: "kontakt@example.invalid", active: false },
+      "c",
     );
+    expect(inactive.html).toContain('action="/profil/wlacz"');
+    expect(inactive.html).not.toContain(resubscribeHint);
+    expect(
+      profilePage({ name: "Jan Kowalski", email: "kontakt@example.invalid", active: true }, "c")
+        .html,
+    ).not.toContain(resubscribeHint);
   });
 });
 
@@ -139,7 +198,10 @@ describe("web server without a session", () => {
         "base-uri 'none'",
     );
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
-    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    // strict-origin, not no-referrer: with no-referrer browsers send `Origin: null`
+    // on our own form POSTs, which the Origin checks refuse (PR-06B). A Referer
+    // still never carries a path (a token).
+    expect(response.headers.get("referrer-policy")).toBe("strict-origin");
     expect(response.headers.get("cache-control")).toBe(cache);
   }
 
@@ -178,6 +240,9 @@ describe("web server without a session", () => {
     ["GET", "/wyloguj", "POST"],
     ["HEAD", "/profil/wypisz", "POST"],
     ["OPTIONS", "/", "GET, HEAD"],
+    ["PUT", "/profil/ustawienia", "GET, HEAD, POST"],
+    ["GET", "/profil/wlacz", "POST"],
+    ["POST", "/dopasowania", "GET, HEAD"],
   ])("answers 405 for %s %s with Allow", async (method, path, allow) => {
     const response = await fetch(`${url}${path}`, { method });
     expect(response.status).toBe(405);
@@ -242,6 +307,49 @@ describe("web server without a session", () => {
       duplex: "half",
     });
     expect(streamed.status).toBe(413);
+  });
+
+  it("gives the profile form its own body limit; every other route keeps 8 KB", async () => {
+    // Over 8 KB but within the form's limit: read, then refused for having no session.
+    const within = await fetch(`${url}/profil/ustawienia`, {
+      method: "POST",
+      headers: { "content-type": FORM },
+      body: `csrf=x&name=${"a".repeat(MAX_BODY_BYTES * 2)}`,
+    });
+    expect(within.status).toBe(401);
+    const over = await fetch(`${url}/profil/ustawienia`, {
+      method: "POST",
+      headers: { "content-type": FORM },
+      body: `name=${"a".repeat(PROFILE_FORM_MAX_BYTES)}`,
+    });
+    expect(over.status).toBe(413);
+    expectSecurityHeaders(over);
+    for (const path of ["/profil/wlacz", "/profil/wypisz", "/wyloguj"]) {
+      const response = await fetch(`${url}${path}`, {
+        method: "POST",
+        headers: { "content-type": FORM },
+        body: `csrf=${"a".repeat(MAX_BODY_BYTES)}`,
+      });
+      expect(response.status).toBe(413);
+    }
+  });
+
+  it("refuses a login POST that does not provably come from our own page (login CSRF)", async () => {
+    for (const headers of [
+      {},
+      { "sec-fetch-site": "cross-site" },
+      { "sec-fetch-site": "same-site" },
+      { "sec-fetch-site": "none" },
+      { origin: "https://evil.example.invalid", "sec-fetch-site": "same-origin" },
+    ]) {
+      const response = await fetch(`${url}/dostep`, {
+        method: "POST",
+        headers: { "content-type": FORM, ...headers },
+        body: "token=x",
+      });
+      expect(response.status).toBe(403);
+      expectSecurityHeaders(response);
+    }
   });
 
   it("answers 400 for a malformed login form", async () => {
@@ -351,6 +459,11 @@ describe("web server without a session", () => {
     expect(page.status).toBe(401);
     expect(page.headers.get("set-cookie")).toBeNull();
     expect(await page.text()).toContain("Zaloguj się");
+    for (const path of ["/profil/ustawienia", "/dopasowania"]) {
+      const other = await fetch(`${url}${path}`);
+      expect(other.status).toBe(401);
+      expectSecurityHeaders(other);
+    }
 
     // A malformed cookie never reaches the database; it is cleared.
     const bad = await fetch(`${url}/profil`, { headers: { cookie: "__Host-radar_sesja=x" } });

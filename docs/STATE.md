@@ -1,17 +1,19 @@
 # Current State
 
 Current phase: PHASE 3 — SELF SERVICE
-Current PR: PR-06A — Dostęp do profilu
-Status: PR-05 **MERGED in PR #9 (merge commit 0537d2c)**. PR-06A (profile access by e-mail
-link, cookie session, CSRF, RFC 8058 one-click unsubscribe, `serve` and `access:link`)
-implemented: Code & Safety Review PASS (M-1 docs claimed the outbox `.json` had no token
-links; L-1 timeouts enforced only every 30 s; L-2 client aborts logged as DB failures; L-3
-literal RFC 8058 §8.3 framing; L-4 IDN note) → fix round → C&S PASS → Quality Review ACCEPT
-(should-fix: how to get a new link, way back after unsubscribing) → copy round → C&S PASS →
-Quality ACCEPT. PR #10 opened; owner review PASS (no blockers) → owner follow-up
-`access:revoke <profileId>` + three PR-06B criteria → C&S PASS → Quality ACCEPT → polish
-round (named result type, DB-unreachable test, README/D-026 lines, apostrophe-safe psql
-lookup) → C&S PASS. Not merged.
+Current PR: PR-06B — Ekrany klienta
+Status: PR-06A **MERGED in PR #10 (merge commit 558b226)**. PR-06B (profile settings form,
+e-mail change with access revocation, matches list with reasons, „Włącz ponownie”, login-CSRF on
+`POST /dostep`) implemented: Code & Safety Review PASS (M-1 deadlock between an e-mail change and
+a login; M-2 `/dopasowania` blocked the process; L-1–L-3) → fix round → C&S PASS (L-a stall per
+200-offer chunk) → time-budget yield → C&S PASS → Quality REJECT (counties hint misleading) →
+copy round → C&S PASS → Quality ACCEPT (should-fix: counties note wording) → final copy round →
+C&S PASS. PR #11 opened for the owner's review. Owner review of 84adc33: PASS, no blockers,
+3 QoL asks (`/dopasowania` 503 under normal load, long list, show the address after a change) →
+owner round (FIFO wait queue, compact cards, address line on `/profil`) → C&S PASS (L-1 closed
+client with a free slot) → fix → C&S PASS → Quality ACCEPT (Medium: location hidden, deviation
+from the owner's ask not recorded) → fix → C&S PASS → Quality ACCEPT. Pushed for the owner's
+re-review. Not merged.
 
 ## Completed
 
@@ -446,70 +448,128 @@ recorded in `docs/PR_PLAN.md` → PR-03 „Podział”; acceptance criteria 1–
     deviations listed in D-024 (in-run retry only for not-delivered errors, `pending_today` skip,
     `unreachable` class, uncertain stops the run, `send_*` error codes).
 
+- **PR-06A — Dostęp do profilu** (`docs/PR_PLAN.md` → PR-06A; first part of PR-06) —
+  **MERGED in PR #10 (merge commit 558b226)** after the owner's review. D-025 new (web server on
+  `node:http`, no framework), D-026 new (e-mail tokens, cookie session, CSRF, one-click
+  unsubscribe); D-024 amended (digest footer links and `List-Unsubscribe` https + mailto).
+
+  - `serve` (`src/web/server.ts`): one process, `WEB_HOST` (default 127.0.0.1) / `WEB_PORT`
+    (default 3000), `PUBLIC_BASE_URL` required (https; http only on loopback outside
+    production). Routes: `/`, `/dostep/<token>` (GET confirm page, POST log in → 303 `/profil`),
+    `/profil`, `/profil/wypisz`, `/wyloguj`, `/wypis/<token>`, `/styl.css`. Server-rendered
+    Polish pages, no JavaScript, shared `escapeHtml` (`src/infrastructure/html.ts`).
+  - Tokens (`src/infrastructure/db/access-repository.ts`, migration `0006_access`:
+    `access_tokens`, `sessions`): 256-bit base64url, stored only as SHA-256. Login: single use,
+    7 days, consumed by a conditional `UPDATE … RETURNING` with the session created in the same
+    transaction (5-way race tested). Unsubscribe: multi-use, 60 days. Every unknown, used,
+    expired, malformed or wrong-purpose token gets the same neutral 404 page.
+  - Session: cookie `__Host-radar_sesja` (HttpOnly, Secure, SameSite=Lax, Path=/, 30 days),
+    new id on every login, logout by POST, expiry checked server-side, `ON DELETE CASCADE`.
+    CSRF: HMAC-SHA256 of the session secret, `timingSafeEqual`; Origin check (missing passes,
+    `null`/foreign → 403) on every route except `/wypis/<token>`.
+  - One-click unsubscribe (RFC 8058): POST `List-Unsubscribe=One-Click` as urlencoded or
+    multipart (own bounded parser, `src/web/multipart.ts`), 200 with no redirect and no cookie.
+    The digest adds a "Twój profil" link and the unsubscribe link to the footer, plus
+    `List-Unsubscribe: <https…>, <mailto…>` and `List-Unsubscribe-Post` when `PUBLIC_BASE_URL`
+    is set; without it the e-mail is byte-identical to PR-05. Tokens are issued before
+    `claimDeliveries`; a dry run issues none. The outbox `.json` copy shows the links as
+    `[token]`; the `.eml` keeps them (secret).
+  - `access:link <profileId>`: prints the login link on stdout, a "secret" warning on stderr.
+  - `access:revoke <profileId>` (owner review of PR #10): deletes every access token (login and
+    unsubscribe) and every session of the profile in one transaction (tokens first), prints
+    only `{"status":"ok","tokens":N,"sessions":M}`; profile and notifications untouched; no
+    `PUBLIC_BASE_URL` needed; unknown profile → 1. Tenant isolation tested end to end.
+  - Hardening: 8 KB body (413), urlencoded only (415; multipart only on `/wypis`), headers
+    10 s / request 15 s (`connectionsCheckingInterval` 1 s), 8 KB headers, Host required; CSP,
+    nosniff, no-referrer, no-store; hourly cleanup of expired rows in batches of 1000; graceful
+    shutdown with a 10 s force-close. Logs: method, route name, status, duration; a client abort
+    is `http request aborted` (info, route + reason only).
+  - Pages tell the customer how to get back in (reply to the last e-mail → operator sends a new
+    link) and how to undo an unsubscribe; README „Obsługa klienta” gives the operator the
+    `access:link`, `access:revoke` and `UPDATE company_profiles SET active = true` steps, plus a
+    psql `\prompt` lookup of `profileId` by e-mail (safe for an apostrophe in the address).
+  - No new dependencies.
+  - Reviews: C&S PASS (M-1 outbox `.json` held token links contrary to the docs; L-1 Node checks
+    the timeouts every 30 s by default; L-2 client aborts logged as DB failures; L-3 literal
+    §8.3 framing → 400; L-4 IDN note wrong) → fix round (redaction, 1 s check interval,
+    `RequestAbortedError`, docs) → C&S PASS (live probes: header 10.01 s, body/drip 15.01 s) →
+    Quality ACCEPT (should-fix: re-entry sentence, way back after unsubscribe; README operator
+    note) → copy round → C&S PASS → Quality ACCEPT. Owner review of PR #10: PASS, no blockers;
+    follow-up `access:revoke` → C&S PASS → Quality ACCEPT (should-fix: say that old one-click
+    links stop working; D-026 line; e-mail lookup) → polish round → C&S PASS (L-1: an apostrophe
+    broke the lookup literal) → README `\prompt` fix → C&S PASS.
+  - PR-06B acceptance criteria added from the owner's review (`docs/PR_PLAN.md`): „Włącz ponownie
+    powiadomienia” on `/profil` (POST + CSRF); login-CSRF protection on `POST /dostep`
+    (`Sec-Fetch-Site`/`Origin`) before the profile form accepts data; an e-mail change revokes the
+    profile's other sessions and tokens (needs a `revokeProfileAccess` variant that keeps the
+    current session).
+  - Owner decisions open: TTLs (login 7, unsubscribe 60, session 30 days); a self-service
+    "e-mail me a link" form (needs anti-enumeration and rate limiting); leniency for the literal
+    RFC 8058 §8.3 example framing on `/wypis` only (body has no security role there; strict
+    RFC 2046 today); send the "Twój profil" link to customers before PR-06B or keep
+    `PUBLIC_BASE_URL` unset until then; forwarded digest e-mails give profile access (footer
+    warns; separate rarer login e-mail?); the inactive-profile sentence was changed from „Aby je
+    włączyć, napisz do operatora serwisu.” to the reply-to-last-message wording.
+
 ## In progress
 
-**PR-06A — Dostęp do profilu** (`docs/PR_PLAN.md` → PR-06A; first part of PR-06) —
-implemented; PR opened for the owner's review (not merged). D-025 new (web server on
-`node:http`, no framework), D-026 new (e-mail tokens, cookie session, CSRF, one-click
-unsubscribe); D-024 amended (digest footer links and `List-Unsubscribe` https + mailto).
+**PR-06B — Ekrany klienta** (`docs/PR_PLAN.md` → PR-06B; second part of PR-06) — implemented;
+PR opened for the owner's review (not merged). D-027 new (customer screens, e-mail change, matches
+list, login-CSRF); D-025 amended (`Referrer-Policy: strict-origin`).
 
-- `serve` (`src/web/server.ts`): one process, `WEB_HOST` (default 127.0.0.1) / `WEB_PORT`
-  (default 3000), `PUBLIC_BASE_URL` required (https; http only on loopback outside
-  production). Routes: `/`, `/dostep/<token>` (GET confirm page, POST log in → 303 `/profil`),
-  `/profil`, `/profil/wypisz`, `/wyloguj`, `/wypis/<token>`, `/styl.css`. Server-rendered
-  Polish pages, no JavaScript, shared `escapeHtml` (`src/infrastructure/html.ts`).
-- Tokens (`src/infrastructure/db/access-repository.ts`, migration `0006_access`:
-  `access_tokens`, `sessions`): 256-bit base64url, stored only as SHA-256. Login: single use,
-  7 days, consumed by a conditional `UPDATE … RETURNING` with the session created in the same
-  transaction (5-way race tested). Unsubscribe: multi-use, 60 days. Every unknown, used,
-  expired, malformed or wrong-purpose token gets the same neutral 404 page.
-- Session: cookie `__Host-radar_sesja` (HttpOnly, Secure, SameSite=Lax, Path=/, 30 days),
-  new id on every login, logout by POST, expiry checked server-side, `ON DELETE CASCADE`.
-  CSRF: HMAC-SHA256 of the session secret, `timingSafeEqual`; Origin check (missing passes,
-  `null`/foreign → 403) on every route except `/wypis/<token>`.
-- One-click unsubscribe (RFC 8058): POST `List-Unsubscribe=One-Click` as urlencoded or
-  multipart (own bounded parser, `src/web/multipart.ts`), 200 with no redirect and no cookie.
-  The digest adds a "Twój profil" link and the unsubscribe link to the footer, plus
-  `List-Unsubscribe: <https…>, <mailto…>` and `List-Unsubscribe-Post` when `PUBLIC_BASE_URL`
-  is set; without it the e-mail is byte-identical to PR-05. Tokens are issued before
-  `claimDeliveries`; a dry run issues none. The outbox `.json` copy shows the links as
-  `[token]`; the `.eml` keeps them (secret).
-- `access:link <profileId>`: prints the login link on stdout, a "secret" warning on stderr.
-- `access:revoke <profileId>` (owner review of PR #10): deletes every access token (login and
-  unsubscribe) and every session of the profile in one transaction (tokens first), prints
-  only `{"status":"ok","tokens":N,"sessions":M}`; profile and notifications untouched; no
-  `PUBLIC_BASE_URL` needed; unknown profile → 1. Tenant isolation tested end to end.
-- Hardening: 8 KB body (413), urlencoded only (415; multipart only on `/wypis`), headers
-  10 s / request 15 s (`connectionsCheckingInterval` 1 s), 8 KB headers, Host required; CSP,
-  nosniff, no-referrer, no-store; hourly cleanup of expired rows in batches of 1000; graceful
-  shutdown with a 10 s force-close. Logs: method, route name, status, duration; a client abort
-  is `http request aborted` (info, route + reason only).
-- Pages tell the customer how to get back in (reply to the last e-mail → operator sends a new
-  link) and how to undo an unsubscribe; README „Obsługa klienta” gives the operator the
-  `access:link`, `access:revoke` and `UPDATE company_profiles SET active = true` steps, plus a
-  psql `\prompt` lookup of `profileId` by e-mail (safe for an apostrophe in the address).
-- No new dependencies.
-- Reviews: C&S PASS (M-1 outbox `.json` held token links contrary to the docs; L-1 Node checks
-  the timeouts every 30 s by default; L-2 client aborts logged as DB failures; L-3 literal
-  §8.3 framing → 400; L-4 IDN note wrong) → fix round (redaction, 1 s check interval,
-  `RequestAbortedError`, docs) → C&S PASS (live probes: header 10.01 s, body/drip 15.01 s) →
-  Quality ACCEPT (should-fix: re-entry sentence, way back after unsubscribe; README operator
-  note) → copy round → C&S PASS → Quality ACCEPT. Owner review of PR #10: PASS, no blockers;
-  follow-up `access:revoke` → C&S PASS → Quality ACCEPT (should-fix: say that old one-click
-  links stop working; D-026 line; e-mail lookup) → polish round → C&S PASS (L-1: an apostrophe
-  broke the lookup literal) → README `\prompt` fix → C&S PASS.
-- PR-06B acceptance criteria added from the owner's review (`docs/PR_PLAN.md`): „Włącz ponownie
-  powiadomienia” on `/profil` (POST + CSRF); login-CSRF protection on `POST /dostep`
-  (`Sec-Fetch-Site`/`Origin`) before the profile form accepts data; an e-mail change revokes the
-  profile's other sessions and tokens (needs a `revokeProfileAccess` variant that keeps the
-  current session).
-- Owner decisions open: TTLs (login 7, unsubscribe 60, session 30 days); a self-service
-  "e-mail me a link" form (needs anti-enumeration and rate limiting); leniency for the literal
-  RFC 8058 §8.3 example framing on `/wypis` only (body has no security role there; strict
-  RFC 2046 today); send the "Twój profil" link to customers before PR-06B or keep
-  `PUBLIC_BASE_URL` unset until then; forwarded digest e-mails give profile access (footer
-  warns; separate rarer login e-mail?); the inactive-profile sentence was changed from „Aby je
-  włączyć, napisz do operatora serwisu.” to the reply-to-last-message wording.
+- **PR-06A bug fixed here:** `Referrer-Policy: no-referrer` made real browsers send
+  `Origin: null` on form POSTs, which the PR-06A Origin check refuses with 403 (login, logout,
+  unsubscribe from `/profil`). Header and meta tag are now `strict-origin` (WHATWG Fetch).
+- Routes (`src/web/server.ts`): `GET/HEAD/POST /profil/ustawienia` (urlencoded ≤ 64 KB / 64
+  pairs, only this route; others stay 8 KB), `POST /profil/wlacz`, `GET/HEAD /dopasowania`.
+  Profile only from the session; CSRF checked before form validation (missing/duplicate → 403);
+  unknown fields (e.g. `active`) → 400.
+- Form (`src/web/profile-form.ts`): Polish per-field errors with a linked summary, line-numbered
+  keyword/county errors, county names checked with `countyKey` (same rule as `profile:create`);
+  counties hint says honestly that offers carry no county yet. Domain schema
+  `companyProfileSettingsSchema` (no `active`).
+- E-mail change (`updateProfileSettings`): one transaction — profile `FOR NO KEY UPDATE`, the
+  kept session re-checked (`FOR KEY SHARE`, unexpired; else 401, nothing written), then tokens
+  and other sessions deleted, then the profile UPDATE; one retry on 40P01 for the hourly cleanup.
+  Cycle-free against login, logout, `access:revoke` (now locks the profile first) and digest
+  token issue (tested with paused transactions and a timing assertion). No verification of the
+  new address (owner decision); repeat field required.
+- `/dopasowania`: same rules as the digest (`src/notifications/candidates.ts`: 7 days, 10 000
+  candidates), ≤ 50 offers, soonest deadline first, reasons and source link; includes offers
+  already e-mailed (stated on the page). `matchingItems` yields after ~20 ms of work (worst
+  event-loop stall measured ≤ 73 ms with a maximal profile and 5 000 candidates). One computation
+  per process (`src/web/matches-slot.ts`, owner round): a concurrent request waits in a FIFO
+  queue (≤ 8 waiters, ≤ 3 s, slot handed straight to the oldest waiter); a full queue or a timed
+  out wait gets 503 + `Retry-After: 5`; a waiter whose client disconnects leaves the queue and
+  nothing is computed for it; no result cache (D-027). Compact cards: title, buyer, location,
+  deadline, reasons and source link visible; publication date, category, description and
+  contact inside `<details>` („Szczegóły ogłoszenia”, no JS).
+- `/profil` always shows „Adres powiadomień” (escaped, from the DB via `getProfileStatus`); after
+  an e-mail change the notice asks to check it. The old address is not shown (it would have to
+  travel in a cookie, URL or column; D-027 rejected alternatives).
+- Digest: short HTML link texts „Otwórz swój profil” / „Wypisz się z powiadomień”; tokens issued
+  only while the profile still has the address being sent to (`issueDigestTokens`), else status
+  `address_changed` (exit 0, next run sends to the new address).
+- One-shot notice cookie `__Host-radar_komunikat` (Max-Age 60, closed list of values).
+- No new dependencies, tables or migrations. 1658 tests (PR-06A: 1526).
+- Reviews: C&S PASS (M-1 deadlock reproduced as 40P01 → 500; M-2 `/dopasowania` blocked other
+  requests ~5 s; L-1 missing csrf → 400; L-2 kept session not re-checked; L-3 digest tokens after
+  an address change) → fix round → C&S PASS (live probe: no 40P01; L-a 200-offer chunk ~0.4 s) →
+  time-budget yield → C&S PASS (stall 690 → ≤ 73 ms) → Quality REJECT (counties hint: a county
+  alone empties the list silently; bare „powiat” accepted) → copy round → C&S PASS → Quality
+  ACCEPT (should-fix: counties note by voivodeship selection) → final copy round → C&S PASS.
+- Owner review of 84adc33 (PR #11): PASS, no blockers; tested in real Chromium (Playwright) with
+  500 real BZP offers. Accepted: e-mail change without verifying the new address, the
+  duplicate-address message, very old browsers without `Origin`/`Sec-Fetch-Site`. QoL asks done
+  in the owner round above. Owner-round reviews: C&S PASS (L-1 a closed client got the free slot
+  → fixed; L-2 one session can fill the queue → PR-07; L-3 `CARD_LABELS` tied to digest label
+  strings → follow-up) → C&S PASS → Quality ACCEPT (live: 2 parallel requests both 200 in
+  0.54/0.91 s; heavy 5.8 s computation → waiters 503 after ~3.07 s, the 9th at once; Medium:
+  location hidden in `<details>`, old-address deviation not documented) → fix → C&S PASS →
+  Quality ACCEPT. The PR-06A assertion `/profil` `not.toContain(EMAIL)` was replaced (owner
+  requirement) by a stricter one: the address appears exactly once, inside the address line.
+- Owner decisions open: last write wins; `/dopasowania` shows already e-mailed offers; one
+  `/dopasowania` slot per process shared by all customers (now with a bounded wait queue).
 
 ## Blockers
 
@@ -543,7 +603,7 @@ unsubscribe); D-024 amended (digest footer links and `List-Unsubscribe` https + 
 
 ## Decisions made
 
-See `docs/DECISIONS.md` (D-001 … D-026). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
+See `docs/DECISIONS.md` (D-001 … D-027). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
 on `node:https` with pinned lookup, no HTTP library) accepted in PR-02 Part A; D-015 (first
 source: BZP through the official API) in PR-02 Part B; PR-03 Part A: D-016 (fingerprint and
 `content_hash` format), D-017 (`unchanged` writes nothing, no `last_seen_at`), D-018 (ingest
@@ -559,23 +619,39 @@ D-021 (ingest day ranges and automatic catch-up). PR-03 Part C: D-022 (offer det
 region semantics, profile schema, `match:preview`). PR-05: D-010 accepted (SMTP via
 nodemailer), D-024 (digest, `deliveries`, failure classes, `pending` procedure). PR-06A: D-025
 (web server on `node:http`), D-026 (e-mail tokens, session, CSRF, one-click unsubscribe);
-D-024 amended (footer links, `List-Unsubscribe` https + mailto).
+D-024 amended (footer links, `List-Unsubscribe` https + mailto). PR-06B: D-027 (customer
+screens, e-mail change, matches list, login-CSRF); D-025 amended (`strict-origin`).
 
 ## Next action
 
-1. Owner reviews the PR-06A PR and decides the open items listed under "In progress"
-   (TTLs, self-service link form, §8.3 leniency, sending "Twój profil" before PR-06B,
-   forwarding). Then PR-06B (screens: profile form, matches list with reasons, link to the
-   source). Notes for PR-06B from the PR-06A Quality Review (non-blocking): short HTML link
-   texts in the digest footer instead of raw token URLs; the confirm page should say the login
-   lasts 30 days on this device; a "Wypisano" confirmation line on `/profil` after unsubscribing;
-   the company name on the unsubscribe confirm page; a link back to `/profil` on error pages;
-   the 404 page repeats „został już użyty albo wygasł” (drop „Aktualny link znajdziesz…” there);
-   plus the three owner criteria now in `docs/PR_PLAN.md` → PR-06B. For PR-07: runbook lines on
-   revoking access (`access:revoke <profileId>`) after a forwarded e-mail or an owner change,
-   monitoring the reply-to mailbox, the proxy must not log `/dostep` and
-   `/wypis` paths, TLS/HSTS and rate limiting at the proxy.
-   Pilot follow-ups from the owner's PR #9 review (owner to choose the PR):
+1. Owner re-reviews PR #11 (owner round on top of 84adc33) and decides the open items under
+   "In progress" (last write wins, already-sent offers on `/dopasowania`, the shared
+   `/dopasowania` slot with its wait queue). Still open from
+   PR-06A: TTLs (7/60/30 days), a self-service "e-mail me a link" form, §8.3 leniency on
+   `/wypis`, forwarded digests; RESUBSCRIBE_HINT stays on the post-unsubscribe page only.
+   Then PR-07 (hardening and deployment). For PR-07: runbook lines on revoking access
+   (`access:revoke <profileId>`) after a forwarded e-mail or an owner change, monitoring the
+   reply-to mailbox, the proxy must not log `/dostep` and `/wypis` paths, TLS/HSTS and rate
+   limiting at the proxy, plus a per-session rate limit for `/dopasowania` (one session can keep
+   the shared slot busy; C&S L-b).
+   Follow-ups from the PR-06B reviews (owner to choose the PR):
+   - Reject C0 control characters (`\p{Cc}`) in profile text/county entries: an entry of only
+     control characters (alone or after „m. st.”) gets a non-empty `countyKey` and is stored but
+     never matches (C&S L-c, pre-existing; affects only the customer's own profile).
+   - Category labels: match reasons on `/dopasowania` and in the digest show raw keys
+     („kategoria: sprzatanie”) next to the form's „Sprzątanie” (reuse `CATEGORY_LABELS`).
+   - Digest footer wording could say what the profile page offers („zmień kategorie i regiony,
+     zobacz pasujące zamówienia”).
+   - When a source starts providing counties, update the counties hint/note (`src/web/pages.ts`)
+     and D-023/D-027.
+   - Re-measure `/dopasowania` on pilot data (C&S measured 8.5–9 s for 5 000 candidates with 3.2 KB descriptions).
+   - Notify the old address after an e-mail change (needs sending from the web process; the
+     real protection against a hijacked session changing the address).
+   - Build `CARD_LABELS` (`src/web/pages.ts`) from label constants exported by the digest
+     (C&S L-3; today a renamed digest label would move that field into `<details>`).
+   - Accessibility nits (Quality Low): the repeated „Szczegóły ogłoszenia” summary label could
+     name the offer; find-in-page does not search closed `<details>` in some browsers.
+     Pilot follow-ups from the owner's PR #9 review (owner to choose the PR):
    - Matching calibration (changes PR-04 scoring): in the owner's real-data run 7 of 26 offers
      matched only on a description keyword, several false positives (agricultural tractor,
      excavator/forklift, telescopic loader via „oświetlenie”/„elektryczne”). Options: fewer
@@ -780,6 +856,34 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-02, PR-06B owner round (Node 22, pnpm 10.28.0, PostgreSQL 16):
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 1658 tests passed in 47 files, DB tests included (84adc33:
+1640 in 46). No dependency changes. New: `tests/web-matches-slot.test.ts` (fake timers: FIFO
+hand-over, full queue, 3000 ms timeout, disconnect cleanup, closed client never takes the slot)
+and real-server queue tests (wait → 200, full → 503, timeout → 503, disconnect leaves the
+queue, hand-over after a failed computation). Quality probed a live `serve` with synthetic
+`@example.invalid` data (queue timings above); scratch schema dropped, no e-mail sent. One
+PR-06A assertion replaced by a stricter one (address shown exactly once on `/profil`, owner
+requirement); the old 503 test's assertions moved into the queue tests, none dropped.
+Working-tree fingerprint unchanged across every reviewer run.
+
+2026-11-02, PR-06B after the final copy round (Node 22, pnpm 10.28.0, PostgreSQL 16):
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 1640 tests passed in 46 files, DB tests included (PR-06A:
+1526 in 43). Full `pnpm audit`: unchanged (1 moderate, dev-only minimatch via eslint). No
+dependency changes. C&S probed a live `serve` in temporary schemas: the e-mail change vs a paused
+login (5 rounds × 2 pause points: 303 in 15–46 ms, no 40P01; before the fix 500 after 1028 ms),
+digest/change interleavings, CSRF fallback bounds (5 000 pairs → 403 in 6 ms), and the
+`/dopasowania` stall (event-loop max 689 → 70–73 ms; concurrent `GET /` p50 22 ms). Quality ran
+`serve` and `digest` (test mode) end to end with synthetic `@example.invalid` data. All schemas
+and scratch files removed; no e-mail sent. Existing tests changed only where the copy was
+removed on purpose (404 duplicate sentence, inactive-profile hint — both now assert presence of
+the replacement and absence of the old text), the digest footer link texts (replaced by stricter
+short-label assertions), the `strict-origin` expectation and POST
+`/dostep` calls now sending `Origin`/`Sec-Fetch-Site`; no assertion weakened. Working-tree
+fingerprint unchanged across every reviewer run.
 
 2026-11-01, PR-06A owner follow-up `access:revoke` (Node 22, pnpm 10.28.0, PostgreSQL 16):
 `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`

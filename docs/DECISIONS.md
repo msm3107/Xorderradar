@@ -177,7 +177,8 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
     certyfikatu i `Host`. Brak nowej zależności;
   - DNS: `dns.promises.lookup(host, { all: true, verbatim: true })` (resolver systemowy, ten
     sam, którego użyłby system; `verbatim` zachowuje kolejność odpowiedzi resolvera zamiast
-    przestawiać IPv4 na początek — wybór adresu robimy sami); odrzucamy host, jeśli **którykolwiek** adres jest zablokowany; łączymy się
+    przestawiać IPv4 na początek — wybór adresu robimy sami); odrzucamy host, jeśli **którykolwiek**
+    adres jest zablokowany; łączymy się
     z pierwszym IPv4 (a bez IPv4 — z pierwszym IPv6). Zakresy przez `net.BlockList`; IPv6
     jako allowlista `2000::/3` minus zakresy specjalne (ostrzej niż lista zakazów);
   - dekompresja: wysyłamy `Accept-Encoding: gzip, deflate, br` (mniej transferu dla źródeł;
@@ -240,7 +241,8 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
     korzystać ze słów kluczowych w tytule, nie tylko z CPV (`docs/STATE.md`).
   - **Znane ograniczenie — zmiany ogłoszeń** (źródło: przegląd właściciela, zapytanie na żywo
     2026-10-28): zmiany publikowane są jako osobny typ `NoticeUpdateNotice`, którego `ingest`
-    do PR-03B nie pobierał. Tego dnia było ich co najmniej 100 (`PageSize=100` zwróciło pełną stronę; dla
+    do PR-03B nie pobierał. Tego dnia było ich co najmniej 100 (`PageSize=100` zwróciło pełną
+    stronę; dla
     porównania 331 `ContractNotice`); w 96 ze 100 `htmlBody` dotyczy terminu składania ofert.
     Ogłoszenie o zmianie ma własny `noticeNumber` i łączy się z pierwotnym ogłoszeniem tylko
     przez `tenderId` (`ocds-148610-…`, obecny w 100/100); jego `submittingOffersDate` jest
@@ -266,11 +268,13 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
       termin. `submittingOffersDate` ogłoszenia o zmianie jest zawsze `null` i nie jest
       używane.
     - **Parsowanie `htmlBody`** (`src/sources/bzp/notice-update.ts`; od PR-03C skaner jest
-      wspólny — `src/sources/normalize/html-text.ts`, zachowanie bez zmian, D-022): liniowy przegląd tekstu
+      wspólny — `src/sources/normalize/html-text.ts`, zachowanie bez zmian, D-022): liniowy przegląd
+      tekstu
       między znacznikami (komentarze, `<script>`, `<style>` i atrybuty pomijane; kilka encji
       dekodowanych; normalizacja NFC tylko segmentów ≤ 256 znaków — jest kwadratowa w ciągu
       znaków łączących, a dłuższy segment nie może być etykietą ani datą, więc zostaje
-      nieznormalizowany i przegląd pozostaje liniowy). Niedomknięty znacznik, komentarz, `<script>` albo `<style>` w dowolnym
+      nieznormalizowany i przegląd pozostaje liniowy). Niedomknięty znacznik, komentarz, `<script>`
+      albo `<style>` w dowolnym
       miejscu → odrzucenie `invalid source fields: htmlBody` (treść ucięta lub zepsuta — nie
       wiadomo, czy przeczytano całe ogłoszenie, więc nie ma też pominięcia „brak zmiany”).
       Rodzaj zmienianego
@@ -278,7 +282,8 @@ Statusy: **Accepted** (obowiązuje), **Proposed** (kierunek; ostatecznie w wskaz
       tylko, gdy to dokładnie „Ogłoszenie o zamówieniu” (inaczej pominięcie
       `not_contract_notice_change`). Zmiana terminu = blok po nagłówku „3.4.1.)” z etykietą
       „8.1. Termin składania ofert”; nowa wartość = tekst po „Po zmianie:” w formacie
-      `YYYY-MM-DD HH:MM` czasu Europe/Warsaw, przeliczony na UTC (`src/sources/normalize/warsaw-time.ts`, od PR-03C; wcześniej
+      `YYYY-MM-DD HH:MM` czasu Europe/Warsaw, przeliczony na UTC
+      (`src/sources/normalize/warsaw-time.ts`, od PR-03C; wcześniej
       `src/sources/warsaw-time.ts`).
       Brak takiego bloku → pominięcie `no_deadline_change`; dwa bloki → odrzucenie
       `ambiguous deadline change`; wartość brakująca, powtórzona, w innym formacie, niemożliwa
@@ -688,7 +693,8 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     | wyposazenie | 391, 392                                           |
 
     `4530` obejmuje tylko kod nadrzędny 45300000 (roboty instalacyjne w budynkach); `50232`
-    (konserwacja oświetlenia publicznego i sygnalizacji świetlnej) należy też do `serwis` przez `50`. Celowo poza
+    (konserwacja oświetlenia publicznego i sygnalizacji świetlnej) należy też do `serwis` przez
+    `50`. Celowo poza
     słownikiem: `0931` (dostawy energii elektrycznej — zakup energii, nie prace elektryczne;
     test) oraz szersze prefiksy robót budowlanych (`45`, `452`).
 
@@ -1164,8 +1170,9 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
   rozciągałoby oba limity do ok. 30 s), `keepAliveTimeout` 5 s, bezczynne gniazdo 30 s,
   ≤ 100 żądań na połączenie, wymagany `Host`. Każda odpowiedź: CSP
   `default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
-  `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
-  `Cache-Control: no-store` (poza arkuszem stylów).
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin` (w PR-06A
+  `no-referrer`, zmienione w PR-06B — D-027), `Cache-Control: no-store` (poza arkuszem
+  stylów).
 - **Odrzucone alternatywy:** Next.js (SSR + bundler + duża powierzchnia zależności dla kilku
   stron i formularzy); Fastify/Express/Hono (routing i parsowanie, których potrzebujemy
   w kilkudziesięciu liniach; każda zależność to aktualizacje i audyt — SECURITY §13);
@@ -1255,3 +1262,117 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
   §8.3 drukuje linie ramek jako sam boundary, bez prefiksu `--` z RFC 2046 — dosłownie wzięty
   nie jest poprawnym multipart i dostaje 400; przyjmujemy jego poprawną postać
   (`--` + boundary), którą wysyłają biblioteki multipart.
+
+## D-027 — Ekrany klienta: formularz profilu, zmiana e-maila, dopasowania, login-CSRF
+
+- **Status:** Accepted (PR-06B; rozwija D-025 i D-026)
+- **Kontekst:** po PR-06A klient widzi tylko stan profilu i może się wypisać. PR-06B dodaje
+  edycję profilu, podgląd dopasowań i ponowne włączenie powiadomień — nadal bez JavaScriptu,
+  na `node:http` (D-025), z profilem wyłącznie z sesji (D-026). Przegląd PR-06A wskazał też
+  brak ochrony logowania przed login-CSRF.
+- **Decyzja:**
+  - **Trasy:** `GET/HEAD/POST /profil/ustawienia` (formularz), `GET/HEAD /dopasowania`,
+    `POST /profil/wlacz`. `/profil` zostaje stroną stanu (z linkami do obu nowych stron), a
+    formularz ma osobną ścieżkę — stan i zapis się nie mieszają, a strona stanu działa nawet
+    przy wierszu profilu, którego schemat nie przyjmuje.
+  - **Formularz profilu** (`src/web/profile-form.ts`, `settingsPage` w `pages.ts`): nazwa, e-mail i
+    jego powtórzenie, kategorie i województwa (pola wyboru z zamkniętych list), powiaty i słowa
+    kluczowe (`<textarea>`, wpis w wierszu). Ciało `urlencoded` ≤ 64 KB — **tylko ta trasa**, reszta
+    dalej 8 KB — i ≤ 64 pary; pola pojedyncze dokładnie raz, pola wyboru dowolnie wiele razy,
+    nieznane pole → 400. Kolejność: sesja → CSRF (+ `Origin`) → schemat domeny
+    (`companyProfileSettingsSchema` = schemat profilu bez `active`) i ta sama kontrola nazwy powiatu
+    co w `profile:create` (`countyKey`; samo „powiat” → błąd). Błąd → 400 i ten sam formularz z
+    wysłanymi wartościami, podsumowaniem błędów i komunikatem po polsku przy polu (`aria-invalid`,
+    `aria-describedby`; wpisy list z numerem wiersza, najwyżej 5 komunikatów na pole). Sukces → 303
+    na `/profil` z komunikatem „Zapisano” (albo o zmianie e-maila). Równoległe zapisy: wygrywa
+    ostatni.
+  - **Komunikat po przekierowaniu:** ciasteczko `__Host-radar_komunikat` (60 s,
+    `HttpOnly; Secure; SameSite=Lax`) z jednym słowem z zamkniętej listy; `/profil` pokazuje
+    je raz i czyści. Bez parametru w URL (nie zostaje w historii i zakładkach) i bez stanu w
+    bazie. Ciasteczko nigdy nie niesie adresu ani innej treści.
+  - **Adres powiadomień na `/profil`:** strona stanu zawsze pokazuje bieżący adres („Adres
+    powiadomień”, zescapowany), czytany z bazy razem z nazwą profilu sesji
+    (`getProfileStatus`), więc literówka po zmianie adresu jest widoczna od razu; komunikat o
+    zmianie prosi o jego sprawdzenie. Dawny adres nie jest nigdzie pokazywany.
+  - **Zmiana e-maila** (`updateProfileSettings`): jedna transakcja — wiersz profilu
+    `FOR NO KEY UPDATE`, ponowne sprawdzenie bieżącej sesji (`FOR KEY SHARE`; sesja usunięta
+    albo wygasła w międzyczasie → wycofanie i 401), a gdy adres (po normalizacji) się zmienił:
+    usunięcie wszystkich tokenów profilu i wszystkich jego sesji poza bieżącą
+    (`revokeOtherAccess`); `UPDATE` profilu na końcu. Linki z e-maili wysłanych na stary adres
+    przestają działać; inne urządzenia są wylogowane.
+  - **Kolejność blokad bez cyklu:** pierwsza wersja (`FOR UPDATE`, `UPDATE` adresu, potem
+    tokeny) zakleszczała się z logowaniem (logowanie trzyma wiersz tokenu i czeka na
+    `KEY SHARE` profilu dla klucza obcego sesji; 40P01, HTTP 500). Teraz logowanie nigdy nie
+    czeka na zmianę adresu przed jej końcowym `UPDATE` (`KEY SHARE` przechodzi obok
+    `NO KEY UPDATE`), a zmiana czeka na logowanie przy usuwaniu tokenów i usuwa też sesję,
+    którą ono utworzyło. `access:revoke` blokuje najpierw wiersz profilu (jak zmiana adresu),
+    więc obie operacje idą po kolei. Wylogowanie trzyma jeden wiersz sesji i na nic nie czeka.
+    Digest wydaje tokeny z `FOR SHARE` profilu i warunkiem `email = adres wysyłki`: czeka na
+    zmianę i po niej nie wydaje linków na stary adres (status `address_changed`, nic nie
+    wysłane ani zajęte; następny przebieg wysyła na nowy adres). Godzinne sprzątanie usuwa
+    wiele wierszy we własnej kolejności — na wypadek takiego rzadkiego cyklu zmiana adresu
+    ponawia transakcję raz po 40P01. Test integracyjny odtwarza przeplot z logowaniem.
+    `active` się nie zmienia. **Nowy adres nie jest potwierdzany** (brak wysyłki z procesu
+    web — PR_PLAN); powtórzenie adresu chroni tylko przed literówką. Adres zajęty przez inny
+    profil → błąd przy polu (ujawnia, że adres jest w systemie — świadomy koszt; inaczej
+    zapis musiałby po cichu zawieść).
+  - **Dopasowania** (`/dopasowania`): liczone na żądanie tymi samymi regułami co digest — wspólny
+    moduł `src/notifications/candidates.ts` (okno 7 dni, limit 10 000 kandydatów, `matchingItems`) i
+    widok pozycji `digestItemView` z `digest.ts`; kolejność: najbliższy termin pierwszy. Karta
+    oferty jest zwarta: od razu tytuł, zamawiający, lokalizacja (przy profilu na całą Polskę
+    „Dlaczego pasuje” jej nie podaje), termin składania ofert, „Dlaczego pasuje” i link do źródła;
+    data publikacji, kategoria, opis i kontakt w natywnym `<details>` („Szczegóły ogłoszenia”, bez
+    JavaScriptu); brakujące pola jak w digeście. Najwyżej 50 pozycji i „I N kolejnych”; puste —
+    wyjaśnienie okna 7 dni; profil wyłączony — informacja, że e-maile nie są wysyłane. Strona
+    pokazuje także oferty już wysłane e-mailem (to podgląd, nie historia doręczeń) i mówi o tym.
+    Wiersz profilu odrzucony przez schemat → strona z prośbą o poprawienie w formularzu.
+  - **Ponowne włączenie:** `POST /profil/wlacz` (sesja, CSRF, `Origin`) ustawia
+    `active = true`; ponowne kliknięcie niczego nie zmienia (także `updated_at`).
+  - **Login-CSRF:** `POST /dostep` wymaga `Origin` równego originowi `PUBLIC_BASE_URL`, a gdy
+    `Origin` brak — nagłówka `Sec-Fetch-Site` o wartości `same-origin`; wszystko inne (także
+    `Origin` równy `null` i brak obu nagłówków) → 403 bez zużycia tokenu.
+  - **`Referrer-Policy: strict-origin`** (było `no-referrer`): przy `no-referrer` przeglądarki
+    wysyłają w formularzach `Origin: null` (specyfikacja Fetch), więc kontrola `Origin` z
+    D-026 odrzucała każdy formularz w prawdziwej przeglądarce, a nowa reguła logowania by go
+    nie przepuściła. `strict-origin` daje prawdziwy `Origin`, a `Referer` niesie tylko
+    origin, więc tokeny ze ścieżek nie wyciekają (także w żądaniach do własnego serwera,
+    np. `/styl.css`).
+  - **Zależności warstw:** `web` używa repozytorium profili, `notifications/candidates.ts`, czystego
+    `digest.ts` i `countyKey` z `matching`, nigdy `sender.ts` ani `run.ts` — proces web nie wysyła
+    e-maili.
+- **Koszt `/dopasowania`:** dopasowanie to praca CPU w wątku procesu `serve`. Zmierzone (2026-11-02,
+  lokalnie, opisy ok. 1,4 tys. znaków): 5 000 kandydatów — odczyt ok. 0,1 s, dopasowanie ok. 0,7 s
+  przy typowym profilu i ok. 5,5 s przy maksymalnym (100 + 100 ośmiowyrazowych słów, 4 kategorie);
+  przy limicie 10 000 — ok. 2 s typowo i 13–14 s maksymalnie. Dlatego `matchingItems` oddaje pętlę
+  zdarzeń, gdy od poprzedniego oddania minęło ponad 20 ms (`MATCH_YIELD_AFTER_MS`; liczba ofert nie
+  wystarcza — 200 ofert przy maksymalnym profilu to ok. 0,4 s; wynik i digest bez zmian), więc inne
+  żądania są obsługiwane w trakcie, a proces liczy najwyżej jedną listę naraz
+  (`src/web/matches-slot.ts`). Równoległe żądanie `/dopasowania` czeka w kolejce FIFO najwyżej 3 s
+  (`MATCHES_MAX_WAIT_MS`), w kolejce najwyżej 8 żądań (`MATCHES_MAX_WAITERS`); po zwolnieniu
+  miejsce przechodzi wprost na najstarsze czekające (bez wyścigu wszystkich czekających). Pełna
+  kolejka (od razu) albo upływ czasu → 503 z `Retry-After: 5` i stroną „Trwa przygotowanie listy
+  dopasowań — spróbuj za kilka sekund” z odnośnikiem „Spróbuj ponownie”. Klient, który rozłączy się
+  w kolejce, wypada z niej (timer i nasłuch `close` odpinane) i nic nie jest dla niego liczone;
+  rozłączenie w trakcie liczenia go nie przerywa. Miejsce zwalniane w `finally`, także po błędzie.
+  To jedno miejsce jest wspólne dla wszystkich klientów. **Kolejka, a nie cache wyników:** krótkie
+  oczekiwanie zamienia większość 503 przy jednoczesnych wejściach (np. kilku pracowników po tym
+  samym e-mailu) w zwykłą odpowiedź, nie wprowadzając stanu; cache na profil musiałby być
+  unieważniany przy każdej zmianie ustawień i każdym `ingest`, a pokazywałby stan sprzed tych
+  zmian. Dostępne tylko z sesją; limit żądań tej trasy na reverse proxy (PR-07).
+  Jeśli pomiar na danych pilota pokaże problem: jednokrotna tokenizacja ofert (zmiana API
+  `matching`, D-023).
+- **Odrzucone alternatywy:** formularz na `/profil` (miesza stan i zapis; strona stanu
+  musiałaby walidować profil); komunikat w parametrze URL (zostaje w historii, łatwy do
+  podrobienia w linku) albo w bazie (stan dla jednej wiadomości); potwierdzanie nowego adresu
+  e-mailem (wymaga wysyłki z procesu web — poza zakresem; decyzja właściciela); zapis wyników
+  dopasowania lub cache (tabela i unieważnianie bez zmierzonej potrzeby); framework web
+  (D-025 — kilka pól i jedna walidacja nie przerosły modelu); `Referrer-Policy: same-origin`
+  (pełny `Referer` z tokenem w żądaniach do własnego serwera, czyli w logach proxy); pokazywanie
+  dawnego adresu po zmianie (prośba właściciela) — musiałby trafić do ciasteczka, URL-a albo nowej
+  kolumny; literówkę wychwytuje bieżący adres, zawsze widoczny na `/profil`.
+- **Konsekwencje:** kto ma sesję (np. z przekazanego e-maila), może zmienić adres i przejąć
+  powiadomienia; dawny właściciel traci dostęp (reakcja: operator, `access:revoke` i poprawka
+  adresu). Digest działający w chwili zmiany adresu bez `PUBLIC_BASE_URL` może jeszcze wysłać jeden
+  e-mail (bez linków) na stary adres; z linkami — nie. Pełne listy (100 + 100 + 100 długich wpisów z
+  polskimi znakami) mogą przekroczyć 64 KB → 413. Klient bez `Origin` i bez `Sec-Fetch-Site` nie
+  zaloguje się.

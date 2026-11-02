@@ -20,7 +20,8 @@
 > (`src/profile-commands.ts`), bez migracji. PR-05 dodaje `digest` (`src/notifications/`,
 > tabela `deliveries`). PR-06A dodaje dostęp do profilu: komendy `serve` i `access:link`,
 > moduł `src/web/` (`node:http`, D-025) oraz tabele `access_tokens` i `sessions` (migracja
-> `0006_access`, D-026). Wszystko poniżej oznaczone
+> `0006_access`, D-026). PR-06B dodaje ekrany klienta: formularz profilu, stronę dopasowań i
+> ponowne włączenie powiadomień (D-027), bez migracji. Wszystko poniżej oznaczone
 > _(plan, PR-xx)_ to projekt docelowy — kontrakty mogą zostać doprecyzowane w danym PR, a
 > zmiana musi trafić do tego dokumentu i do `docs/DECISIONS.md`.
 
@@ -40,7 +41,8 @@ podstaw (patrz `docs/DECISIONS.md` D-001).
                │                                 │
  PUBLIC SOURCE │                                 │
       │        ▼                                 ▼
-      │  sources/<adapter>  ──►  ingestion  ──►  PostgreSQL  ◄──  matching ──► notifications ──► e-mail
+      │  sources/<adapter>  ──►  ingestion  ──►  PostgreSQL  ◄──  matching ──► notifications ──►
+  e-mail
       │  fetch → extract →      fingerprint,     (opportunities,   score +      digest, idempotent
       └► normalize              dedup, upsert     profiles, ...)   explanation  delivery
                ▲
@@ -77,8 +79,10 @@ src/
 │                           # format.ts (polskie opisy powodów); czyste (D-023)
 ├── notifications/          # digest.ts (szablon, czysty), sender.ts (outbox/SMTP), [PR-05]
 │                           # run.ts (wybór ofert, idempotencja, blokada digest; D-024)
+│                           # candidates.ts: kandydaci i dopasowanie (digest + web) [PR-06B]
 └── web/                    # serve: node:http, strony SSR, sesja, CSRF, wypis  [PR-06A]
                             # server.ts, pages.ts, session.ts, links.ts, multipart.ts
+                            # profile-form.ts: formularz profilu, polskie błędy  [PR-06B]
 tests/
 ├── *.test.ts               # unit / smoke                                           [PR-00]
 ├── fixtures/<source>/      # prawdziwe odpowiedzi źródeł + README (pseudonimizacja) [PR-02]
@@ -98,9 +102,14 @@ z jednym wyjątkiem (D-023): może importować czyste helpery `sources/normalize
 `sources`, nic z `infrastructure`, żadnych pakietów ani modułów Node); pilnuje tego
 `no-restricted-imports` w `eslint.config.js` i test `tests/matching-dependency-guard.test.ts`.
 `ingestion` i `notifications` orkiestrują i dotykają repozytoriów; od PR-06A także `web`
-(tylko `access-repository.ts`). `cli`/`web` składają zależności (proste wstrzykiwanie przez
-parametry, bez kontenera DI). `notifications` importuje z `web` wyłącznie `web/links.ts`
-(czyste budowanie URL-i tras `/dostep/…` i `/wypis/…`, bez I/O) — trasy definiuje `web`.
+(PR-06A: `access-repository.ts`; od PR-06B także `company-profiles-repository.ts`).
+`cli`/`web` składają zależności (proste wstrzykiwanie przez parametry, bez kontenera DI).
+`notifications` importuje z `web` wyłącznie `web/links.ts` (czyste budowanie URL-i tras
+`/dostep/…` i `/wypis/…`, bez I/O) — trasy definiuje `web`. W drugą stronę (PR-06B, D-027)
+`web` importuje z `notifications` wyłącznie `candidates.ts` (odczyt kandydatów i
+dopasowanie — te same reguły co digest) oraz czyste `digest.ts` (`digestItemView`,
+`digestOrder`, `plural`), a z `sources` tylko czysty `normalize/warsaw-time.ts`; nic z
+`sender.ts` ani `run.ts` — proces `serve` nigdy nie wysyła e-maili.
 
 ### Warstwa bazy danych (PR-01)
 
@@ -127,7 +136,8 @@ parametry, bez kontenera DI). `notifications` importuje z `web` wyłącznie `web
   minął, `first_seen_at` od podanej chwili, `deadline ASC NULLS LAST, id`, limit; pominięte
   jak wyżej), `company_profiles.listActiveCompanyProfiles` (aktywne, `created_at, id`;
   nieprawidłowe wiersze w `skipped`) i `deliveries` (stan dnia profilu, stany doręczeń ofert,
-  `claimDeliveries` — rezerwacja w jednej transakcji, `markDeliveries`). PR-03A: `opportunities.ingestOpportunity` (upsert z wykrywaniem
+  `claimDeliveries` — rezerwacja w jednej transakcji, `markDeliveries`). PR-03A:
+  `opportunities.ingestOpportunity` (upsert z wykrywaniem
   zmian, zwraca `inserted`/`updated`/`unchanged`, §5) i `ingestion-runs.recordIngestionRun`
   (zapis podsumowania przebiegu, §5).
 
@@ -366,7 +376,8 @@ interface IngestionOutcome {
   licznika) reszta dni źródła w `notRun` (`consecutive_failures`, log warn), inne źródła
   działają dalej; przerwany sygnał → reszta w `notRun` (`aborted`).
 - **Przebieg źródła** (sekwencyjnie, każde izolowane): nowy klient HTTP, `signal` =
-  timeout przebiegu źródła i dnia (`AbortSignal.timeout`, CLI: 10 min, D-018) połączony z sygnałem całego
+  timeout przebiegu źródła i dnia (`AbortSignal.timeout`, CLI: 10 min, D-018) połączony z sygnałem
+  całego
   przebiegu (CLI: sygnał blokady ingest, przerywany przy jej utracie, D-019); `adapter.fetch`
   w trybie `onDocument`, każdy dokument od razu: `extract` → `normalize` → ponowna walidacja
   kandydata → `fingerprint`/`contentHash` → `ingestOpportunity`; zmiana ogłoszenia
@@ -471,6 +482,11 @@ Szczegóły i uzasadnienie: D-010 (SMTP, biblioteka) i D-024 (wybór ofert, idem
   `setup` / `uncertain` (`classifySmtpError` czyta tylko kody i etap SMTP, nigdy komunikat
   ani odpowiedź serwera; D-024). `sendWithRetry` ponawia tylko `transient` i `unreachable`
   (pauzy 2 s, 10 s).
+- `candidates.ts` (PR-06B): `readDigestCandidates(db, now)` (oferty nowe z ostatnich
+  `DIGEST_NEW_DAYS` = 7 dni, termin nieminiony, limit `DIGEST_CANDIDATE_LIMIT` = 10 000,
+  flaga `truncated`) i `matchingItems(profile, offers)` (`matchOpportunity` na każdym
+  kandydacie). Wspólne dla `runDigest` i strony `/dopasowania`, aby obie stosowały te same
+  reguły.
 - `runDigest(deps, { profileId, dryRun })` (`run.ts`): kandydaci raz na przebieg, profile po
   kolei, dla każdego rezerwacja `pending` → wysyłka → `sent`/`failed`; wynik niepewny
   zostawia `pending` (nigdy nie wysyłany ponownie). Błąd `setup`, `unreachable` lub
@@ -480,29 +496,70 @@ Szczegóły i uzasadnienie: D-010 (SMTP, biblioteka) i D-024 (wybór ofert, idem
 - Linki web (PR-06A): przy ustawionym `PUBLIC_BASE_URL` (`DigestRunDeps.publicBaseUrl`)
   `runDigest` wydaje dla każdego e-maila token logowania i token wypisu (po `--dry-run`,
   przed rezerwacją), `buildDigest` dostaje `links` (stopka „Twój profil” i wypis), a e-mail
-  `unsubscribeUrl` (nagłówki RFC 8058 w `mailOptions`; D-024, D-026).
+  `unsubscribeUrl` (nagłówki RFC 8058 w `mailOptions`; D-024, D-026). Od PR-06B część HTML
+  stopki pokazuje krótkie teksty linków („Otwórz swój profil”, „Wypisz się z powiadomień”);
+  część tekstowa nadal zawiera pełne URL-e, a e-mail bez `PUBLIC_BASE_URL` się nie zmienia.
 
-### 4.6 Web (PR-06A, zaimplementowany)
+### 4.6 Web (PR-06A, PR-06B, zaimplementowany)
 
-Szczegóły i uzasadnienie: D-025 (`node:http`, limity) i D-026 (tokeny, sesja, CSRF, wypis).
+Szczegóły i uzasadnienie: D-025 (`node:http`, limity), D-026 (tokeny, sesja, CSRF, wypis) i
+D-027 (ekrany klienta, zmiana e-maila, login-CSRF).
 
 - `startWebServer({ db, publicBaseUrl, logger, host, port, cleanupIntervalMs })`
   (`server.ts`) → `{ host, port, close() }`. Stała tabela tras:
 
-  | Trasa (nazwa w logu)                     | Metody          | Działanie                                           |
-  | ---------------------------------------- | --------------- | --------------------------------------------------- |
-  | `/` (`home`)                             | GET, HEAD       | strona główna                                       |
-  | `/styl.css` (`stylesheet`)               | GET, HEAD       | arkusz stylów (jedyna odpowiedź z cache, 1 h)       |
-  | `/dostep/<token>` (`login_link`)         | GET, HEAD       | sprawdza token (bez zużycia) → strona z przyciskiem |
-  | `/dostep` (`login`)                      | POST            | zużywa token, tworzy sesję → 303 `/profil`          |
-  | `/profil` (`profile`)                    | GET, HEAD       | nazwa, status, formularze Wypisz/Wyloguj (sesja)    |
-  | `/profil/wypisz` (`profile_unsubscribe`) | POST            | `active = false` (sesja + CSRF) → 303 `/profil`     |
-  | `/wyloguj` (`logout`)                    | POST            | usuwa sesję i ciasteczko (sesja + CSRF) → 303 `/`   |
-  | `/wypis/<token>` (`unsubscribe`)         | GET, HEAD, POST | GET: strona z przyciskiem; POST RFC 8058: wypis     |
+  | Trasa (nazwa w logu)                      | Metody          | Działanie                                            |
+  | ----------------------------------------- | --------------- | ---------------------------------------------------- |
+  | `/` (`home`)                              | GET, HEAD       | strona główna                                        |
+  | `/styl.css` (`stylesheet`)                | GET, HEAD       | arkusz stylów (jedyna odpowiedź z cache, 1 h)        |
+  | `/dostep/<token>` (`login_link`)          | GET, HEAD       | sprawdza token (bez zużycia) → strona z przyciskiem  |
+  | `/dostep` (`login`)                       | POST            | zużywa token, tworzy sesję → 303 `/profil`           |
+  | `/profil` (`profile`)                     | GET, HEAD       | nazwa, status, komunikat, linki, formularze (sesja)  |
+  | `/profil/ustawienia` (`profile_settings`) | GET, HEAD, POST | formularz profilu; POST: zapis (sesja + CSRF)        |
+  | `/profil/wypisz` (`profile_unsubscribe`)  | POST            | `active = false` (sesja + CSRF) → 303 `/profil`      |
+  | `/profil/wlacz` (`profile_resubscribe`)   | POST            | `active = true` (sesja + CSRF) → 303 `/profil`       |
+  | `/dopasowania` (`matches`)                | GET, HEAD       | pasujące oferty profilu (sesja)                      |
+  | `/wyloguj` (`logout`)                     | POST            | usuwa sesję i ciasteczko (sesja + CSRF) → 303 `/`    |
+  | `/wypis/<token>` (`unsubscribe`)          | GET, HEAD, POST | GET: strona z nazwą firmy i przyciskiem; POST: wypis |
 
   Inna ścieżka → 404 (`not_found`), inna metoda → 405 z `Allow`. POST: `Origin` (poza
-  wypisem) → typ treści (urlencoded; dla wypisu także `multipart/form-data`) → rozmiar →
-  trasa. Błąd bazy → 500 i log bez szczegółów.
+  wypisem) → typ treści (urlencoded; dla wypisu także `multipart/form-data`) → rozmiar
+  (8 KB; `/profil/ustawienia` 64 KB i najwyżej 64 pary pól) → trasa; `/dostep` dodatkowo
+  sprawdza login-CSRF: `Origin` równy `PUBLIC_BASE_URL` albo, gdy `Origin` brak, nagłówek
+  `Sec-Fetch-Site: same-origin`; inaczej 403, a token nie jest zużywany. Błąd bazy → 500 i
+  log bez szczegółów. Każda odpowiedź ma `Referrer-Policy: strict-origin` (od PR-06B;
+  `no-referrer` sprawiał, że przeglądarki wysyłały w formularzach `Origin: null`, odrzucany
+  przez kontrolę `Origin`; `Referer` niesie tylko origin, nigdy ścieżkę z tokenem).
+
+- Formularz profilu (`profile-form.ts`, `settingsPage`): pola nazwy, e-maila (+ powtórzenie
+  przy zmianie), kategorii i województw (pola wyboru), powiatów i słów (pola tekstowe, jeden
+  wpis w wierszu). Walidacja wyłącznie schematem domeny (`companyProfileSettingsSchema` =
+  schemat profilu bez `active`), błędy po polsku przy polach (numer wiersza dla list) i w
+  podsumowaniu z odnośnikami; `label`, `fieldset`/`legend`, `aria-describedby`,
+  `aria-invalid`. Błąd → 400 z wysłanymi wartościami; zapis → 303 `/profil`. Komunikat po
+  przekierowaniu niesie ciasteczko `__Host-radar_komunikat` (jedno słowo z zamkniętej listy,
+  60 s), które `/profil` pokazuje raz i usuwa. Równoczesne zapisy: wygrywa ostatni.
+- Zmiana e-maila (`updateProfileSettings`, jedna transakcja): `SELECT … FOR NO KEY UPDATE`
+  wiersza profilu → bieżąca sesja `FOR KEY SHARE` (`lockLiveSession`; usunięta lub wygasła →
+  wycofanie, 401) → jeśli adres się zmienił, `revokeOtherAccess`: usunięcie wszystkich
+  tokenów profilu i wszystkich jego sesji poza bieżącą → `UPDATE` profilu na końcu. Ta
+  kolejność nie tworzy cyklu z logowaniem (`consumeLoginToken`), wylogowaniem,
+  `revokeProfileAccess` (też najpierw blokuje profil) ani z `issueDigestTokens` (digest:
+  `FOR SHARE` profilu z warunkiem adresu, inaczej status `address_changed`); po 40P01 (np.
+  z godzinnym sprzątaniem) jedna ponowna próba (D-027). Inne zmiany niczego nie
+  unieważniają. Adres używany przez inny profil (UNIQUE) → błąd przy polu e-mail.
+- Strona dopasowań (`/dopasowania`): `readDigestCandidates` + `matchingItems` (jak digest),
+  kolejność `digestOrder` (najbliższy termin), najwyżej 50 (`MATCHES_SHOWN`) + „I N
+  kolejnych…”, pola jak w e-mailu (`digestItemView`), link do źródła tylko `http(s)` z
+  `rel="noopener noreferrer"`. Karta zwarta: zamawiający, lokalizacja, termin, „Dlaczego
+  pasuje” i link od razu, pozostałe pola w `<details>` „Szczegóły ogłoszenia” (bez JS). Pusty
+  stan objaśnia okno 7 dni; profil nieaktywny dostaje notkę; wiersz profilu odrzucany przez
+  schemat → prośba o poprawkę w ustawieniach. Koszt: liczone na żądanie w procesie `serve`;
+  `matchingItems` oddaje pętlę zdarzeń po ok. 20 ms pracy (`MATCH_YIELD_AFTER_MS`), a serwer liczy
+  najwyżej jedną listę naraz (`MatchesSlot` z `matches-slot.ts` w `ServerState`): kolejne żądanie
+  czeka w kolejce FIFO (najwyżej 8 żądań, najwyżej 3 s; po zwolnieniu miejsce przechodzi wprost na
+  najstarsze), pełna kolejka albo upływ czasu → 503 `matchesBusyPage` z `Retry-After: 5`; rozłączony
+  czekający wypada z kolejki bez liczenia; zwolnienie w `finally` (D-027).
 
 - `pages.ts` — czyste funkcje `→ { status, html }`, po polsku, `lang="pl"`, bez JS i stylów
   inline (CSP), każda wartość przez `escapeHtml`. `session.ts` — ciasteczko `__Host-`,
@@ -512,9 +569,13 @@ Szczegóły i uzasadnienie: D-025 (`node:http`, limity) i D-026 (tokeny, sesja, 
   `loginUrl`/`unsubscribeUrl` (czyste; używa też `notifications` i `access:link`).
 - Dane: `src/infrastructure/db/access-repository.ts` (`issueAccessToken`,
   `isUsableAccessToken`, `consumeLoginToken`, `findSessionProfile`, `deleteSession`,
-  `deactivateProfile`, `unsubscribeWithToken`, `getProfileStatus`, `deleteExpiredAccess`).
-  Strona profilu czyta tylko `name` i `active` (bez schematu domenowego), więc wypis działa
-  także dla wiersza, którego schemat by nie przyjął.
+  `deactivateProfile`, `activateProfile`, `unsubscribeWithToken`,
+  `unsubscribeTokenProfileName`, `getProfileStatus`, `revokeOtherAccess`,
+  `deleteExpiredAccess`) i `company-profiles-repository.ts` (`getProfileSettings`,
+  `updateProfileSettings`, `getCompanyProfile`). Strona profilu czyta tylko `name`, `email`
+  (pokazywany jako „Adres powiadomień”) i `active`,
+  a formularz surowe wartości (bez schematu domenowego), więc wypis i poprawka działają także
+  dla wiersza, którego schemat by nie przyjął.
 - Sprzątanie wygasłych tokenów i sesji: przy starcie i co godzinę w procesie `serve`, po 1000
   wierszy na tabelę, bez nakładania się (`cleanupIntervalMs: null` w testach wyłącza timer).
 
@@ -743,7 +804,8 @@ unikalny, `sessions_token_hash_key`, `sessions_token_hash_check`), `profile_id` 
   końcu otwiera bazę; pula jest zamykana przed zakończeniem komendy na każdej ścieżce.
 - `source:preview <sourceId> [--date YYYY-MM-DD] [--limit N]` (PR-02) — jeden ograniczony
   przebieg źródła (domyślnie wczoraj według UTC i 20 rekordów na typ ogłoszenia, maks. 500;
-  timeout przebiegu 5 min) przez nowy `SafeHttpClient`, wynik jako JSON na stdout (rekordy znormalizowane,
+  timeout przebiegu 5 min) przez nowy `SafeHttpClient`, wynik jako JSON na stdout (rekordy
+  znormalizowane,
   liczniki, odrzucenia, `incomplete`), bez zapisu. Wymaga `CRAWLER_CONTACT` (brak → kod 1,
   zanim padnie jakiekolwiek żądanie). Nie otwiera bazy, ale `DATABASE_URL` jest walidowany jak
   przy każdej komendzie (wspólna konfiguracja). Adaptery i fabryka klienta HTTP są
@@ -761,20 +823,24 @@ unikalny, `sessions_token_hash_key`, `sessions_token_hash_check`), `profile_id` 
   (PR-03A, zakresy i nadrabianie PR-03B, D-021) — pobiera i zapisuje ogłoszenia z dnia
   publikacji (`--date`), z każdego dnia zakresu (`--from/--to`, najwyżej 31 dni) albo —
   domyślnie — z niepokrytych dni z 31 kończących się wczoraj według UTC (nadrabianie; źródło
-  bez przebiegów: wczoraj) wybranych źródeł (domyślnie wszystkich włączonych w bazie), do N rekordów na typ ogłoszenia i dzień (domyślnie i maks. 1000),
-  timeout 10 min na źródło i dzień (D-018, D-021). Kolejność kontroli: argumenty (kod 2) → konfiguracja (w
+  bez przebiegów: wczoraj) wybranych źródeł (domyślnie wszystkich włączonych w bazie), do N rekordów
+  na typ ogłoszenia i dzień (domyślnie i maks. 1000),
+  timeout 10 min na źródło i dzień (D-018, D-021). Kolejność kontroli: argumenty (kod 2) →
+  konfiguracja (w
   tym `CRAWLER_CONTACT`, kod 1) → baza. Nie migruje sama (oczekujące migracje → kod 1). Wynik:
   JSON na stdout (`status`, `mode` = `date`/`range`/`catch_up`, `from`, `to`, `limit`,
   przebiegi z `publicationDate`, licznikami, `skippedReasons`, `runId`, `errorCode`, `notRun`,
   `clipped`) +
-  linia logu na przebieg. Kod 0, gdy każde źródło `succeeded` lub `incomplete`, a także gdy blokada jest
+  linia logu na przebieg. Kod 0, gdy każde źródło `succeeded` lub `incomplete`, a także gdy blokada
+  jest
   zajęta (`status: "skipped"`, nic nie uruchomiono); 1, gdy któreś `failed`, podsumowania nie
   zapisano, blokada została utracona w trakcie (`lock_lost`) albo baza niedostępna; 2 — błąd
   użycia (także źródło niewłączone w bazie).
 - **Blokada ingest (D-019):** `pg_try_advisory_lock(7206120309001)` na sesji jednego,
   dedykowanego połączenia z puli (`db.connection().execute`), zwalniana w `finally`
   (`pg_advisory_unlock`); zerwane połączenie zwalnia ją samo. Zajęta → stdout
-  `{"status":"skipped","reason":"lock_busy",…,"runs":[],"notRun":[],"clipped":[]}`, komunikat „Ingest skipped: …” na
+  `{"status":"skipped","reason":"lock_busy",…,"runs":[],"notRun":[],"clipped":[]}`, komunikat
+  „Ingest skipped: …” na
   stderr, log `ingest lock busy` (warn), kod 0, bez pobierania i bez wiersza w
   `ingestion_runs`. Połączenie z blokadą jest sprawdzane co 5 s;
   utrata → przerwanie przebiegu (`lock_lost`, log `ingest lock lost`, komunikat
@@ -804,7 +870,8 @@ failed`) — wynik zostaje, a blokada znika z końcem sesji. Każde połączenie
   wszystko poszło albo nie było czego wysłać, także przy zajętej blokadzie
   (`{"status":"skipped","reason":"lock_busy",…}`); 1, gdy któryś profil `failed`,
   `uncertain`, `not_found`, `invalid_profile`, `not_run` (utrata blokady) albo baza
-  niedostępna.
+  niedostępna. `address_changed` (adres profilu zmieniony na stronie w trakcie przebiegu;
+  nic nie wysłane) nie zmienia kodu.
 - **Blokada digest:** ten sam mechanizm co ingest (`withAdvisoryLock` w
   `src/infrastructure/db/advisory-lock.ts`), klucz `7206120309002` (`DIGEST_LOCK_KEY` w
   `src/notifications/run.ts`), sprawdzanie co 5 s, logi `digest lock lost` / `digest lock

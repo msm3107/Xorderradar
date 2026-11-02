@@ -34,6 +34,11 @@ export function toDomainError(error: unknown): DomainError | null {
   }
 }
 
+/** PostgreSQL broke a lock cycle by aborting this transaction (SQLSTATE 40P01). */
+export function isDeadlock(error: unknown): boolean {
+  return error instanceof pg.DatabaseError && error.code === "40P01";
+}
+
 /** Runs a repository query, converting integrity errors into DomainError. */
 export async function withDomainErrors<T>(query: () => Promise<T>): Promise<T> {
   try {

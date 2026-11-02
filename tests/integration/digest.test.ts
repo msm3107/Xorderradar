@@ -36,7 +36,13 @@ import {
   type OutgoingEmail,
   type SendFailureKind,
 } from "../../src/notifications/sender.js";
-import { createTestSchema, skipWithoutDatabase, type TestSchema } from "./test-database.js";
+import {
+  createTestSchema,
+  pausedTransaction,
+  skipWithoutDatabase,
+  waitUntilBlockedBy,
+  type TestSchema,
+} from "./test-database.js";
 
 /*
  * PR-05 with PostgreSQL: `digest` end to end. The digest lock is a
@@ -806,6 +812,47 @@ describe.skipIf(skipWithoutDatabase)("digest (PostgreSQL)", () => {
       expect(result.stderr).not.toContain(login);
       expect(result.stderr).not.toContain(unsubscribe);
       expect(await consumeLoginToken(schema.db, login)).toMatchObject({ profileId: profile.id });
+    });
+
+    it("sends nothing to an address changed on the web during the run (next run: the new one)", async () => {
+      const offer = await store();
+      const newEmail = "nowy@example.invalid";
+      // An e-mail change committing while the run is about to issue the links.
+      const change = pausedTransaction(
+        schema.db,
+        async (trx) => {
+          await trx
+            .updateTable("company_profiles")
+            .set({ email: newEmail })
+            .where("id", "=", profile.id)
+            .execute();
+        },
+        () => Promise.resolve(),
+      );
+      const changePid = await change.pid;
+      const sender = fakeSender();
+      const running = run([], {
+        digest: { createSender: () => sender.sender },
+        env: { PUBLIC_BASE_URL: BASE },
+      });
+      await waitUntilBlockedBy(schema.db, changePid);
+      change.resume();
+      await change.done;
+      const result = await running;
+      expect(result.code).toBe(ExitCode.Ok);
+      expect(only(result.report)).toMatchObject({ status: "address_changed", sent: 0 });
+      expect(sender.attempts()).toBe(0);
+      expect(await tokens()).toEqual([]);
+      expect(await deliveries()).toEqual([]);
+
+      const next = fakeSender();
+      const again = await run([], {
+        digest: { createSender: () => next.sender },
+        env: { PUBLIC_BASE_URL: BASE },
+      });
+      expect(only(again.report)).toMatchObject({ status: "sent", sent: 1 });
+      expect(next.sent.map((sent) => sent.email.to)).toEqual([newEmail]);
+      expect((await deliveries()).map((row) => row.opportunity_id)).toEqual([offer.id]);
     });
 
     it("writes both List-Unsubscribe headers to the outbox copy", async () => {

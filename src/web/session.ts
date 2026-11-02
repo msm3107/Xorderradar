@@ -30,15 +30,52 @@ export function clearedSessionCookie(): string {
  * malformed ever reaches the database.
  */
 export function readSessionCookie(header: string | undefined): string | null {
+  const value = readCookie(header, SESSION_COOKIE);
+  return value !== null && isSecretToken(value) ? value : null;
+}
+
+/** The value of the first cookie called `name`, or null. */
+function readCookie(header: string | undefined, name: string): string | null {
   if (header === undefined) return null;
   for (const part of header.split(";")) {
     const separator = part.indexOf("=");
     if (separator === -1) continue;
-    if (part.slice(0, separator).trim() !== SESSION_COOKIE) continue;
-    const value = part.slice(separator + 1).trim();
-    return isSecretToken(value) ? value : null;
+    if (part.slice(0, separator).trim() !== name) continue;
+    return part.slice(separator + 1).trim();
   }
   return null;
+}
+
+/**
+ * The one-time notice shown on /profil after a form was saved (PR-06B,
+ * D-027). The router ignores the query string, and the page after a 303
+ * cannot see the POST, so a short-lived cookie carries which notice to show;
+ * /profil clears it when it shows it. It holds one word from a closed list,
+ * never data: a forged one can only make the page say "Zapisano".
+ */
+export const NOTICE_COOKIE = "__Host-radar_komunikat";
+
+export const NOTICES = ["zapisano", "zmieniono_email", "wypisano", "wlaczono"] as const;
+export type Notice = (typeof NOTICES)[number];
+
+/** Long enough for the redirect that follows; a notice never shows up later. */
+const NOTICE_MAX_AGE_SECONDS = 60;
+
+export function noticeCookie(notice: Notice): string {
+  return (
+    `${NOTICE_COOKIE}=${notice}; Path=/; Max-Age=${String(NOTICE_MAX_AGE_SECONDS)}; ` +
+    "HttpOnly; Secure; SameSite=Lax"
+  );
+}
+
+export function clearedNoticeCookie(): string {
+  return `${NOTICE_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`;
+}
+
+/** The notice of the request's notice cookie; null when absent or not one of NOTICES. */
+export function readNoticeCookie(header: string | undefined): Notice | null {
+  const value = readCookie(header, NOTICE_COOKIE);
+  return NOTICES.find((notice) => notice === value) ?? null;
 }
 
 /**
@@ -66,4 +103,21 @@ export function csrfMatches(sessionToken: string, submitted: string): boolean {
  */
 export function originAllowed(origin: string | undefined, publicBaseUrl: string): boolean {
   return origin === undefined || origin === publicBaseUrl;
+}
+
+/**
+ * The stricter check of the login POST (login CSRF, PR-06B): it needs no
+ * session, so there is no CSRF token, and a foreign site could otherwise sign
+ * a victim's browser into the attacker's profile. It passes only when
+ * `Origin` is PUBLIC_BASE_URL's origin, or when `Origin` is absent and the
+ * browser says the request came from our own pages (`Sec-Fetch-Site:
+ * same-origin`). A request with neither header is refused.
+ */
+export function loginRequestAllowed(
+  origin: string | undefined,
+  secFetchSite: string | readonly string[] | undefined,
+  publicBaseUrl: string,
+): boolean {
+  if (origin !== undefined) return origin === publicBaseUrl;
+  return secFetchSite === "same-origin";
 }
