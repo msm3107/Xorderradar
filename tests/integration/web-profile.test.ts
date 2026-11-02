@@ -254,6 +254,28 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       expect(await stored()).toEqual(before);
     });
 
+    it("refuses a control character (a pasted tab) with a Polish field error, saving nothing", async () => {
+      const { cookie, csrf } = await login();
+      const before = await stored();
+      const response = await post(
+        "/profil/ustawienia",
+        settingsForm(csrf, {
+          name: "Jan\tKowalski",
+          include_keywords: "oświetlenie\r\nlatar\u0000nie",
+        }),
+        { cookie },
+      );
+      expect(response.status).toBe(400);
+      const html = await response.text();
+      expect(html).toContain(
+        "Nazwa firmy zawiera znaki sterujące (np. tabulator) — wpisz wartość ponownie.",
+      );
+      expect(html).toContain(
+        "Wiersz 2: wpis zawiera znaki sterujące (np. tabulator) — wpisz wartość ponownie.",
+      );
+      expect(await stored()).toEqual(before);
+    });
+
     it("refuses a missing or wrong CSRF token, a foreign Origin and a malformed form", async () => {
       const { cookie, csrf } = await login();
       const before = await stored();
@@ -830,7 +852,11 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
           const second = fetch(`${gated.url}/dopasowania`, { headers: { cookie } });
           await waitForWaiters(gated.server, 1);
 
-          const third = await fetch(`${gated.url}/dopasowania`, { headers: { cookie } });
+          // Another session: the same one would get the per-session 429 first (D-028).
+          const other = await login();
+          const third = await fetch(`${gated.url}/dopasowania`, {
+            headers: { cookie: other.cookie },
+          });
           expect(third.status).toBe(503);
           expect(third.headers.get("retry-after")).toBe(String(MATCHES_RETRY_AFTER_SECONDS));
           expect(third.headers.get("cache-control")).toBe("no-store");
@@ -843,6 +869,69 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
           await lock.done;
           expect((await first).status).toBe(200);
           expect((await second).status).toBe(200);
+        } finally {
+          await gated.server.close();
+        }
+      });
+
+      it("answers a third request of one session at once with 429, other sessions queue", async () => {
+        await upsertOpportunity(schema.db, draft({ title: "Oświetlenie parku" }));
+        const { cookie } = await login();
+        const other = await login();
+        const lock = lockOpportunities();
+        const lockPid = await lock.pid;
+        const first = fetch(`${url}/dopasowania`, { headers: { cookie } });
+        await waitUntilBlockedBy(schema.db, lockPid);
+        const second = fetch(`${url}/dopasowania`, { headers: { cookie } });
+        await waitForWaiters(server, 1);
+        expect(server.matchesSessions).toBe(1);
+
+        const third = await fetch(`${url}/dopasowania`, { headers: { cookie } });
+        expect(third.status).toBe(429);
+        expect(third.headers.get("retry-after")).toBe(String(MATCHES_RETRY_AFTER_SECONDS));
+        expect(third.headers.get("cache-control")).toBe("no-store");
+        expect(await third.text()).toContain(
+          "Lista dopasowań już się przygotowuje (np. w innej karcie albo po odświeżeniu strony) " +
+            "— poczekaj kilka sekund i spróbuj ponownie.",
+        );
+        // Refused before the queue: the waiting request and the count are unchanged.
+        expect(server.matchesWaiting).toBe(1);
+        expect(await stillPending(second)).toBe(true);
+
+        const fromOther = fetch(`${url}/dopasowania`, { headers: { cookie: other.cookie } });
+        await waitForWaiters(server, 2);
+        expect(server.matchesSessions).toBe(2);
+
+        lock.resume();
+        await lock.done;
+        for (const response of [await first, await second, await fromOther]) {
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain("Oświetlenie parku");
+        }
+        // Every entry is gone once its requests ended; the session may ask again.
+        expect(server.matchesSessions).toBe(0);
+        expect((await fetch(`${url}/dopasowania`, { headers: { cookie } })).status).toBe(200);
+        expect(server.matchesSessions).toBe(0);
+      });
+
+      it("frees a session's place when its request was refused with 503", async () => {
+        const gated = await gatedServer({ matchesMaxWaitMs: 200 });
+        try {
+          const { cookie } = await login();
+          const lock = lockOpportunities();
+          const lockPid = await lock.pid;
+          const first = fetch(`${gated.url}/dopasowania`, { headers: { cookie } });
+          await waitUntilBlockedBy(schema.db, lockPid);
+          // Two waits run out in turn: each frees its place, so no 429 follows.
+          for (let round = 0; round < 2; round++) {
+            const timedOut = await fetch(`${gated.url}/dopasowania`, { headers: { cookie } });
+            expect(timedOut.status).toBe(503);
+          }
+          expect(gated.server.matchesSessions).toBe(1);
+          lock.resume();
+          await lock.done;
+          expect((await first).status).toBe(200);
+          expect(gated.server.matchesSessions).toBe(0);
         } finally {
           await gated.server.close();
         }

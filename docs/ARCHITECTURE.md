@@ -66,6 +66,7 @@ src/
 │   ├── db/                 # pula pg + Kysely, migracje, repozytoria, mapowanie błędów [PR-01]
 │   │                       # advisory-lock.ts: sesyjny advisory lock (ingest, digest) [PR-05]
 │   │                       # access-repository.ts: tokeny dostępu, sesje        [PR-06A]
+│   │                       # status-repository.ts, maintenance-repository.ts     [PR-07A]
 │   └── http/               # SafeHttpClient: polityka URL/IP, retry, limity      [PR-02]
 ├── domain/                 # typy + schematy zod: Source, Opportunity, CompanyProfile [PR-01]
 │                           # vocabulary.ts: kategorie MVP, 16 województw (D-023) [PR-04]
@@ -80,9 +81,12 @@ src/
 ├── notifications/          # digest.ts (szablon, czysty), sender.ts (outbox/SMTP), [PR-05]
 │                           # run.ts (wybór ofert, idempotencja, blokada digest; D-024)
 │                           # candidates.ts: kandydaci i dopasowanie (digest + web) [PR-06B]
+├── operations/             # status.ts (raport i alert operatora, czysty),      [PR-07A]
+│                           # backup.ts (pg_dump/pg_restore jako procesy potomne; D-028)
 └── web/                    # serve: node:http, strony SSR, sesja, CSRF, wypis  [PR-06A]
                             # server.ts, pages.ts, session.ts, links.ts, multipart.ts
                             # profile-form.ts: formularz profilu, polskie błędy  [PR-06B]
+.github/workflows/ci.yml   # CI: pnpm check z PostgreSQL 16 (wymagane testy z bazą) [PR-07A]
 tests/
 ├── *.test.ts               # unit / smoke                                           [PR-00]
 ├── fixtures/<source>/      # prawdziwe odpowiedzi źródeł + README (pseudonimizacja) [PR-02]
@@ -110,6 +114,9 @@ z jednym wyjątkiem (D-023): może importować czyste helpery `sources/normalize
 dopasowanie — te same reguły co digest) oraz czyste `digest.ts` (`digestItemView`,
 `digestOrder`, `plural`), a z `sources` tylko czysty `normalize/warsaw-time.ts`; nic z
 `sender.ts` ani `run.ts` — proces `serve` nigdy nie wysyła e-maili.
+`operations` (PR-07A) czyta przez własne repozytoria (`status-repository.ts`,
+`maintenance-repository.ts`) i bierze z `notifications/run.ts` tylko stałe (`DIGEST_LOCK_KEY`,
+`DIGEST_MAX_ATTEMPTS`); alert wysyła `cli` przez `notifications/sender.ts`.
 
 ### Warstwa bazy danych (PR-01)
 
@@ -559,7 +566,17 @@ D-027 (ekrany klienta, zmiana e-maila, login-CSRF).
   najwyżej jedną listę naraz (`MatchesSlot` z `matches-slot.ts` w `ServerState`): kolejne żądanie
   czeka w kolejce FIFO (najwyżej 8 żądań, najwyżej 3 s; po zwolnieniu miejsce przechodzi wprost na
   najstarsze), pełna kolejka albo upływ czasu → 503 `matchesBusyPage` z `Retry-After: 5`; rozłączony
-  czekający wypada z kolejki bez liczenia; zwolnienie w `finally` (D-027).
+  czekający wypada z kolejki bez liczenia; zwolnienie w `finally` (D-027). Jedna sesja ma naraz
+  najwyżej 2 żądania `/dopasowania` w toku albo w kolejce (`MATCHES_MAX_PER_SESSION`, licznik po
+  id sesji w `ServerState`, nigdy po tokenie z ciasteczka); trzecie → od razu 429
+  `matchesTooManyPage` z `Retry-After: 5`, bez kolejki (PR-07A, D-028).
+- `Strict-Transport-Security: max-age=31536000` (bez `includeSubDomains` i `preload`) na każdej
+  odpowiedzi, gdy `PUBLIC_BASE_URL` to `https://`; przy `http://` (tylko loopback poza
+  produkcją) — brak nagłówka (PR-07A, D-028).
+- Znaki sterujące (`\p{Cc}`, np. tabulator) w nazwie firmy i we wpisach list są odrzucane na
+  wejściu — w formularzu (błąd przy polu, numer wiersza) i w `profile:create` (ścieżka pola) —
+  przez `hasControlCharacter` (`domain/common.ts`). Schematy zapisanych wierszy się nie
+  zmieniają: wiersz zapisany wcześniej ze znakiem sterującym dalej się wczytuje (D-028).
 
 - `pages.ts` — czyste funkcje `→ { status, html }`, po polsku, `lang="pl"`, bez JS i stylów
   inline (CSP), każda wartość przez `escapeHtml`. `session.ts` — ciasteczko `__Host-`,
@@ -889,10 +906,64 @@ release failed`. `ingest` i `digest` nie blokują się wzajemnie.
   `{"status":"ok","tokens":…,"sessions":…}`. Kontrola schematu jak w `access:link`, bez
   `PUBLIC_BASE_URL`; nieznany profil → kod 1.
 - `digest` przy ustawionym `PUBLIC_BASE_URL` dodaje do e-maili linki (§4.5).
-- Planowany harmonogram (przykład w README; ten PR nie dodaje artefaktu cron/wdrożenia):
-  `ingest` raz dziennie ok. 06:00 Europe/Warsaw bez opcji dnia (nadrabianie: zwykle tylko
-  wczoraj UTC, dzień już zamknięty; po przerwie — pominięte dni); `digest` — rano, po
-  `ingest` (np. 07:30).
+- `status [--notify]` (PR-07A, D-028) — raport operatora, jedna linia JSON na stdout; tylko
+  odczyt, bez blokady. Kolejność kontroli: argumenty (kod 2) → konfiguracja (z `--notify`:
+  `OPERATOR_EMAIL` i zmienne e-mail jak w `digest`, kod 1) → baza. Oczekujące migracje →
+  problem `schema_not_ready`, baza nieczytelna → `database_unavailable` (stały powód + kod) —
+  raportowane i alertowane jak każdy inny problem. Reguły (`src/operations/status.ts`):
+  dla każdego włączonego źródła ostatni przebieg i ostatni koniec przebiegu `succeeded` /
+  `incomplete`; `source_failed`, gdy ostatni przebieg jest `failed` albo nieudany dzień z
+  ostatnich 36 h nie został później pokryty przebiegiem `succeeded`/`incomplete` tego źródła;
+  `source_stale` — brak takiego przebiegu od 36 h (`STATUS_STALE_AFTER_MS`); `source_never_run`;
+  `no_enabled_sources`; `deliveries_pending` — wiersze `pending`, chyba że trwa `digest`
+  (advisory lock `DIGEST_LOCK_KEY` trzymany przez inną sesję, odczyt z `pg_locks`, bez
+  blokowania); `deliveries_failed` — wiersze `failed` z dniem digestu od wczoraj (Polska),
+  osobno ponawiane (`attempts` < 3) i wyczerpane. Kod 0 bez problemu, 1 przy problemie.
+  `--notify` przy problemie wysyła jeden e-mail tekstowy (`formatOperatorAlert`: id, statusy,
+  kody, czasy, liczby; bez `List-Unsubscribe`, bez HTML) na `OPERATOR_EMAIL` przez transport
+  `EMAIL_MODE`, z ponowieniami jak w `digest`; przy każdym uruchomieniu, dopóki problem
+  trwa (bez stanu „już zgłoszono”); nieudana wysyłka → kod 1 (`notification: "failed"`).
+  Nieoczekiwany błąd samego `status` (błąd programu) → stały komunikat wewnętrzny i kod 1;
+  z `--notify` najpierw alert z samym kodem `status_internal_error` (bez treści błędu).
+- `backup <dir>`, `restore <file>` (PR-07A, D-028) — `pg_dump`/`pg_restore` (klient ≥ 16) jako
+  procesy potomne bez powłoki (`execFile`-style: tablica argumentów), ze świeżym środowiskiem
+  (`PATH`, `HOME`, `PGPASSWORD`, `PGCONNECT_TIMEOUT=10`, `PGAPPNAME`, `LC_ALL=C`) i limitem
+  czasu. Wszystkie ustawienia połączenia muszą być w `DATABASE_URL`: niepusta zmienna
+  `PGHOST`, `PGHOSTADDR`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGOPTIONS`,
+  `PGSSLMODE` lub `PGSSLNEGOTIATION` (`PG_CONNECTION_ENV_VARS`; `pg` by jej użył, narzędzia
+  nie) → odmowa `unsupported_database_url` z nazwą zmiennej, przed odczytem bazy. `DATABASE_URL` → conninfo libpq **bez hasła**
+  w `--dbname`, hasło tylko w `PGPASSWORD` dziecka; TLS odwzorowany tak, by nigdy nie był
+  słabszy niż w `pg`; nieprzekładalny parametr → `unsupported_database_url`. Schemat = bieżący
+  schemat połączenia (jak migracje). `backup`: `--format=custom --no-owner --no-acl
+--schema=<schemat>` do pliku tymczasowego `0600` (`wx`) w `<dir>`, `fsync`, `link` do
+  `radar-<RRRRMMDDTGGMMSSZ>.dump` (nigdy nie zastępuje pliku); przy błędzie nic nie zostaje.
+  `restore`: tylko do istniejącego schematu bez żadnej relacji; `--single-transaction
+--exit-on-error --no-owner --no-acl`; potem kontrola migracji jak `health` i liczby wierszy
+  tabel. stderr narzędzi nigdy nie jest wypisywany — mapowany na stały powód
+  (`tool_not_found`, `version_mismatch`, `authentication_failed`, `unreachable`, `timeout`,
+  `tool_failed`, …) i kod wyjścia.
+- Harmonogram (przykład w README i `docs/RUNBOOK.md`; repozytorium nie zawiera artefaktu
+  cron/wdrożenia): `ingest` raz dziennie ok. 06:00 Europe/Warsaw bez opcji dnia (nadrabianie:
+  zwykle tylko wczoraj UTC, dzień już zamknięty; po przerwie — pominięte dni);
+  `status --notify` po nim (np. 06:30); `digest` — rano, po `ingest` (np. 07:30);
+  `status --notify` po nim (np. 07:45).
+
+### Limity czasu i ponowienia
+
+Wszystkie limity są stałymi w kodzie (nie w konfiguracji). Ponowienia są ograniczone; nic
+nie ponawia się w nieskończoność.
+
+| Miejsce                                       | Limit czasu                                                                                              | Ponowienia                                                                                                                                        |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SafeHttpClient` (źródła)                     | połączenie + TLS 10 s, jedna wymiana (DNS, nagłówki, całe ciało) 30 s; ciało ≤ 5 MiB                     | najwyżej 2 (429/502/503/504, zerwane połączenie), backoff 1 s·2ⁿ z jitterem, `Retry-After` ≤ 60 s; ≥ 2 s między żądaniami hosta; budżet 10 błędów |
+| `source:preview`                              | 5 min na przebieg                                                                                        | — (tylko klient HTTP)                                                                                                                             |
+| `ingest`                                      | 10 min na źródło i dzień                                                                                 | nieudany dzień — następne uruchomienie (nadrabianie, D-021); po 2 nieudanych pierwszych dniach źródła reszta `notRun`                             |
+| Pula PostgreSQL (`database.ts`)               | połączenie 5 s, `statement_timeout` 30 s (+ 35 s po stronie klienta), bezczynne 10 s, keepalive TCP 10 s | brak (komenda kończy się kodem 1)                                                                                                                 |
+| Blokady ingest/digest                         | sprawdzanie połączenia co 5 s                                                                            | brak — utrata blokady przerywa przebieg                                                                                                           |
+| SMTP (`digest`, `status --notify`)            | połączenie 10 s, powitanie 10 s, gniazdo 30 s, DNS 10 s                                                  | chwilowe błędy: najwyżej 2 w przebiegu (po 2 s i 10 s); `failed` — kolejne uruchomienia do 3 prób na ofertę; `uncertain` nigdy                    |
+| `serve`                                       | nagłówki 10 s, żądanie 15 s, keep-alive 5 s, zamknięcie po SIGTERM ≤ 10 s                                | —                                                                                                                                                 |
+| `/dopasowania`                                | czekanie w kolejce ≤ 3 s (≤ 8 czekających) → 503; ≤ 2 żądania na sesję → 429                             | — (klient ponawia po `Retry-After: 5`)                                                                                                            |
+| `pg_dump` / `pg_restore` (`backup`/`restore`) | 30 min, potem SIGTERM, po 5 s SIGKILL; połączenie 10 s (`PGCONNECT_TIMEOUT`)                             | brak                                                                                                                                              |
 
 ## 7. Obserwowalność
 
@@ -925,4 +996,11 @@ linii `http request`, bo odpowiedź nie powstała), start i zatrzymanie
 (`web server listening` z hostem i portem, `web server stopping`, `web server stopped`) oraz
 sprzątanie (`access cleanup` — liczby usuniętych wierszy, `access cleanup failed`) — nigdy
 URL-a (tokeny), ciasteczek, nagłówków, treści formularzy, adresu klienta ani danych profilu.
-Alerting/deployment: PR-07.
+`status` (PR-07A) loguje `status checked` (`status`, liczba problemów, `notification`,
+`errorCode` nieudanej wysyłki), a przy problemie pisze na stderr
+`Status: problem (<kody>); see docs/RUNBOOK.md.`; jego wynik na stdout zawiera tylko id,
+statusy, kody, czasy i liczby. Alert operatora (`status --notify`) niesie to samo w tekście po
+polsku i odsyła do `docs/RUNBOOK.md` → „Alert statusu”. `backup`/`restore` wypisują ścieżkę
+pliku, rozmiar, schemat i liczby tabel/wierszy, a błąd jako stały powód + kod wyjścia
+narzędzia — nigdy stderr narzędzia, conninfo ani hasła. Wdrożenie (hosting, proxy, systemd):
+PR-07B.

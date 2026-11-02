@@ -1,0 +1,69 @@
+# CI (PR-07A, D-028): the same `pnpm check` as locally, with the PostgreSQL
+# integration tests required (a missing database or missing pg_dump/pg_restore
+# fails the run instead of skipping). Actions are pinned to commit SHAs.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: radar
+          POSTGRES_PASSWORD: radar
+          POSTGRES_DB: radar_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U radar -d radar_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The version comes from `packageManager` in package.json.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # pg_dump/pg_restore for the backup/restore test: at least the server's major (16).
+      - name: Install the PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          for tool in pg_dump pg_restore; do
+            version="$("$tool" --version)"
+            echo "$version"
+            major="$(echo "$version" | sed -E 's/.*\(PostgreSQL\) ([0-9]+).*/\1/')"
+            if [ "$major" -lt 16 ]; then
+              echo "::error::$tool $major is older than the PostgreSQL 16 server"
+              exit 1
+            fi
+          done
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm check
+        env:
+          CI: "true"
+          REQUIRE_DB_TESTS: "1"
+          TEST_DATABASE_URL: postgres://radar:radar@localhost:5432/radar_test

@@ -16,6 +16,16 @@ export function isWellFormedText(value: string): boolean {
 }
 
 /**
+ * True when the string holds a control character (\p{Cc}: C0, DEL, C1 —
+ * tab and line breaks too). Profile entries typed by people are refused with
+ * one at input (the form, profile:create; D-028); the stored-row schemas stay
+ * as they are, so rows written before keep reading.
+ */
+export function hasControlCharacter(value: string): boolean {
+  return /\p{Cc}/u.test(value);
+}
+
+/**
  * Required text: trimmed, at least one character, bounded length, well-formed
  * Unicode. An empty or whitespace-only string is rejected rather than stored:
  * a missing value is `null` (via `.nullable()`), never `""`.

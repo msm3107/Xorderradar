@@ -323,3 +323,18 @@ export function loadPublicBaseUrl(
   if (!result.success) throw configError("Invalid web configuration", result.error);
   return result.data.PUBLIC_BASE_URL ?? null;
 }
+
+/**
+ * OPERATOR_EMAIL: where `status --notify` sends its alert (PR-07A, D-028); one
+ * plain address. Null when unset (only `status --notify` requires it).
+ * Invalid → ConfigError naming the variable only.
+ */
+export function loadOperatorEmail(
+  env: Readonly<Record<string, string | undefined>>,
+): string | null {
+  const result = z
+    .object({ OPERATOR_EMAIL: z.email().max(254).optional() })
+    .safeParse(nonEmptyEnv(env));
+  if (!result.success) throw configError("Invalid e-mail configuration", result.error);
+  return result.data.OPERATOR_EMAIL ?? null;
+}

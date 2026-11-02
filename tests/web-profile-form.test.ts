@@ -149,6 +149,43 @@ describe("validateProfileForm", () => {
     });
   });
 
+  it("refuses control characters (a pasted tab) in the name and in every list entry", () => {
+    expect(
+      errorsOf(
+        values({
+          name: "Jan\tKowalski",
+          counties: "warszawski zachodni\npiase\u0000czyński",
+          includeKeywords: "oświetlenie\n\nlatarnie\tuliczne",
+          excludeKeywords: "paliwo\u0085",
+        }),
+      ),
+    ).toEqual({
+      name: ["Nazwa firmy zawiera znaki sterujące (np. tabulator) — wpisz wartość ponownie."],
+      counties: [
+        "Wiersz 2: wpis zawiera znaki sterujące (np. tabulator) — wpisz wartość ponownie.",
+      ],
+      includeKeywords: [
+        "Wiersz 3: wpis zawiera znaki sterujące (np. tabulator) — wpisz wartość ponownie.",
+      ],
+      excludeKeywords: [
+        "Wiersz 1: wpis zawiera znaki sterujące (np. tabulator) — wpisz wartość ponownie.",
+      ],
+    });
+    // A control character only around an entry is trimmed away, as before.
+    expect(
+      validateProfileForm(
+        values({ name: "\tJan Kowalski\t", includeKeywords: "\toświetlenie" }),
+        CURRENT,
+      ).ok,
+    ).toBe(true);
+    // An entry that is only a control character gets one message, not also the county one.
+    expect(errorsOf(values({ counties: "\u0001" }))).toEqual({
+      counties: [
+        "Wiersz 1: wpis zawiera znaki sterujące (np. tabulator) — wpisz wartość ponownie.",
+      ],
+    });
+  });
+
   it("shows at most five messages per field and counts the rest", () => {
     const bad = (count: number) => Array.from({ length: count }, () => "---").join("\n");
     const six = errorsOf(values({ includeKeywords: bad(6) })).includeKeywords;

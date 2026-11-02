@@ -23,7 +23,11 @@ import type {
   SkippedRow,
 } from "../src/infrastructure/db/opportunities-repository.js";
 import { MVP_CATEGORIES } from "../src/domain/vocabulary.js";
-import { formatWarsawMinute, PROFILE_FILE_MAX_BYTES } from "../src/profile-commands.js";
+import {
+  formatWarsawMinute,
+  PROFILE_FILE_MAX_BYTES,
+  profileWarnings,
+} from "../src/profile-commands.js";
 
 // Unit tests of profile:create, profile:show and match:preview with a stub
 // database. Pseudonymised data only (kontakt@example.invalid, Jan Kowalski).
@@ -197,19 +201,29 @@ describe("profile:create", () => {
     expect(result.stderr).not.toContain("kontakt@example.invalid");
   });
 
+  // PR-07A: profile:create now refuses a control character in a keyword
+  // (D-028), so the cleaning of the warning is checked on profileWarnings
+  // itself (a profile stored before could still hold one); the CLI part keeps
+  // the five-and-a-count with plain keywords.
   it("names at most five short keywords, cleaned", async () => {
     const file = await profileFile(
       "short-many.json",
       JSON.stringify({
         ...validInput,
-        includeKeywords: ["ab\u001b[2J", "bc", "cd", "de", "ef", "fg", "gh"],
+        includeKeywords: ["ab", "bc", "cd", "de", "ef", "fg", "gh"],
       }),
     );
     const result = await run(["profile:create", file]);
     expect(result.code).toBe(ExitCode.Ok);
-    expect(result.stderr).not.toContain("\u001b");
-    expect(result.stderr).toContain(": „ab [2J”, „bc”, „cd”, „de”, „ef” (+2 more). Jeśli");
+    expect(result.stderr).toContain(": „ab”, „bc”, „cd”, „de”, „ef” (+2 more). Jeśli");
     expect(result.stderr.split("\n")).toHaveLength(2);
+
+    const warnings = profileWarnings({
+      ...validInput,
+      includeKeywords: ["ab\u001b[2J", "bc", "cd", "de", "ef", "fg", "gh"],
+    }).join("\n");
+    expect(warnings).not.toContain("\u001b");
+    expect(warnings).toContain(": „ab [2J”, „bc”, „cd”, „de”, „ef” (+2 more). Jeśli");
   });
 
   it("prints no warning for a profile with voivodeships and inflectable keywords", async () => {
@@ -389,6 +403,36 @@ describe("profile:create", () => {
     const result = await run(["profile:create", file]);
     expect(result.code).toBe(ExitCode.Usage);
     expect(result.stderr).toBe("Invalid profile: counties.1 (not a county name).\n");
+  });
+
+  it("rejects control characters in the name and list entries, naming the paths only", async () => {
+    const file = await profileFile(
+      "control.json",
+      JSON.stringify({
+        ...validInput,
+        name: "Jan\tKowalski",
+        counties: ["piaseczyński", "\u0001"],
+        includeKeywords: ["oświetlenie", "latarnie\nuliczne"],
+        excludeKeywords: ["paliwo\u007f"],
+      }),
+    );
+    const result = await run(["profile:create", file]);
+    expect(result.code).toBe(ExitCode.Usage);
+    expect(result.stderr).toBe(
+      "Invalid profile: name, counties.1, includeKeywords.1, excludeKeywords.0 (control character).\n",
+    );
+    expect(result.stderr).not.toContain("Kowalski");
+  });
+
+  it("still trims control characters around a value, as before", async () => {
+    const file = await profileFile(
+      "trimmed.json",
+      JSON.stringify({ ...validInput, name: "\tJan Kowalski\n" }),
+    );
+    const result = await run(["profile:create", file]);
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(result.calls.created).toHaveLength(1);
+    expect(result.calls.created[0]?.name).toBe("Jan Kowalski");
   });
 
   it("rejects a file that is not a profile object", async () => {

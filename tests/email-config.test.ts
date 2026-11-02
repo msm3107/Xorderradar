@@ -3,6 +3,7 @@ import {
   ConfigError,
   DEFAULT_EMAIL_OUTBOX_DIR,
   loadEmailConfig,
+  loadOperatorEmail,
   TEST_EMAIL_FROM,
 } from "../src/infrastructure/config.js";
 
@@ -147,5 +148,33 @@ describe("loadEmailConfig", () => {
     expect(errorMessage({ EMAIL_OUTBOX_DIR: "out\0box" })).toBe(
       "Invalid e-mail configuration: EMAIL_OUTBOX_DIR",
     );
+  });
+});
+
+describe("loadOperatorEmail (status --notify, PR-07A)", () => {
+  it("is null when unset or empty", () => {
+    expect(loadOperatorEmail({})).toBeNull();
+    expect(loadOperatorEmail({ OPERATOR_EMAIL: "" })).toBeNull();
+  });
+
+  it("returns a valid address", () => {
+    expect(loadOperatorEmail({ OPERATOR_EMAIL: "operator@example.invalid" })).toBe(
+      "operator@example.invalid",
+    );
+  });
+
+  it.each([
+    "operator",
+    "operator@example.invalid\r\nBcc: x@example.invalid",
+    `${"a".repeat(250)}@example.invalid`,
+  ])("refuses %j, naming only the variable", (value) => {
+    let caught: unknown;
+    try {
+      loadOperatorEmail({ OPERATOR_EMAIL: value });
+    } catch (error: unknown) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ConfigError);
+    expect((caught as ConfigError).message).toBe("Invalid e-mail configuration: OPERATOR_EMAIL");
   });
 });

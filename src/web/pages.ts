@@ -648,6 +648,21 @@ export function matchesBusyPage(): Page {
   };
 }
 
+/** 429: this session already has MATCHES_MAX_PER_SESSION /dopasowania requests in progress. */
+export function matchesTooManyPage(): Page {
+  return {
+    status: 429,
+    html: layout("Pasujące zamówienia", [
+      paragraph(
+        "Lista dopasowań już się przygotowuje (np. w innej karcie albo po odświeżeniu " +
+          "strony) — poczekaj kilka sekund i spróbuj ponownie.",
+      ),
+      `<p>${link("/dopasowania", "Spróbuj ponownie")}</p>`,
+      backLinks(),
+    ]),
+  };
+}
+
 /** GET /wypis/<token>: confirms; only the POST (the RFC 8058 body) unsubscribes. */
 export function unsubscribeConfirmPage(token: string, profileName: string): Page {
   return {
