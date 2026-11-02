@@ -99,7 +99,7 @@ describe("pages", () => {
     for (const page of [
       homePage(),
       errorPage(404),
-      profilePage({ name: "X", active: true }, "c"),
+      profilePage({ name: "X", email: "kontakt@example.invalid", active: true }, "c"),
     ]) {
       expect(page.html).toContain('<html lang="pl">');
       expect(page.html).not.toMatch(/<script|\sstyle=|<style|\son[a-z]+=/i);
@@ -108,7 +108,10 @@ describe("pages", () => {
   });
 
   it("escape the profile name and use real buttons in POST forms", () => {
-    const page = profilePage({ name: `<img src=x onerror="alert(1)">&'`, active: true }, 'c&"');
+    const page = profilePage(
+      { name: `<img src=x onerror="alert(1)">&'`, email: "kontakt@example.invalid", active: true },
+      'c&"',
+    );
     expect(page.html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;&amp;&#39;");
     expect(page.html).not.toContain("<img");
     expect(page.html).toContain('value="c&amp;&quot;"');
@@ -118,7 +121,10 @@ describe("pages", () => {
   });
 
   it("offer no unsubscribe form for an inactive profile", () => {
-    const page = profilePage({ name: "Jan Kowalski", active: false }, "c");
+    const page = profilePage(
+      { name: "Jan Kowalski", email: "kontakt@example.invalid", active: false },
+      "c",
+    );
     expect(page.html).toContain("wyłączone");
     expect(page.html).not.toContain("/profil/wypisz");
     expect(page.html).toContain('action="/wyloguj"');
@@ -151,12 +157,16 @@ describe("pages", () => {
     expect(unsubscribed.html).toContain("Powiadomienia e-mail zostały wyłączone");
     expect(unsubscribed.html).toContain(`<p>${resubscribeHint}</p>`);
     // Signed in, the way back is the re-enable button itself (PR-06B), not the hint.
-    const inactive = profilePage({ name: "Jan Kowalski", active: false }, "c");
+    const inactive = profilePage(
+      { name: "Jan Kowalski", email: "kontakt@example.invalid", active: false },
+      "c",
+    );
     expect(inactive.html).toContain('action="/profil/wlacz"');
     expect(inactive.html).not.toContain(resubscribeHint);
-    expect(profilePage({ name: "Jan Kowalski", active: true }, "c").html).not.toContain(
-      resubscribeHint,
-    );
+    expect(
+      profilePage({ name: "Jan Kowalski", email: "kontakt@example.invalid", active: true }, "c")
+        .html,
+    ).not.toContain(resubscribeHint);
   });
 });
 

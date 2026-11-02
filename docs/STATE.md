@@ -8,7 +8,12 @@ e-mail change with access revocation, matches list with reasons, „Włącz pono
 a login; M-2 `/dopasowania` blocked the process; L-1–L-3) → fix round → C&S PASS (L-a stall per
 200-offer chunk) → time-budget yield → C&S PASS → Quality REJECT (counties hint misleading) →
 copy round → C&S PASS → Quality ACCEPT (should-fix: counties note wording) → final copy round →
-C&S PASS. PR opened for the owner's review. Not merged.
+C&S PASS. PR #11 opened for the owner's review. Owner review of 84adc33: PASS, no blockers,
+3 QoL asks (`/dopasowania` 503 under normal load, long list, show the address after a change) →
+owner round (FIFO wait queue, compact cards, address line on `/profil`) → C&S PASS (L-1 closed
+client with a free slot) → fix → C&S PASS → Quality ACCEPT (Medium: location hidden, deviation
+from the owner's ask not recorded) → fix → C&S PASS → Quality ACCEPT. Pushed for the owner's
+re-review. Not merged.
 
 ## Completed
 
@@ -532,23 +537,39 @@ list, login-CSRF); D-025 amended (`Referrer-Policy: strict-origin`).
 - `/dopasowania`: same rules as the digest (`src/notifications/candidates.ts`: 7 days, 10 000
   candidates), ≤ 50 offers, soonest deadline first, reasons and source link; includes offers
   already e-mailed (stated on the page). `matchingItems` yields after ~20 ms of work (worst
-  event-loop stall measured ≤ 73 ms with a maximal profile and 5 000 candidates); one computation
-  per process, a concurrent request gets 503 + `Retry-After: 5`.
+  event-loop stall measured ≤ 73 ms with a maximal profile and 5 000 candidates). One computation
+  per process (`src/web/matches-slot.ts`, owner round): a concurrent request waits in a FIFO
+  queue (≤ 8 waiters, ≤ 3 s, slot handed straight to the oldest waiter); a full queue or a timed
+  out wait gets 503 + `Retry-After: 5`; a waiter whose client disconnects leaves the queue and
+  nothing is computed for it; no result cache (D-027). Compact cards: title, buyer, location,
+  deadline, reasons and source link visible; publication date, category, description and
+  contact inside `<details>` („Szczegóły ogłoszenia”, no JS).
+- `/profil` always shows „Adres powiadomień” (escaped, from the DB via `getProfileStatus`); after
+  an e-mail change the notice asks to check it. The old address is not shown (it would have to
+  travel in a cookie, URL or column; D-027 rejected alternatives).
 - Digest: short HTML link texts „Otwórz swój profil” / „Wypisz się z powiadomień”; tokens issued
   only while the profile still has the address being sent to (`issueDigestTokens`), else status
   `address_changed` (exit 0, next run sends to the new address).
 - One-shot notice cookie `__Host-radar_komunikat` (Max-Age 60, closed list of values).
-- No new dependencies, tables or migrations. 1640 tests (PR-06A: 1526).
+- No new dependencies, tables or migrations. 1658 tests (PR-06A: 1526).
 - Reviews: C&S PASS (M-1 deadlock reproduced as 40P01 → 500; M-2 `/dopasowania` blocked other
   requests ~5 s; L-1 missing csrf → 400; L-2 kept session not re-checked; L-3 digest tokens after
   an address change) → fix round → C&S PASS (live probe: no 40P01; L-a 200-offer chunk ~0.4 s) →
   time-budget yield → C&S PASS (stall 690 → ≤ 73 ms) → Quality REJECT (counties hint: a county
   alone empties the list silently; bare „powiat” accepted) → copy round → C&S PASS → Quality
   ACCEPT (should-fix: counties note by voivodeship selection) → final copy round → C&S PASS.
-- Owner decisions open: e-mail change without verifying the new address; the duplicate-address
-  error tells a signed-in customer that the address is registered; last write wins; clients
-  without `Origin`/`Sec-Fetch-Site` cannot submit forms; `/dopasowania` shows already e-mailed
-  offers; one `/dopasowania` slot per process shared by all customers.
+- Owner review of 84adc33 (PR #11): PASS, no blockers; tested in real Chromium (Playwright) with
+  500 real BZP offers. Accepted: e-mail change without verifying the new address, the
+  duplicate-address message, very old browsers without `Origin`/`Sec-Fetch-Site`. QoL asks done
+  in the owner round above. Owner-round reviews: C&S PASS (L-1 a closed client got the free slot
+  → fixed; L-2 one session can fill the queue → PR-07; L-3 `CARD_LABELS` tied to digest label
+  strings → follow-up) → C&S PASS → Quality ACCEPT (live: 2 parallel requests both 200 in
+  0.54/0.91 s; heavy 5.8 s computation → waiters 503 after ~3.07 s, the 9th at once; Medium:
+  location hidden in `<details>`, old-address deviation not documented) → fix → C&S PASS →
+  Quality ACCEPT. The PR-06A assertion `/profil` `not.toContain(EMAIL)` was replaced (owner
+  requirement) by a stricter one: the address appears exactly once, inside the address line.
+- Owner decisions open: last write wins; `/dopasowania` shows already e-mailed offers; one
+  `/dopasowania` slot per process shared by all customers (now with a bounded wait queue).
 
 ## Blockers
 
@@ -603,9 +624,9 @@ screens, e-mail change, matches list, login-CSRF); D-025 amended (`strict-origin
 
 ## Next action
 
-1. Owner reviews the PR-06B PR and decides the open items under "In progress" (e-mail change
-   without verification, duplicate-address hint, forms needing `Origin`/`Sec-Fetch-Site`,
-   already-sent offers on `/dopasowania`, the shared `/dopasowania` slot). Still open from
+1. Owner re-reviews PR #11 (owner round on top of 84adc33) and decides the open items under
+   "In progress" (last write wins, already-sent offers on `/dopasowania`, the shared
+   `/dopasowania` slot with its wait queue). Still open from
    PR-06A: TTLs (7/60/30 days), a self-service "e-mail me a link" form, §8.3 leniency on
    `/wypis`, forwarded digests; RESUBSCRIBE_HINT stays on the post-unsubscribe page only.
    Then PR-07 (hardening and deployment). For PR-07: runbook lines on revoking access
@@ -624,6 +645,12 @@ screens, e-mail change, matches list, login-CSRF); D-025 amended (`strict-origin
    - When a source starts providing counties, update the counties hint/note (`src/web/pages.ts`)
      and D-023/D-027.
    - Re-measure `/dopasowania` on pilot data (C&S measured 8.5–9 s for 5 000 candidates with 3.2 KB descriptions).
+   - Notify the old address after an e-mail change (needs sending from the web process; the
+     real protection against a hijacked session changing the address).
+   - Build `CARD_LABELS` (`src/web/pages.ts`) from label constants exported by the digest
+     (C&S L-3; today a renamed digest label would move that field into `<details>`).
+   - Accessibility nits (Quality Low): the repeated „Szczegóły ogłoszenia” summary label could
+     name the offer; find-in-page does not search closed `<details>` in some browsers.
      Pilot follow-ups from the owner's PR #9 review (owner to choose the PR):
    - Matching calibration (changes PR-04 scoring): in the owner's real-data run 7 of 26 offers
      matched only on a description keyword, several false positives (agricultural tractor,
@@ -829,6 +856,18 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-02, PR-06B owner round (Node 22, pnpm 10.28.0, PostgreSQL 16):
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 1658 tests passed in 47 files, DB tests included (84adc33:
+1640 in 46). No dependency changes. New: `tests/web-matches-slot.test.ts` (fake timers: FIFO
+hand-over, full queue, 3000 ms timeout, disconnect cleanup, closed client never takes the slot)
+and real-server queue tests (wait → 200, full → 503, timeout → 503, disconnect leaves the
+queue, hand-over after a failed computation). Quality probed a live `serve` with synthetic
+`@example.invalid` data (queue timings above); scratch schema dropped, no e-mail sent. One
+PR-06A assertion replaced by a stricter one (address shown exactly once on `/profil`, owner
+requirement); the old 503 test's assertions moved into the queue tests, none dropped.
+Working-tree fingerprint unchanged across every reviewer run.
 
 2026-11-02, PR-06B after the final copy round (Node 22, pnpm 10.28.0, PostgreSQL 16):
 `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`

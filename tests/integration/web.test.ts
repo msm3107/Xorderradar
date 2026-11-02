@@ -240,7 +240,10 @@ describe.skipIf(skipWithoutDatabase)("web access (PostgreSQL)", () => {
       expect(html).toContain("Jan Kowalski &lt;Elektryka&gt; &amp; syn");
       expect(html).toContain("włączone");
       expect(html).not.toContain(profile.id);
-      expect(html).not.toContain(EMAIL);
+      // The address shows once, in its own line only (PR-06B owner review); the
+      // settings form already shows it to the same session.
+      expect(html.split(EMAIL)).toHaveLength(2);
+      expect(html).toContain(`<p>Adres powiadomień: <strong>${EMAIL}</strong></p>`);
       expect(html).not.toContain(token);
       const csrf = csrfTokenFor(token);
       expect(html.match(new RegExp(`name="csrf" value="${csrf}"`, "g"))).toHaveLength(2);

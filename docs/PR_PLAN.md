@@ -353,12 +353,18 @@ SameSite=Lax`, CSRF dla formularzy. Bez haseł w MVP.
     „adres zajęty” ujawnia, że adres jest w systemie;
   - `/dopasowania` liczy dopasowanie w procesie `serve` (ok. 0,8 s przy 5 000 kandydatach i typowym
     profilu, kilkanaście sekund w najgorszym przypadku), oddając pętlę zdarzeń po każdych ok. 20 ms
-    pracy; najwyżej jedno liczenie naraz (kolejne → 503 z `Retry-After`) — limit żądań tej trasy na
+    pracy; najwyżej jedno liczenie naraz (kolejne czeka w kolejce FIFO — najwyżej 8 żądań i 3 s —
+    a przy pełnej kolejce albo po czasie dostaje 503 z `Retry-After`) — limit żądań tej trasy na
     proxy w PR-07, optymalizacja dopiero po pomiarze na danych pilota;
   - poprawki po review: kolejność blokad zmiany e-maila bez cyklu z logowaniem (było 40P01)
     i jedna ponowna próba po 40P01, ponowne sprawdzenie sesji w transakcji, CSRF przed
     walidacją formularza, digest bez linków na adres zmieniony w trakcie
     (`address_changed`);
+  - po review właściciela: krótka kolejka FIFO zamiast natychmiastowego 503 na `/dopasowania`
+    (bez cache wyników — D-027), zwarte karty dopasowań (lokalizacja widoczna, reszta pól w
+    `<details>`), adres powiadomień na `/profil`;
+  - do zrobienia później: powiadomienie na stary adres po zmianie (wymaga wysyłki z procesu
+    web);
   - bez zmian (otwarte decyzje właściciela): ważność 7/60/30 dni, brak formularza „wyślij mi
     link”, ścisły multipart RFC 2046 na `/wypis`, linki w digeście jak w PR-06A.
 

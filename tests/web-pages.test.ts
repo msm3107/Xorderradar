@@ -240,6 +240,67 @@ describe("matchesPage", () => {
     expect(html).toContain('<a href="/profil">Twój profil</a>');
   });
 
+  it("shows a compact card: the essentials at once, the other fields inside <details>", () => {
+    const full: Opportunity = {
+      ...offer,
+      description: "Wymiana opraw <LED> & słupów",
+      contact: { name: "Anna Nowak", email: "zamowienia@example.invalid" },
+    };
+    const { html } = matchesPage(view({ items: [digestItemView({ offer: full, reasons })] }));
+    expect(html).not.toMatch(NO_SCRIPT);
+    const card = /<li><article>(.*?)<\/article><\/li>/s.exec(html)?.[1] ?? "";
+    expect(card.match(/<details>/g)).toHaveLength(1);
+    const [visible = "", folded = ""] = card.split("<details>");
+
+    // At once: title, buyer, location, deadline, reasons, source link, in this order.
+    const essentials = [
+      "<h2>Modernizacja oświetlenia</h2><dl>",
+      "<dt>Zamawiający:</dt><dd>Gmina Przykładowa</dd>",
+      "<dt>Lokalizacja:</dt><dd>Przykładowo, woj. mazowieckie</dd>",
+      "<dt>Termin składania ofert:</dt><dd>2026-11-05 12:00 (czas polski)</dd>",
+      "<dt>Dlaczego pasuje:</dt><dd>",
+      '<dt>Link:</dt><dd><a href="https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/id/1" ' +
+        'rel="noopener noreferrer">Otwórz ogłoszenie w źródle (ezamowienia.gov.pl)</a></dd></dl>',
+    ];
+    const positions = essentials.map((part) => visible.indexOf(part));
+    expect(positions.every((position) => position !== -1)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+
+    // Folded: everything else, escaped, behind a native disclosure (no script).
+    expect(folded.startsWith("<summary>Szczegóły ogłoszenia</summary><dl>")).toBe(true);
+    expect(folded.endsWith("</dl></details>")).toBe(true);
+    expect(
+      folded.startsWith("<summary>Szczegóły ogłoszenia</summary><dl><dt>Data publikacji:"),
+    ).toBe(true);
+    for (const field of [
+      "<dt>Data publikacji:</dt><dd>2026-10-30</dd>",
+      "<dt>Kategoria:</dt><dd>",
+      "<dt>Opis:</dt><dd>Wymiana opraw &lt;LED&gt; &amp; słupów</dd>",
+      "<dt>Kontakt:</dt><dd>Anna Nowak, zamowienia@example.invalid</dd>",
+    ]) {
+      expect(folded).toContain(field);
+      expect(visible).not.toContain(field.slice(0, field.indexOf("</dt>")));
+    }
+  });
+
+  it("leaves a missing description and contact out of the details, as before", () => {
+    const { html } = matchesPage(view());
+    const folded = html.split("<details>")[1] ?? "";
+    expect(folded).toContain("<dt>Data publikacji:</dt>");
+    expect(html).not.toContain("<dt>Opis:</dt>");
+    expect(html).not.toContain("<dt>Kontakt:</dt>");
+  });
+
+  it("shows a missing location as not given, in the visible part", () => {
+    const nowhere: Opportunity = { ...offer, location: null };
+    const { html } = matchesPage(view({ items: [digestItemView({ offer: nowhere, reasons })] }));
+    const [visible = "", folded = ""] = html.split("<details>");
+    expect(visible).toContain(
+      "<dt>Zamawiający:</dt><dd>Gmina Przykładowa</dd><dt>Lokalizacja:</dt><dd>nie podano</dd>",
+    );
+    expect(folded).not.toContain("Lokalizacja");
+  });
+
   it("escapes a hostile title and never links a non-http(s) URL", () => {
     const hostile = {
       ...offer,
@@ -347,32 +408,82 @@ describe("matchesPage", () => {
 });
 
 describe("profile page notices", () => {
+  it("always shows the notification address, escaped", () => {
+    const { html } = profilePage(
+      { name: "Jan Kowalski", email: `o'brien&<syn>@example.invalid`, active: true },
+      "c",
+    );
+    expect(html).toContain(
+      "<p>Adres powiadomień: <strong>o&#39;brien&amp;&lt;syn&gt;@example.invalid</strong></p>",
+    );
+    expect(html).not.toContain("<syn>");
+    const inactive = profilePage(
+      { name: "Jan Kowalski", email: "kontakt@example.invalid", active: false },
+      "c",
+      "wypisano",
+    ).html;
+    expect(inactive).toContain(
+      "<p>Adres powiadomień: <strong>kontakt@example.invalid</strong></p>",
+    );
+  });
+
+  it("asks to check the new address after a change, without naming it in the notice", () => {
+    const { html } = profilePage(
+      { name: "Jan Kowalski", email: "biuro@example.invalid", active: true },
+      "c",
+      "zmieniono_email",
+    );
+    const notice = /<p class="notice" role="status">([^<]*)<\/p>/.exec(html)?.[1] ?? "";
+    expect(notice).toContain("Sprawdź poniżej, czy nowy adres jest poprawny.");
+    expect(notice).not.toContain("@");
+    expect(html.indexOf('class="notice"')).toBeLessThan(html.indexOf("Adres powiadomień:"));
+  });
+
   it("shows the notice once as a status message", () => {
-    const saved = profilePage({ name: "Jan Kowalski", active: true }, "c", "zapisano").html;
+    const saved = profilePage(
+      { name: "Jan Kowalski", email: "kontakt@example.invalid", active: true },
+      "c",
+      "zapisano",
+    ).html;
     expect(saved).toContain('<p class="notice" role="status">Zapisano zmiany profilu.</p>');
     const changed = profilePage(
-      { name: "Jan Kowalski", active: true },
+      { name: "Jan Kowalski", email: "kontakt@example.invalid", active: true },
       "c",
       "zmieniono_email",
     ).html;
     expect(changed).toContain("Adres e-mail został zmieniony");
-    expect(profilePage({ name: "Jan Kowalski", active: false }, "c", "wypisano").html).toContain(
-      "Wypisano z powiadomień.",
-    );
-    expect(profilePage({ name: "Jan Kowalski", active: true }, "c", "wlaczono").html).toContain(
-      "Włączono powiadomienia.",
-    );
-    expect(profilePage({ name: "Jan Kowalski", active: true }, "c").html).not.toContain(
-      'class="notice"',
-    );
+    expect(
+      profilePage(
+        { name: "Jan Kowalski", email: "kontakt@example.invalid", active: false },
+        "c",
+        "wypisano",
+      ).html,
+    ).toContain("Wypisano z powiadomień.");
+    expect(
+      profilePage(
+        { name: "Jan Kowalski", email: "kontakt@example.invalid", active: true },
+        "c",
+        "wlaczono",
+      ).html,
+    ).toContain("Włączono powiadomienia.");
+    expect(
+      profilePage({ name: "Jan Kowalski", email: "kontakt@example.invalid", active: true }, "c")
+        .html,
+    ).not.toContain('class="notice"');
   });
 
   it("links to the matches and the settings, and offers re-enabling when inactive", () => {
-    const active = profilePage({ name: "Jan Kowalski", active: true }, "c").html;
+    const active = profilePage(
+      { name: "Jan Kowalski", email: "kontakt@example.invalid", active: true },
+      "c",
+    ).html;
     expect(active).toContain('<a href="/dopasowania">Pasujące zamówienia</a>');
     expect(active).toContain('<a href="/profil/ustawienia">Ustawienia profilu</a>');
     expect(active).not.toContain("/profil/wlacz");
-    const inactive = profilePage({ name: "Jan Kowalski", active: false }, 'c"').html;
+    const inactive = profilePage(
+      { name: "Jan Kowalski", email: "kontakt@example.invalid", active: false },
+      'c"',
+    ).html;
     expect(inactive).toContain(
       '<form method="post" action="/profil/wlacz"><input type="hidden" name="csrf" value="c&quot;">' +
         '<button type="submit">Włącz ponownie powiadomienia</button></form>',

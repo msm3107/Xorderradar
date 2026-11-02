@@ -30,6 +30,7 @@ import {
 } from "../notifications/candidates.js";
 import { digestItemView, digestOrder } from "../notifications/digest.js";
 import { formatWarsawMinute } from "../sources/normalize/warsaw-time.js";
+import { createMatchesSlot, type MatchesSlot } from "./matches-slot.js";
 import { multipartBoundary, multipartFieldValues } from "./multipart.js";
 import {
   errorPage,
@@ -93,8 +94,12 @@ export const PROFILE_FORM_MAX_BYTES = 64 * 1024;
 export const PROFILE_FORM_MAX_FIELDS = 64;
 /** Matching offers shown on /dopasowania; the rest are counted (as in the digest). */
 export const MATCHES_SHOWN = 50;
-/** Retry-After of the 503 while another /dopasowania list is being computed. */
+/** Retry-After of the 503 when the wait for the /dopasowania slot is refused or runs out. */
 export const MATCHES_RETRY_AFTER_SECONDS = 5;
+/** Longest wait for the /dopasowania slot before the 503 (D-027). */
+export const MATCHES_MAX_WAIT_MS = 3000;
+/** Most requests waiting for the /dopasowania slot; one more gets the 503 at once. */
+export const MATCHES_MAX_WAITERS = 8;
 /** How often `serve` deletes expired tokens and sessions (bounded batches). */
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 /** How long `close()` waits for open requests before cutting the connections. */
@@ -366,11 +371,17 @@ export interface WebServerOptions {
   readonly port: number;
   /** Interval of the expired-row cleanup; null turns it off (tests). Default: hourly. */
   readonly cleanupIntervalMs?: number | null;
+  /** Longest wait for the /dopasowania slot (tests). Default: MATCHES_MAX_WAIT_MS. */
+  readonly matchesMaxWaitMs?: number;
+  /** Most requests waiting for the /dopasowania slot (tests). Default: MATCHES_MAX_WAITERS. */
+  readonly matchesMaxWaiters?: number;
 }
 
 export interface WebServer {
   readonly host: string;
   readonly port: number;
+  /** Requests waiting for the /dopasowania slot now (tests). */
+  readonly matchesWaiting: number;
   /** Stops accepting connections, lets open requests finish (bounded), then resolves. */
   close(): Promise<void>;
 }
@@ -378,16 +389,20 @@ export interface WebServer {
 /** State one server shares between its requests. */
 interface ServerState {
   /**
-   * A /dopasowania list is being computed. Matching is CPU work in this one
-   * process (D-027): one list at a time keeps the other requests answered,
-   * a concurrent one gets 503.
+   * Matching is CPU work in this one process (D-027): one /dopasowania list
+   * at a time keeps the other requests answered; a concurrent one waits
+   * briefly in FIFO order, or gets 503.
    */
-  matchesBusy: boolean;
+  readonly matches: MatchesSlot;
 }
 
-/** The handling of one request: a reply, decided without writing anything yet. */
+/**
+ * The handling of one request: a reply, decided without writing anything yet
+ * (`res` is only watched for the client hanging up, never written here).
+ */
 async function handle(
   req: IncomingMessage,
+  res: ServerResponse,
   route: RouteMatch,
   method: Method,
   options: WebServerOptions,
@@ -439,17 +454,19 @@ async function handle(
       case "matches": {
         const session = await currentSession(req, db);
         if (session === null) return unauthenticated(req);
-        if (state.matchesBusy) {
+        const slot = await state.matches.acquire(res);
+        // A client already gone or gone while waiting: nothing computed, nothing to release.
+        if (slot === "gone") throw new RequestAbortedError();
+        if (slot !== "acquired") {
           return pageReply(matchesBusyPage(), {
             "Retry-After": String(MATCHES_RETRY_AFTER_SECONDS),
           });
         }
-        state.matchesBusy = true;
         try {
           return await matchesReply(db, session.profileId, new Date(), () => unauthenticated(req));
         } finally {
           // Also after an error; a client gone meanwhile does not stop the work.
-          state.matchesBusy = false;
+          state.matches.release();
         }
       }
       case "login":
@@ -688,7 +705,12 @@ function unauthenticated(req: IncomingMessage): Reply {
  */
 export async function startWebServer(options: WebServerOptions): Promise<WebServer> {
   const { logger } = options;
-  const state: ServerState = { matchesBusy: false };
+  const state: ServerState = {
+    matches: createMatchesSlot({
+      maxWaitMs: options.matchesMaxWaitMs ?? MATCHES_MAX_WAIT_MS,
+      maxWaiters: options.matchesMaxWaiters ?? MATCHES_MAX_WAITERS,
+    }),
+  };
 
   const server = createServer(
     {
@@ -729,23 +751,26 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         });
         return;
       }
-      handle(req, route, rawMethod as Method, options, state).then(finish, (error: unknown) => {
-        if (error instanceof RequestAbortedError) {
-          // No reply can reach the client; no access line with a made-up status.
-          logger.info("http request aborted", { route: route.name, reason: "aborted" });
-          res.destroy();
-          return;
-        }
-        logger.error("http request failed", {
-          route: route.name,
-          ...describeDatabaseFailure(error),
-        });
-        if (res.headersSent) {
-          res.destroy();
-          return;
-        }
-        finish({ ...pageReply(errorPage(500)), close: true });
-      });
+      handle(req, res, route, rawMethod as Method, options, state).then(
+        finish,
+        (error: unknown) => {
+          if (error instanceof RequestAbortedError) {
+            // No reply can reach the client; no access line with a made-up status.
+            logger.info("http request aborted", { route: route.name, reason: "aborted" });
+            res.destroy();
+            return;
+          }
+          logger.error("http request failed", {
+            route: route.name,
+            ...describeDatabaseFailure(error),
+          });
+          if (res.headersSent) {
+            res.destroy();
+            return;
+          }
+          finish({ ...pageReply(errorPage(500)), close: true });
+        },
+      );
     },
   );
   server.keepAliveTimeout = 5_000;
@@ -787,6 +812,9 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   return {
     host: address.address,
     port: address.port,
+    get matchesWaiting() {
+      return state.matches.waiting;
+    },
     close: async () => {
       if (timer !== null) clearInterval(timer);
       await new Promise<void>((resolve) => {

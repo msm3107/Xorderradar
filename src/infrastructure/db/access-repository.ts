@@ -273,6 +273,8 @@ export async function unsubscribeTokenProfileName(
 /** What a profile page shows; read directly, so a row the schema refuses still shows. */
 export interface ProfileStatus {
   readonly name: string;
+  /** The current notification address (the profile page shows it to its own session). */
+  readonly email: string;
   readonly active: boolean;
 }
 
@@ -282,7 +284,7 @@ export async function getProfileStatus(
 ): Promise<ProfileStatus | null> {
   const row = await db
     .selectFrom("company_profiles")
-    .select(["name", "active"])
+    .select(["name", "email", "active"])
     .where("id", "=", profileId)
     .executeTakeFirst();
   return row ?? null;

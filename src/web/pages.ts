@@ -1,6 +1,6 @@
 import { VOIVODESHIPS, MVP_CATEGORIES } from "../domain/vocabulary.js";
 import { escapeHtml } from "../infrastructure/html.js";
-import { plural, type DigestItemView } from "../notifications/digest.js";
+import { plural, type DigestField, type DigestItemView } from "../notifications/digest.js";
 import {
   CATEGORY_LABELS,
   FIELD_LABELS,
@@ -48,6 +48,8 @@ input[type=text],input[type=email],textarea{box-sizing:border-box;width:100%;fon
 dl{margin:0}
 dt{font-weight:bold;float:left;clear:left;margin-right:.4rem}
 dd{margin:0 0 .2rem}
+.matches details{margin:.3rem 0}
+.matches summary{cursor:pointer}
 nav p{margin:1.5rem 0}
 `;
 
@@ -198,6 +200,8 @@ export function loginRequiredPage(): Page {
 
 export interface ProfileView {
   readonly name: string;
+  /** The current notification address, read with the session's profile. */
+  readonly email: string;
   readonly active: boolean;
 }
 
@@ -206,7 +210,8 @@ const NOTICE_TEXT: Readonly<Record<Notice, string>> = {
   zapisano: "Zapisano zmiany profilu.",
   zmieniono_email:
     "Zapisano zmiany profilu. Adres e-mail został zmieniony: linki z wcześniejszych wiadomości " +
-    "przestały działać, a inne urządzenia zostały wylogowane.",
+    "przestały działać, a inne urządzenia zostały wylogowane. Sprawdź poniżej, czy nowy adres " +
+    "jest poprawny.",
   wypisano: "Wypisano z powiadomień. Nie wyślemy kolejnych wiadomości.",
   wlaczono:
     "Włączono powiadomienia. Nowe pasujące zamówienia przyjdą w najbliższej codziennej wiadomości.",
@@ -226,6 +231,8 @@ export function profilePage(
         ? []
         : [`<p class="notice" role="status">${escapeHtml(NOTICE_TEXT[notice])}</p>`]),
       `<p>Firma: <strong>${escapeHtml(profile.name)}</strong></p>`,
+      // Always the current address, so a mistyped change is visible at once.
+      `<p>Adres powiadomień: <strong>${escapeHtml(profile.email)}</strong></p>`,
       `<p>Powiadomienia: <span class="status">${
         profile.active ? "włączone" : "wyłączone"
       }</span></p>`,
@@ -500,14 +507,41 @@ function sourceLink(href: string): string {
   );
 }
 
-function matchItem(item: DigestItemView): string {
-  const fields = item.fields.map(
+/**
+ * The digest fields a match card shows at once, the place of work among them
+ * (for a whole-country profile the reasons do not name it); the others
+ * (publication date, category, description, contact) wait in its <details>.
+ */
+const CARD_LABELS: ReadonlySet<string> = new Set([
+  "Zamawiający",
+  "Lokalizacja",
+  "Termin składania ofert",
+  "Dlaczego pasuje",
+  "Link",
+]);
+
+function fieldList(fields: readonly DigestField[]): string {
+  const rows = fields.map(
     (field) =>
       `<dt>${escapeHtml(field.label)}:</dt><dd>${
         field.href === undefined ? escapeHtml(field.value) : sourceLink(field.href)
       }</dd>`,
   );
-  return `<li><article><h2>${escapeHtml(item.title)}</h2><dl>${fields.join("")}</dl></article></li>`;
+  return `<dl>${rows.join("")}</dl>`;
+}
+
+/** A compact card: the essentials, the rest behind a native <details> (no script). */
+function matchItem(item: DigestItemView): string {
+  const shown = item.fields.filter((field) => CARD_LABELS.has(field.label));
+  const folded = item.fields.filter((field) => !CARD_LABELS.has(field.label));
+  const details =
+    folded.length === 0
+      ? ""
+      : `<details><summary>Szczegóły ogłoszenia</summary>${fieldList(folded)}</details>`;
+  return (
+    `<li><article><h2>${escapeHtml(item.title)}</h2>${fieldList(shown)}${details}` +
+    "</article></li>"
+  );
 }
 
 /**

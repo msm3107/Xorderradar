@@ -41,7 +41,8 @@ podstaw (patrz `docs/DECISIONS.md` D-001).
                │                                 │
  PUBLIC SOURCE │                                 │
       │        ▼                                 ▼
-      │  sources/<adapter>  ──►  ingestion  ──►  PostgreSQL  ◄──  matching ──► notifications ──► e-mail
+      │  sources/<adapter>  ──►  ingestion  ──►  PostgreSQL  ◄──  matching ──► notifications ──►
+  e-mail
       │  fetch → extract →      fingerprint,     (opportunities,   score +      digest, idempotent
       └► normalize              dedup, upsert     profiles, ...)   explanation  delivery
                ▲
@@ -135,7 +136,8 @@ dopasowanie — te same reguły co digest) oraz czyste `digest.ts` (`digestItemV
   minął, `first_seen_at` od podanej chwili, `deadline ASC NULLS LAST, id`, limit; pominięte
   jak wyżej), `company_profiles.listActiveCompanyProfiles` (aktywne, `created_at, id`;
   nieprawidłowe wiersze w `skipped`) i `deliveries` (stan dnia profilu, stany doręczeń ofert,
-  `claimDeliveries` — rezerwacja w jednej transakcji, `markDeliveries`). PR-03A: `opportunities.ingestOpportunity` (upsert z wykrywaniem
+  `claimDeliveries` — rezerwacja w jednej transakcji, `markDeliveries`). PR-03A:
+  `opportunities.ingestOpportunity` (upsert z wykrywaniem
   zmian, zwraca `inserted`/`updated`/`unchanged`, §5) i `ingestion-runs.recordIngestionRun`
   (zapis podsumowania przebiegu, §5).
 
@@ -374,7 +376,8 @@ interface IngestionOutcome {
   licznika) reszta dni źródła w `notRun` (`consecutive_failures`, log warn), inne źródła
   działają dalej; przerwany sygnał → reszta w `notRun` (`aborted`).
 - **Przebieg źródła** (sekwencyjnie, każde izolowane): nowy klient HTTP, `signal` =
-  timeout przebiegu źródła i dnia (`AbortSignal.timeout`, CLI: 10 min, D-018) połączony z sygnałem całego
+  timeout przebiegu źródła i dnia (`AbortSignal.timeout`, CLI: 10 min, D-018) połączony z sygnałem
+  całego
   przebiegu (CLI: sygnał blokady ingest, przerywany przy jej utracie, D-019); `adapter.fetch`
   w trybie `onDocument`, każdy dokument od razu: `extract` → `normalize` → ponowna walidacja
   kandydata → `fingerprint`/`contentHash` → `ingestOpportunity`; zmiana ogłoszenia
@@ -548,12 +551,15 @@ D-027 (ekrany klienta, zmiana e-maila, login-CSRF).
 - Strona dopasowań (`/dopasowania`): `readDigestCandidates` + `matchingItems` (jak digest),
   kolejność `digestOrder` (najbliższy termin), najwyżej 50 (`MATCHES_SHOWN`) + „I N
   kolejnych…”, pola jak w e-mailu (`digestItemView`), link do źródła tylko `http(s)` z
-  `rel="noopener noreferrer"`. Pusty stan objaśnia okno 7 dni; profil nieaktywny dostaje
-  notkę; wiersz profilu odrzucany przez schemat → prośba o poprawkę w ustawieniach. Koszt:
-  liczone na żądanie w procesie `serve`; `matchingItems` oddaje pętlę zdarzeń po ok. 20 ms pracy
-  (`MATCH_YIELD_AFTER_MS`),
-  a serwer liczy najwyżej jedną listę naraz (`ServerState.matchesBusy`; kolejne żądanie →
-  503 `matchesBusyPage` z `Retry-After: 5`, zwolnienie w `finally`) (D-027).
+  `rel="noopener noreferrer"`. Karta zwarta: zamawiający, lokalizacja, termin, „Dlaczego
+  pasuje” i link od razu, pozostałe pola w `<details>` „Szczegóły ogłoszenia” (bez JS). Pusty
+  stan objaśnia okno 7 dni; profil nieaktywny dostaje notkę; wiersz profilu odrzucany przez
+  schemat → prośba o poprawkę w ustawieniach. Koszt: liczone na żądanie w procesie `serve`;
+  `matchingItems` oddaje pętlę zdarzeń po ok. 20 ms pracy (`MATCH_YIELD_AFTER_MS`), a serwer liczy
+  najwyżej jedną listę naraz (`MatchesSlot` z `matches-slot.ts` w `ServerState`): kolejne żądanie
+  czeka w kolejce FIFO (najwyżej 8 żądań, najwyżej 3 s; po zwolnieniu miejsce przechodzi wprost na
+  najstarsze), pełna kolejka albo upływ czasu → 503 `matchesBusyPage` z `Retry-After: 5`; rozłączony
+  czekający wypada z kolejki bez liczenia; zwolnienie w `finally` (D-027).
 
 - `pages.ts` — czyste funkcje `→ { status, html }`, po polsku, `lang="pl"`, bez JS i stylów
   inline (CSP), każda wartość przez `escapeHtml`. `session.ts` — ciasteczko `__Host-`,
@@ -566,7 +572,8 @@ D-027 (ekrany klienta, zmiana e-maila, login-CSRF).
   `deactivateProfile`, `activateProfile`, `unsubscribeWithToken`,
   `unsubscribeTokenProfileName`, `getProfileStatus`, `revokeOtherAccess`,
   `deleteExpiredAccess`) i `company-profiles-repository.ts` (`getProfileSettings`,
-  `updateProfileSettings`, `getCompanyProfile`). Strona profilu czyta tylko `name` i `active`,
+  `updateProfileSettings`, `getCompanyProfile`). Strona profilu czyta tylko `name`, `email`
+  (pokazywany jako „Adres powiadomień”) i `active`,
   a formularz surowe wartości (bez schematu domenowego), więc wypis i poprawka działają także
   dla wiersza, którego schemat by nie przyjął.
 - Sprzątanie wygasłych tokenów i sesji: przy starcie i co godzinę w procesie `serve`, po 1000
@@ -797,7 +804,8 @@ unikalny, `sessions_token_hash_key`, `sessions_token_hash_check`), `profile_id` 
   końcu otwiera bazę; pula jest zamykana przed zakończeniem komendy na każdej ścieżce.
 - `source:preview <sourceId> [--date YYYY-MM-DD] [--limit N]` (PR-02) — jeden ograniczony
   przebieg źródła (domyślnie wczoraj według UTC i 20 rekordów na typ ogłoszenia, maks. 500;
-  timeout przebiegu 5 min) przez nowy `SafeHttpClient`, wynik jako JSON na stdout (rekordy znormalizowane,
+  timeout przebiegu 5 min) przez nowy `SafeHttpClient`, wynik jako JSON na stdout (rekordy
+  znormalizowane,
   liczniki, odrzucenia, `incomplete`), bez zapisu. Wymaga `CRAWLER_CONTACT` (brak → kod 1,
   zanim padnie jakiekolwiek żądanie). Nie otwiera bazy, ale `DATABASE_URL` jest walidowany jak
   przy każdej komendzie (wspólna konfiguracja). Adaptery i fabryka klienta HTTP są
@@ -815,20 +823,24 @@ unikalny, `sessions_token_hash_key`, `sessions_token_hash_check`), `profile_id` 
   (PR-03A, zakresy i nadrabianie PR-03B, D-021) — pobiera i zapisuje ogłoszenia z dnia
   publikacji (`--date`), z każdego dnia zakresu (`--from/--to`, najwyżej 31 dni) albo —
   domyślnie — z niepokrytych dni z 31 kończących się wczoraj według UTC (nadrabianie; źródło
-  bez przebiegów: wczoraj) wybranych źródeł (domyślnie wszystkich włączonych w bazie), do N rekordów na typ ogłoszenia i dzień (domyślnie i maks. 1000),
-  timeout 10 min na źródło i dzień (D-018, D-021). Kolejność kontroli: argumenty (kod 2) → konfiguracja (w
+  bez przebiegów: wczoraj) wybranych źródeł (domyślnie wszystkich włączonych w bazie), do N rekordów
+  na typ ogłoszenia i dzień (domyślnie i maks. 1000),
+  timeout 10 min na źródło i dzień (D-018, D-021). Kolejność kontroli: argumenty (kod 2) →
+  konfiguracja (w
   tym `CRAWLER_CONTACT`, kod 1) → baza. Nie migruje sama (oczekujące migracje → kod 1). Wynik:
   JSON na stdout (`status`, `mode` = `date`/`range`/`catch_up`, `from`, `to`, `limit`,
   przebiegi z `publicationDate`, licznikami, `skippedReasons`, `runId`, `errorCode`, `notRun`,
   `clipped`) +
-  linia logu na przebieg. Kod 0, gdy każde źródło `succeeded` lub `incomplete`, a także gdy blokada jest
+  linia logu na przebieg. Kod 0, gdy każde źródło `succeeded` lub `incomplete`, a także gdy blokada
+  jest
   zajęta (`status: "skipped"`, nic nie uruchomiono); 1, gdy któreś `failed`, podsumowania nie
   zapisano, blokada została utracona w trakcie (`lock_lost`) albo baza niedostępna; 2 — błąd
   użycia (także źródło niewłączone w bazie).
 - **Blokada ingest (D-019):** `pg_try_advisory_lock(7206120309001)` na sesji jednego,
   dedykowanego połączenia z puli (`db.connection().execute`), zwalniana w `finally`
   (`pg_advisory_unlock`); zerwane połączenie zwalnia ją samo. Zajęta → stdout
-  `{"status":"skipped","reason":"lock_busy",…,"runs":[],"notRun":[],"clipped":[]}`, komunikat „Ingest skipped: …” na
+  `{"status":"skipped","reason":"lock_busy",…,"runs":[],"notRun":[],"clipped":[]}`, komunikat
+  „Ingest skipped: …” na
   stderr, log `ingest lock busy` (warn), kod 0, bez pobierania i bez wiersza w
   `ingestion_runs`. Połączenie z blokadą jest sprawdzane co 5 s;
   utrata → przerwanie przebiegu (`lock_lost`, log `ingest lock lost`, komunikat

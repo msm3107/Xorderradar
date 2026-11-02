@@ -311,15 +311,17 @@ PUBLIC_BASE_URL=https://radar.example.invalid node dist/main.js serve
   `Sec-Fetch-Site: same-origin`; inaczej 403). Każdy nieważny link (zużyty, wygasły,
   nieznany) daje tę samą stronę „link nieważny”.
 - **Strony klienta (PR-06B, D-027):**
-  - `/profil` — nazwa i status profilu, linki do ustawień i dopasowań, przyciski „Wypisz” /
-    „Włącz ponownie powiadomienia” (`POST /profil/wlacz`, bez operatora) i „Wyloguj”;
+  - `/profil` — nazwa, adres powiadomień i status profilu, linki do ustawień i dopasowań,
+    przyciski „Wypisz” / „Włącz ponownie powiadomienia” (`POST /profil/wlacz`, bez operatora)
+    i „Wyloguj”;
   - `/profil/ustawienia` — formularz: nazwa, e-mail (nowy adres wpisany dwa razy),
     kategorie, województwa, powiaty i słowa kluczowe (wpis w wierszu); błędy po polsku przy
     polach, po zapisie powrót na `/profil` z „Zapisano”;
   - `/dopasowania` — oferty, które pasują do profilu teraz, tymi samymi regułami co digest
     (pierwszy zapis w ostatnich 7 dniach, bez ofert po terminie), najbliższy termin pierwszy,
     najwyżej 50, z powodami dopasowania i linkiem do źródła. Pokazuje też oferty już
-    wysłane e-mailem.
+    wysłane e-mailem. Karta oferty pokazuje od razu zamawiającego, lokalizację, termin, powody
+    i link; reszta pól pod „Szczegóły ogłoszenia”.
 - **Wypis:** `/wypis/<token>` — strona z przyciskiem; POST RFC 8058 z programu pocztowego
   (`multipart/form-data` albo `application/x-www-form-urlencoded`) wypisuje bez logowania i
   odpowiada 200, nigdy przekierowaniem. Ponowny wypis niczego nie zmienia.
@@ -365,8 +367,9 @@ PUBLIC_BASE_URL=https://radar.example.invalid node dist/main.js serve
   (lokalnie ok. 0,8 s przy 5 000 ofert z 7 dni i typowym profilu; do kilkunastu sekund przy
   10 000 ofert i maksymalnym profilu). W tym czasie inne strony odpowiadają normalnie, ale
   naraz liczona jest tylko jedna lista, wspólnie dla wszystkich klientów: kolejne wejście na
-  `/dopasowania` (także innego klienta) dostaje 503 z `Retry-After: 5` i prośbą o ponowienie za
-  kilka sekund. Na proxy ustaw limit żądań dla tej ścieżki (PR-07).
+  `/dopasowania` (także innego klienta) czeka w kolejce (najwyżej 8 wejść, najwyżej 3 s); przy
+  pełnej kolejce albo po 3 s dostaje 503 z `Retry-After: 5` i prośbą o ponowienie za kilka
+  sekund. Na proxy ustaw limit żądań dla tej ścieżki (PR-07).
 - **Sprzątanie:** `serve` co godzinę usuwa wygasłe tokeny i sesje (bez osobnego crona).
 - **Logi:** jedna linia na żądanie (metoda, nazwa trasy, status, czas) — bez URL-i, tokenów,
   ciasteczek i adresów.

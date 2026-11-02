@@ -46,6 +46,7 @@ async function run(
       return Promise.resolve({
         host: webOptions.host,
         port: webOptions.port,
+        matchesWaiting: 0,
         close: () => {
           calls.serverClosed++;
           return Promise.resolve();

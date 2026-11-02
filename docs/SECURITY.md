@@ -243,13 +243,15 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   `address_changed` i brak e-maila), więc po zmianie nie wyśle na stary adres nowych tokenów;
   bez `PUBLIC_BASE_URL` (e-mail bez linków) przebieg trwający w chwili zmiany może jeszcze
   wysłać jeden e-mail na stary adres. Kolejność blokad zmiany adresu jest bez cyklu
-  względem logowania, wylogowania, `access:revoke` i digestu (D-027).
+  względem logowania, wylogowania, `access:revoke` i digestu (D-027). `/profil` pokazuje
+  bieżący adres powiadomień (zescapowany, z bazy dla profilu sesji), nigdy dawnego.
 - **Formularz profilu (PR-06B):** sesja + CSRF + `Origin`, ciało ≤ 64 KB (tylko ta trasa) i
   ≤ 64 pary pól, tylko znane pola (pola pojedyncze dokładnie raz), walidacja schematem domeny;
   profil wyłącznie z sesji. `active` nie jest polem formularza (osobne przyciski
   `/profil/wypisz` i `/profil/wlacz`, oba idempotentne). Komunikat po zapisie:
   `__Host-radar_komunikat` (`HttpOnly; Secure; SameSite=Lax`, 60 s), jedno słowo z
-  zamkniętej listy — nigdy dane; podrobione ciasteczko może najwyżej wyświetlić „Zapisano”.
+  zamkniętej listy — nigdy dane (także adres e-mail); podrobione ciasteczko może najwyżej
+  wyświetlić „Zapisano”.
 - **Twardnienie HTTP:** ciało ≤ 8 KB (413), tylko `application/x-www-form-urlencoded`
   (inaczej 415); wyjątek: POST wypisu RFC 8058 przyjmuje też `multipart/form-data` (RFC 8058
   §3.2 — SHOULD), czytany własnym ścisłym parserem bez zależności (`src/web/multipart.ts`:
@@ -268,9 +270,12 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   (PR-06B, D-027): `/dopasowania` liczy dopasowanie na żądanie w wątku procesu `serve` (zmierzone
   lokalnie: ok. 0,8 s przy 5 000 kandydatów i typowym profilu, do kilkunastu sekund przy limicie 10
   000 i maksymalnym profilu). Liczenie oddaje pętlę zdarzeń po każdych ok. 20 ms pracy, więc
-  pozostałe żądania są obsługiwane, a proces liczy najwyżej jedną listę naraz (kolejne żądanie → 503
-  z `Retry-After`). To jedno miejsce jest **wspólne dla wszystkich klientów**: posiadacz sesji
-  ponawiający żądania może je zajmować i inni klienci dostają wtedy 503 (reszta stron działa).
+  pozostałe żądania są obsługiwane, a proces liczy najwyżej jedną listę naraz. Kolejne żądanie
+  czeka w ograniczonej kolejce FIFO (najwyżej 8 żądań i 3 s; rozłączony klient wypada z niej bez
+  liczenia, bez pozostawionych timerów i nasłuchów); pełna kolejka albo upływ czasu → 503 z
+  `Retry-After`. To jedno miejsce jest **wspólne dla wszystkich klientów**: posiadacz sesji
+  ponawiający żądania może je zajmować i inni klienci czekają wtedy albo dostają 503 (reszta stron
+  działa).
   Dostępne tylko z sesją; limit dla tej trasy na proxy — PR-07. Funkcja „wyślij mi link e-mailem”
   (otwarta decyzja właściciela) będzie wymagać limitu.
 - **Reverse proxy (PR-07):** `serve` słucha domyślnie na `127.0.0.1:3000` czystym HTTP; TLS,

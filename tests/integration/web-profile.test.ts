@@ -412,7 +412,12 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
         headers: { cookie: `${current.cookie}; ${cookiePair(response)}` },
       });
       expect(page.status).toBe(200);
-      expect(await page.text()).toContain("Adres e-mail został zmieniony");
+      const changedHtml = await page.text();
+      expect(changedHtml).toContain("Adres e-mail został zmieniony");
+      expect(changedHtml).toContain("Sprawdź poniżej, czy nowy adres jest poprawny.");
+      // The new address only; the old one is not shown anywhere.
+      expect(changedHtml).toContain(`<p>Adres powiadomień: <strong>${NEW_EMAIL}</strong></p>`);
+      expect(changedHtml).not.toContain(EMAIL);
       expect(
         (
           await post("/profil/ustawienia", settingsForm(current.csrf, { email: NEW_EMAIL }), {
@@ -678,6 +683,16 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
         `<a href="${later.opportunity.sourceUrl}" rel="noopener noreferrer">` +
           "Otwórz ogłoszenie w źródle (zamowienia.example.gov.pl)</a>",
       );
+      // Compact cards: one native disclosure per offer, holding the other fields.
+      expect(html.match(/<details><summary>Szczegóły ogłoszenia<\/summary><dl>/g)).toHaveLength(2);
+      expect(html).toContain(
+        "<details><summary>Szczegóły ogłoszenia</summary><dl><dt>Data publikacji:",
+      );
+      // The place of work is visible, between the buyer and the deadline.
+      expect(html).toContain(
+        "<dt>Zamawiający:</dt><dd>Gmina Przykładowa</dd>" +
+          "<dt>Lokalizacja:</dt><dd>woj. mazowieckie</dd><dt>Termin składania ofert:</dt>",
+      );
       expect(html).not.toContain('class="note"');
     });
 
@@ -741,7 +756,46 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
         );
       }
 
-      it("answers a second request with 503 and Retry-After, other pages meanwhile", async () => {
+      /** A server of its own with other slot limits; `lines` collects its log. */
+      async function gatedServer(limits: {
+        matchesMaxWaitMs?: number;
+        matchesMaxWaiters?: number;
+      }) {
+        const lines: string[] = [];
+        const gated = await startWebServer({
+          db: schema.db,
+          publicBaseUrl: BASE,
+          logger: createLogger("info", (line) => lines.push(line)),
+          host: "127.0.0.1",
+          port: 0,
+          cleanupIntervalMs: null,
+          ...limits,
+        });
+        return { server: gated, url: `http://127.0.0.1:${String(gated.port)}`, lines };
+      }
+
+      /** Polls until `count` requests wait for the slot of `target`. */
+      async function waitForWaiters(target: WebServer, count: number): Promise<void> {
+        for (let attempt = 0; attempt < 250 && target.matchesWaiting !== count; attempt++) {
+          await delay(20);
+        }
+        expect(target.matchesWaiting).toBe(count);
+      }
+
+      /** True when `promise` has not settled within `ms`. */
+      async function stillPending(promise: Promise<unknown>, ms = 100): Promise<boolean> {
+        const pending = Symbol("pending");
+        const first = await Promise.race([
+          promise.then(
+            () => null,
+            () => null,
+          ),
+          delay(ms, pending),
+        ]);
+        return first === pending;
+      }
+
+      it("lets a second request wait, then answers it; other pages meanwhile", async () => {
         await upsertOpportunity(schema.db, draft({ title: "Oświetlenie parku" }));
         const { cookie } = await login();
         const lock = lockOpportunities();
@@ -749,22 +803,109 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
         const first = fetch(`${url}/dopasowania`, { headers: { cookie } });
         await waitUntilBlockedBy(schema.db, lockPid);
 
-        const second = await fetch(`${url}/dopasowania`, { headers: { cookie } });
-        expect(second.status).toBe(503);
-        expect(second.headers.get("retry-after")).toBe(String(MATCHES_RETRY_AFTER_SECONDS));
-        expect(second.headers.get("cache-control")).toBe("no-store");
-        expect(await second.text()).toContain(
-          "Trwa przygotowanie listy dopasowań — spróbuj za kilka sekund.",
-        );
+        const second = fetch(`${url}/dopasowania`, { headers: { cookie } });
+        await waitForWaiters(server, 1);
+        expect(await stillPending(second)).toBe(true);
         expect((await fetch(`${url}/profil`, { headers: { cookie } })).status).toBe(200);
         expect((await fetch(`${url}/styl.css`)).status).toBe(200);
 
         lock.resume();
         await lock.done;
-        const answered = await first;
-        expect(answered.status).toBe(200);
-        expect(await answered.text()).toContain("Oświetlenie parku");
+        for (const response of [await first, await second]) {
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain("Oświetlenie parku");
+        }
+        expect(server.matchesWaiting).toBe(0);
         expect((await fetch(`${url}/dopasowania`, { headers: { cookie } })).status).toBe(200);
+      });
+
+      it("answers at once with 503 and Retry-After when the queue is full", async () => {
+        const gated = await gatedServer({ matchesMaxWaiters: 1 });
+        try {
+          const { cookie } = await login();
+          const lock = lockOpportunities();
+          const lockPid = await lock.pid;
+          const first = fetch(`${gated.url}/dopasowania`, { headers: { cookie } });
+          await waitUntilBlockedBy(schema.db, lockPid);
+          const second = fetch(`${gated.url}/dopasowania`, { headers: { cookie } });
+          await waitForWaiters(gated.server, 1);
+
+          const third = await fetch(`${gated.url}/dopasowania`, { headers: { cookie } });
+          expect(third.status).toBe(503);
+          expect(third.headers.get("retry-after")).toBe(String(MATCHES_RETRY_AFTER_SECONDS));
+          expect(third.headers.get("cache-control")).toBe("no-store");
+          expect(await third.text()).toContain(
+            "Trwa przygotowanie listy dopasowań — spróbuj za kilka sekund.",
+          );
+          expect(await stillPending(second)).toBe(true);
+
+          lock.resume();
+          await lock.done;
+          expect((await first).status).toBe(200);
+          expect((await second).status).toBe(200);
+        } finally {
+          await gated.server.close();
+        }
+      });
+
+      it("answers 503 with Retry-After when the wait runs out", async () => {
+        const gated = await gatedServer({ matchesMaxWaitMs: 300 });
+        try {
+          const { cookie } = await login();
+          const lock = lockOpportunities();
+          const lockPid = await lock.pid;
+          const first = fetch(`${gated.url}/dopasowania`, { headers: { cookie } });
+          await waitUntilBlockedBy(schema.db, lockPid);
+
+          const started = performance.now();
+          const second = await fetch(`${gated.url}/dopasowania`, { headers: { cookie } });
+          expect(performance.now() - started).toBeGreaterThanOrEqual(250);
+          expect(second.status).toBe(503);
+          expect(second.headers.get("retry-after")).toBe(String(MATCHES_RETRY_AFTER_SECONDS));
+          expect(second.headers.get("cache-control")).toBe("no-store");
+          expect(await second.text()).toContain("Trwa przygotowanie listy dopasowań");
+          expect(gated.server.matchesWaiting).toBe(0);
+
+          lock.resume();
+          await lock.done;
+          expect((await first).status).toBe(200);
+        } finally {
+          await gated.server.close();
+        }
+      });
+
+      it("drops a waiter whose client hung up and serves the next one", async () => {
+        const gated = await gatedServer({ matchesMaxWaiters: 1 });
+        try {
+          const { cookie } = await login();
+          const lock = lockOpportunities();
+          const lockPid = await lock.pid;
+          const first = fetch(`${gated.url}/dopasowania`, { headers: { cookie } });
+          await waitUntilBlockedBy(schema.db, lockPid);
+
+          const abort = new AbortController();
+          const leaving = fetch(`${gated.url}/dopasowania`, {
+            headers: { cookie },
+            signal: abort.signal,
+          });
+          await waitForWaiters(gated.server, 1);
+          abort.abort();
+          await expect(leaving).rejects.toThrow();
+          // Its place is free again: the next request queues instead of a 503.
+          await waitForWaiters(gated.server, 0);
+          const next = fetch(`${gated.url}/dopasowania`, { headers: { cookie } });
+          await waitForWaiters(gated.server, 1);
+
+          lock.resume();
+          await lock.done;
+          expect((await first).status).toBe(200);
+          expect((await next).status).toBe(200);
+          const aborted = gated.lines.filter((line) => line.includes('"http request aborted"'));
+          expect(aborted).toHaveLength(1);
+          expect(aborted[0]).toContain('"route":"matches"');
+        } finally {
+          await gated.server.close();
+        }
       });
 
       it("frees the slot after a failed computation", async () => {
@@ -773,10 +914,15 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
         const lockPid = await lock.pid;
         const first = fetch(`${url}/dopasowania`, { headers: { cookie } });
         const blockedPid = await waitUntilBlockedBy(schema.db, lockPid);
+        const waiting = fetch(`${url}/dopasowania`, { headers: { cookie } });
+        await waitForWaiters(server, 1);
         await sql`SELECT pg_cancel_backend(${blockedPid}::int)`.execute(schema.db);
         expect((await first).status).toBe(500);
+        // The failed holder handed the slot on: the waiter now computes.
+        await waitForWaiters(server, 0);
         lock.resume();
         await lock.done;
+        expect((await waiting).status).toBe(200);
         expect((await fetch(`${url}/dopasowania`, { headers: { cookie } })).status).toBe(200);
       });
 
@@ -828,6 +974,22 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       // Idempotent: nothing changes, not even updated_at.
       expect(await stored()).toEqual(enabled);
     });
+  });
+
+  it("shows the current notification address on /profil, escaped", async () => {
+    const { cookie } = await login();
+    const html = await (await fetch(`${url}/profil`, { headers: { cookie } })).text();
+    expect(html).toContain(`<p>Adres powiadomień: <strong>${EMAIL}</strong></p>`);
+
+    // The database takes what the form would refuse; the page escapes it anyway.
+    await sql`UPDATE company_profiles SET email = ${"o'brien&<syn>@example.invalid"}`.execute(
+      schema.db,
+    );
+    const escaped = await (await fetch(`${url}/profil`, { headers: { cookie } })).text();
+    expect(escaped).toContain(
+      "<p>Adres powiadomień: <strong>o&#39;brien&amp;&lt;syn&gt;@example.invalid</strong></p>",
+    );
+    expect(escaped).not.toContain("<syn>");
   });
 
   it("names the company on the unsubscribe confirmation page", async () => {
