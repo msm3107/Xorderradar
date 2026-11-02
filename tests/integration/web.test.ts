@@ -173,7 +173,9 @@ describe.skipIf(skipWithoutDatabase)("web access (PostgreSQL)", () => {
         const page = await fetch(`${url}/dostep/${token}`);
         expect(page.status).toBe(404);
         expect(await page.text()).toBe(neutral);
-        const submitted = await post("/dostep", `token=${encodeURIComponent(token)}`);
+        const submitted = await post("/dostep", `token=${encodeURIComponent(token)}`, {
+          origin: BASE,
+        });
         expect(submitted.status).toBe(404);
         expect(await submitted.text()).toBe(neutral);
       }
@@ -195,6 +197,35 @@ describe.skipIf(skipWithoutDatabase)("web access (PostgreSQL)", () => {
         origin: "https://evil.example.invalid",
       });
       expect(response.status).toBe(403);
+      expect(await response.text()).toContain("otwórz link w innej, aktualnej przeglądarce");
+      expect((await fetch(`${url}/dostep/${issued.token}`)).status).toBe(200);
+    });
+
+    // Login CSRF (PR-06B): without a session there is no CSRF token, so the
+    // request must provably come from our own confirmation page.
+    it.each([
+      ["Origin = PUBLIC_BASE_URL", { origin: BASE }],
+      ["no Origin, Sec-Fetch-Site: same-origin", { "sec-fetch-site": "same-origin" }],
+    ])("accepts a login POST with %s", async (_label, headers) => {
+      const issued = await issueAccessToken(schema.db, profile.id, "login");
+      const response = await post("/dostep", `token=${issued.token}`, headers);
+      expect(response.status).toBe(303);
+      expect(response.headers.get("set-cookie")).toContain(`${SESSION_COOKIE}=`);
+    });
+
+    it.each([
+      ["no Origin, Sec-Fetch-Site: cross-site", { "sec-fetch-site": "cross-site" }],
+      ["no Origin, Sec-Fetch-Site: same-site", { "sec-fetch-site": "same-site" }],
+      ["no Origin, Sec-Fetch-Site: none", { "sec-fetch-site": "none" }],
+      ["neither header", {}],
+      ["Origin: null", { origin: "null", "sec-fetch-site": "same-origin" }],
+    ])("refuses a login POST with %s (403) without using the link up", async (_label, headers) => {
+      const issued = await issueAccessToken(schema.db, profile.id, "login");
+      const response = await post("/dostep", `token=${issued.token}`, headers);
+      expect(response.status).toBe(403);
+      expect(await response.text()).toContain("otwórz link w innej, aktualnej przeglądarce");
+      expect(response.headers.get("set-cookie")).toBeNull();
+      expect(await schema.db.selectFrom("sessions").select("id").execute()).toEqual([]);
       expect((await fetch(`${url}/dostep/${issued.token}`)).status).toBe(200);
     });
   });
@@ -450,7 +481,9 @@ describe.skipIf(skipWithoutDatabase)("web access (PostgreSQL)", () => {
     const issued = await issueAccessToken(schema.db, profile.id, "login");
     const unsubscribe = await issueAccessToken(schema.db, profile.id, "unsubscribe");
     await fetch(`${url}/dostep/${issued.token}?q=${issued.token}`);
-    const opened = await post("/dostep", `token=${issued.token}`);
+    const opened = await post("/dostep", `token=${issued.token}`, {
+      "sec-fetch-site": "same-origin",
+    });
     const cookie = cookiePair(opened);
     await fetch(`${url}/profil`, { headers: { cookie } });
     await fetch(`${url}/wypis/${unsubscribe.token}`);
@@ -545,7 +578,7 @@ describe.skipIf(skipWithoutDatabase)("web access (PostgreSQL)", () => {
     expect(expiresIn).toBeGreaterThan(7 * 24 * 3600 * 1000 - 60_000);
     expect(expiresIn).toBeLessThanOrEqual(7 * 24 * 3600 * 1000);
     expect((await fetch(`${url}/dostep/${token}`)).status).toBe(200);
-    expect((await post("/dostep", `token=${token}`)).status).toBe(303);
+    expect((await post("/dostep", `token=${token}`, { origin: BASE })).status).toBe(303);
 
     let missingErr = "";
     const missing = await runCli(

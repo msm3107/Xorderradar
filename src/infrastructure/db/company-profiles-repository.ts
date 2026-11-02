@@ -1,14 +1,18 @@
-import { sql, type Kysely, type Selectable } from "kysely";
+import { sql, type Kysely, type Selectable, type Transaction } from "kysely";
+import type { z } from "zod";
 import {
   companyProfileInputSchema,
   companyProfilePatchSchema,
+  companyProfileSettingsSchema,
   type CompanyProfile,
   type CompanyProfileInput,
   type CompanyProfilePatch,
+  type CompanyProfileSettings,
 } from "../../domain/company-profile.js";
 import { entityIdSchema, parseDomain } from "../../domain/common.js";
 import { DomainError } from "../../domain/errors.js";
-import { withDomainErrors } from "./errors.js";
+import { lockLiveSession, revokeOtherAccess } from "./access-repository.js";
+import { isDeadlock, withDomainErrors } from "./errors.js";
 import type { CompanyProfilesTable, Database } from "./schema.js";
 
 /**
@@ -131,28 +135,150 @@ export async function updateCompanyProfile(
 ): Promise<CompanyProfile | null> {
   const profileId = parseDomain(entityIdSchema, id);
   const changes = parseDomain(companyProfilePatchSchema, patch);
-  return db.transaction().execute(async (trx) => {
-    const row = await withDomainErrors(() =>
-      trx
-        .updateTable("company_profiles")
-        // Undefined values are skipped by Kysely, so absent fields stay untouched.
-        .set({
-          email: changes.email,
-          name: changes.name,
-          categories: changes.categories,
-          include_keywords: changes.includeKeywords,
-          exclude_keywords: changes.excludeKeywords,
-          voivodeships: changes.voivodeships,
-          counties: changes.counties,
-          active: changes.active,
-          updated_at: sql<Date>`now()`,
-        })
+  return db.transaction().execute((trx) => updateRow(trx, profileId, changes));
+}
+
+async function updateRow(
+  trx: Transaction<Database>,
+  profileId: string,
+  changes: z.output<typeof companyProfilePatchSchema>,
+): Promise<CompanyProfile | null> {
+  const row = await withDomainErrors(() =>
+    trx
+      .updateTable("company_profiles")
+      // Undefined values are skipped by Kysely, so absent fields stay untouched.
+      .set({
+        email: changes.email,
+        name: changes.name,
+        categories: changes.categories,
+        include_keywords: changes.includeKeywords,
+        exclude_keywords: changes.excludeKeywords,
+        voivodeships: changes.voivodeships,
+        counties: changes.counties,
+        active: changes.active,
+        updated_at: sql<Date>`now()`,
+      })
+      .where("id", "=", profileId)
+      .returningAll()
+      .executeTakeFirst(),
+  );
+  return row === undefined ? null : toCompanyProfile(row);
+}
+
+/** The stored values of the profile form's fields, as stored (not validated). */
+export interface StoredProfileSettings {
+  readonly email: string;
+  readonly name: string;
+  readonly categories: readonly string[];
+  readonly includeKeywords: readonly string[];
+  readonly excludeKeywords: readonly string[];
+  readonly voivodeships: readonly string[];
+  readonly counties: readonly string[];
+}
+
+/**
+ * The profile form's current values (PR-06B), read directly like
+ * getProfileStatus: a row the schema refuses still fills the form, so the
+ * customer can correct it (the schema checks every field again on save).
+ * null when the profile does not exist.
+ */
+export async function getProfileSettings(
+  db: Kysely<Database>,
+  id: string,
+): Promise<StoredProfileSettings | null> {
+  const row = await db
+    .selectFrom("company_profiles")
+    .select([
+      "email",
+      "name",
+      "categories",
+      "include_keywords",
+      "exclude_keywords",
+      "voivodeships",
+      "counties",
+    ])
+    .where("id", "=", parseDomain(entityIdSchema, id))
+    .executeTakeFirst();
+  if (row === undefined) return null;
+  return {
+    email: row.email,
+    name: row.name,
+    categories: row.categories,
+    includeKeywords: row.include_keywords,
+    excludeKeywords: row.exclude_keywords,
+    voivodeships: row.voivodeships,
+    counties: row.counties,
+  };
+}
+
+export interface SettingsUpdate {
+  readonly profile: CompanyProfile;
+  /** The e-mail address changed, so the profile's other access was revoked. */
+  readonly emailChanged: boolean;
+}
+
+/**
+ * Saves the profile form (PR-06B, D-027): every field but `active`, in one
+ * transaction. When the e-mail address changes, every access token of the
+ * profile and every session except `keepSessionToken` (the one that made the
+ * change) is deleted in the same transaction: the links in e-mails sent to
+ * the old address and every other signed-in browser stop working. Other
+ * changes revoke nothing. null — nothing saved — when the profile does not
+ * exist or the session ended meanwhile (a logout or revoke in another tab);
+ * the same e-mail as another profile → DomainError `duplicate`.
+ *
+ * Lock order, so no concurrent writer can close a cycle with this one:
+ * profile row FOR NO KEY UPDATE → the kept session FOR KEY SHARE → tokens
+ * (DELETE) → other sessions (DELETE) → the profile UPDATE, last. Changing
+ * the e-mail (a unique key) makes that UPDATE take the FOR UPDATE-strength
+ * lock; until then the row is held only FOR NO KEY UPDATE, which does not
+ * block the KEY SHARE that a session or token INSERT takes through its
+ * foreign key.
+ * - Login (token row UPDATE → session INSERT, KEY SHARE on the profile): if
+ *   it holds the token, our token DELETE waits for its commit and the login
+ *   never waits on us (its KEY SHARE passes our NO KEY UPDATE); its new
+ *   session is then deleted with the other sessions (a new snapshot per
+ *   statement). If we deleted the token first, its UPDATE waits holding
+ *   nothing of ours and then finds no token. Our final UPDATE may wait for
+ *   a login's KEY SHARE, but such a login has no lock left to take.
+ * - access:revoke takes the profile row first as well: the two run one after
+ *   the other. Logout holds one session row and waits for nothing of ours.
+ * - The digest's token issue locks the profile FOR SHARE first
+ *   (issueDigestTokens): it waits for this transaction and then sees the new
+ *   address, or this one waits for its short transaction and deletes its tokens.
+ * The hourly cleanup deletes expired tokens and sessions in its own row order,
+ * so a cycle with it stays possible in theory: a deadlock (40P01) is retried once.
+ */
+export async function updateProfileSettings(
+  db: Kysely<Database>,
+  id: string,
+  settings: CompanyProfileSettings,
+  keepSessionToken: string,
+): Promise<SettingsUpdate | null> {
+  const profileId = parseDomain(entityIdSchema, id);
+  const changes = parseDomain(companyProfileSettingsSchema, settings);
+  const save = () =>
+    db.transaction().execute(async (trx): Promise<SettingsUpdate | null> => {
+      const current = await trx
+        .selectFrom("company_profiles")
+        .select("email")
         .where("id", "=", profileId)
-        .returningAll()
-        .executeTakeFirst(),
-    );
-    return row === undefined ? null : toCompanyProfile(row);
-  });
+        .forNoKeyUpdate()
+        .executeTakeFirst();
+      if (current === undefined) return null;
+      if (!(await lockLiveSession(trx, profileId, keepSessionToken))) return null;
+      // Both normalized: the schema lower-cases and trims, the column CHECK enforces it.
+      const emailChanged = current.email !== changes.email;
+      if (emailChanged) await revokeOtherAccess(trx, profileId, keepSessionToken);
+      const profile = await updateRow(trx, profileId, changes);
+      return profile === null ? null : { profile, emailChanged };
+    });
+  try {
+    return await save();
+  } catch (error: unknown) {
+    if (!isDeadlock(error)) throw error;
+    return save();
+  }
 }
 
 /** Deletes the profile; returns false when it did not exist. */

@@ -12,8 +12,14 @@ import { loginUrl, unsubscribeUrl } from "../src/web/links.js";
 import {
   clearedSessionCookie,
   csrfMatches,
+  clearedNoticeCookie,
   csrfTokenFor,
+  loginRequestAllowed,
+  NOTICE_COOKIE,
+  noticeCookie,
+  NOTICES,
   originAllowed,
+  readNoticeCookie,
   readSessionCookie,
   SESSION_COOKIE,
   sessionCookie,
@@ -154,5 +160,57 @@ describe("Origin check", () => {
     ["https://radar.example.invalid.evil.example.invalid", false],
   ])("Origin %j → %s", (origin, allowed) => {
     expect(originAllowed(origin, base)).toBe(allowed);
+  });
+});
+
+describe("login request check (login CSRF, PR-06B)", () => {
+  const base = "https://radar.example.invalid";
+
+  it.each([
+    // Origin present: it alone decides, whatever Sec-Fetch-Site says.
+    [base, undefined, true],
+    [base, "same-origin", true],
+    [base, "cross-site", true],
+    ["https://evil.example.invalid", "same-origin", false],
+    ["null", "same-origin", false],
+    ["", "same-origin", false],
+    [`${base}/`, undefined, false],
+    // Origin absent: only the browser's own same-origin marker passes.
+    [undefined, "same-origin", true],
+    [undefined, "same-site", false],
+    [undefined, "cross-site", false],
+    [undefined, "none", false],
+    [undefined, "Same-Origin", false],
+    [undefined, ["same-origin", "same-origin"], false],
+    [undefined, undefined, false],
+  ] as const)("Origin %j, Sec-Fetch-Site %j → %s", (origin, site, allowed) => {
+    expect(loginRequestAllowed(origin, site, base)).toBe(allowed);
+  });
+});
+
+describe("notice cookie", () => {
+  it("is a short-lived __Host- cookie holding one word of a closed list", () => {
+    for (const notice of NOTICES) {
+      expect(noticeCookie(notice)).toBe(
+        `${NOTICE_COOKIE}=${notice}; Path=/; Max-Age=60; HttpOnly; Secure; SameSite=Lax`,
+      );
+      expect(readNoticeCookie(`a=1; ${NOTICE_COOKIE}=${notice}`)).toBe(notice);
+    }
+    expect(NOTICE_COOKIE.startsWith("__Host-")).toBe(true);
+    expect(clearedNoticeCookie()).toBe(
+      `${NOTICE_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`,
+    );
+  });
+
+  it.each([
+    [undefined],
+    [""],
+    [`${NOTICE_COOKIE}=`],
+    [`${NOTICE_COOKIE}=inne`],
+    [`${NOTICE_COOKIE}=Zapisano`],
+    [`${NOTICE_COOKIE}=<script>`],
+    [`${SESSION_COOKIE}=zapisano`],
+  ])("reads nothing from %j", (header) => {
+    expect(readNoticeCookie(header)).toBeNull();
   });
 });

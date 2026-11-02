@@ -2,7 +2,7 @@ import type { Kysely } from "kysely";
 import type { CompanyProfile } from "../domain/company-profile.js";
 import { DomainError } from "../domain/errors.js";
 import type { Opportunity } from "../domain/opportunity.js";
-import { issueAccessToken } from "../infrastructure/db/access-repository.js";
+import { issueDigestTokens } from "../infrastructure/db/access-repository.js";
 import { withAdvisoryLock, type LockResult } from "../infrastructure/db/advisory-lock.js";
 import {
   getCompanyProfile,
@@ -15,13 +15,17 @@ import {
   markDeliveries,
   type DeliveryKey,
 } from "../infrastructure/db/deliveries-repository.js";
-import { listDigestCandidates } from "../infrastructure/db/opportunities-repository.js";
 import type { Database, DeliveryTransport } from "../infrastructure/db/schema.js";
 import type { Logger } from "../infrastructure/logger.js";
-import { matchOpportunity } from "../matching/match.js";
 import { warsawDay } from "../sources/normalize/warsaw-time.js";
 import { loginUrl, unsubscribeUrl } from "../web/links.js";
-import { buildDigest, type DigestItem, type DigestLinks } from "./digest.js";
+import {
+  DIGEST_CANDIDATE_LIMIT,
+  DIGEST_NEW_DAYS,
+  matchingItems,
+  readDigestCandidates,
+} from "./candidates.js";
+import { buildDigest, type DigestLinks } from "./digest.js";
 import { sendWithRetry, type EmailSender, type SendFailureKind } from "./sender.js";
 
 /**
@@ -32,16 +36,12 @@ import { sendWithRetry, type EmailSender, type SendFailureKind } from "./sender.
 /** Advisory lock serializing `digest` runs; a different key from `ingest` (D-019 pattern). */
 export const DIGEST_LOCK_KEY = 7_206_120_309_002;
 export const DIGEST_LOCK_HEARTBEAT_MS = 5_000;
-/** Offers first stored longer ago than this are not "new" any more. */
-export const DIGEST_NEW_DAYS = 7;
+// Defined with the candidate query the web page of matches shares (PR-06B).
+export { DIGEST_CANDIDATE_LIMIT, DIGEST_NEW_DAYS };
 /** Offers per e-mail; the rest waits for the next digest (overflow). */
 export const DIGEST_MAX_ITEMS = 50;
 /** Runs that may try to deliver one offer to one profile before it is given up. */
 export const DIGEST_MAX_ATTEMPTS = 3;
-/** Upper bound of candidate offers read per run (all profiles share them). */
-export const DIGEST_CANDIDATE_LIMIT = 10_000;
-
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Reason of the run signal's abort when the digest lock connection broke. */
 export class DigestLockLostError extends Error {
@@ -78,6 +78,9 @@ export async function withDigestLock<T>(
  * - `dry_run`: what would be sent (nothing written or sent);
  * - `inactive`, `not_found`, `invalid_profile`: only for `--profile`, except
  *   invalid rows, which are reported in every run;
+ * - `address_changed`: the profile's e-mail changed during the run (on the
+ *   web, D-027); nothing issued, claimed or sent, the next run sends to the
+ *   new address. Detected only with PUBLIC_BASE_URL (while issuing the links);
  * - `not_run`: the run stopped (lock lost, or a send failure that is not about
  *   the message: see DigestSummary.errorCode) before this profile.
  */
@@ -92,6 +95,7 @@ export type ProfileDigestStatus =
   | "inactive"
   | "not_found"
   | "invalid_profile"
+  | "address_changed"
   | "not_run";
 
 /** Counts are offers, not e-mails. */
@@ -240,15 +244,20 @@ async function selectProfiles(
   }
 }
 
-/** A fresh login token and unsubscribe token for one e-mail; null without PUBLIC_BASE_URL. */
+/**
+ * A fresh login token and unsubscribe token for one e-mail; null without
+ * PUBLIC_BASE_URL; "address_changed" when the profile's address is no longer
+ * the one read at the start of the run (an e-mail change on the web, D-027).
+ */
 async function issueLinks(
   db: Kysely<Database>,
-  profileId: string,
+  profile: CompanyProfile,
   publicBaseUrl: string | null,
-): Promise<DigestLinks | null> {
+): Promise<DigestLinks | null | "address_changed"> {
   if (publicBaseUrl === null) return null;
-  const login = await issueAccessToken(db, profileId, "login");
-  const unsubscribe = await issueAccessToken(db, profileId, "unsubscribe");
+  const tokens = await issueDigestTokens(db, profile.id, profile.email);
+  if (tokens === null) return "address_changed";
+  const { login, unsubscribe } = tokens;
   return {
     profileUrl: loginUrl(publicBaseUrl, login.token),
     unsubscribeUrl: unsubscribeUrl(publicBaseUrl, unsubscribe.token),
@@ -280,11 +289,7 @@ async function digestProfile(
     return done({ ...base, status, uncertain: before.pending });
   }
 
-  const matched: DigestItem[] = [];
-  for (const offer of candidates) {
-    const result = matchOpportunity(offer, profile);
-    if (result.matched) matched.push({ offer, reasons: result.reasons });
-  }
+  const matched = await matchingItems(profile, candidates);
   const states = await listDeliveryStates(
     db,
     key,
@@ -310,7 +315,9 @@ async function digestProfile(
 
   // Issued before the claim, so a database failure here leaves no claimed
   // row pending; tokens of an e-mail never sent just expire unused.
-  const links = await issueLinks(db, profile.id, deps.publicBaseUrl ?? null);
+  const links = await issueLinks(db, profile, deps.publicBaseUrl ?? null);
+  // Nothing claimed yet: the next run sends these offers to the new address.
+  if (links === "address_changed") return done({ ...counts, status: "address_changed" });
   const claimedIds = new Set(
     await claimDeliveries(db, {
       ...key,
@@ -396,19 +403,14 @@ export async function runDigest(
   const { db, logger, now } = deps;
   const digestDate = warsawDay(now);
   const selections = await selectProfiles(db, options.profileId, logger);
-  const candidates = await listDigestCandidates(db, {
-    firstSeenSince: new Date(now.getTime() - DIGEST_NEW_DAYS * DAY_MS),
-    now,
-    limit: DIGEST_CANDIDATE_LIMIT,
-  });
+  const candidates = await readDigestCandidates(db, now);
   for (const row of candidates.skipped) {
     logger.warn("invalid stored opportunity skipped", {
       opportunityId: row.id,
       fields: row.fields,
     });
   }
-  const candidatesTruncated =
-    candidates.offers.length + candidates.skipped.length >= DIGEST_CANDIDATE_LIMIT;
+  const candidatesTruncated = candidates.truncated;
   if (candidatesTruncated) {
     logger.warn("digest candidate limit reached", { limit: DIGEST_CANDIDATE_LIMIT });
   }

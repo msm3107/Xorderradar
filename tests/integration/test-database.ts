@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { sql, type Kysely } from "kysely";
+import { setTimeout as delay } from "node:timers/promises";
+import { sql, type Kysely, type Transaction } from "kysely";
 import { inject } from "vitest";
 import { createDatabase } from "../../src/infrastructure/db/database.js";
 import type { Database } from "../../src/infrastructure/db/schema.js";
@@ -58,3 +59,61 @@ export async function createTestSchema(): Promise<TestSchema> {
 /** A URL to a closed local port: the connection is refused immediately. */
 export const unreachableDatabaseUrl = (password: string) =>
   `postgres://radar:${password}@127.0.0.1:1/radar`;
+
+export interface PausedTransaction<T> {
+  /** The backend running the transaction, once `before` has run. */
+  readonly pid: Promise<number>;
+  /** Lets the transaction go on with `after` (and commit). */
+  resume(): void;
+  /** The transaction's outcome. */
+  readonly done: Promise<T>;
+}
+
+/**
+ * Runs `before` in a transaction on its own connection, then holds the
+ * transaction open (with its locks) until `resume()`; then `after` runs and
+ * the transaction commits. Lets a test interleave two transactions in an
+ * exact order instead of relying on timing.
+ */
+export function pausedTransaction<T>(
+  db: Kysely<Database>,
+  before: (trx: Transaction<Database>) => Promise<void>,
+  after: (trx: Transaction<Database>) => Promise<T>,
+): PausedTransaction<T> {
+  let resume = (): void => undefined;
+  const resumed = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  let paused: (pid: number) => void = () => undefined;
+  const pausedAt = new Promise<number>((resolve) => {
+    paused = resolve;
+  });
+  const done = db.transaction().execute(async (trx) => {
+    const { rows } = await sql<{ pid: number }>`SELECT pg_backend_pid() AS pid`.execute(trx);
+    await before(trx);
+    paused(rows[0]?.pid ?? 0);
+    await resumed;
+    return after(trx);
+  });
+  // A transaction that fails before pausing must not leave the test waiting.
+  const pid = Promise.race([
+    pausedAt,
+    done.then(() => {
+      throw new Error("the transaction ended before pausing");
+    }),
+  ]);
+  return { pid, resume, done };
+}
+
+/** Waits (bounded) until some backend waits for a lock held by `pid`; returns that backend. */
+export async function waitUntilBlockedBy(db: Kysely<Database>, pid: number): Promise<number> {
+  for (let attempt = 0; attempt < 500; attempt++) {
+    const { rows } = await sql<{ pid: number }>`
+      SELECT pid FROM pg_stat_activity WHERE ${pid}::int = ANY (pg_blocking_pids(pid))
+    `.execute(db);
+    const blocked = rows[0]?.pid;
+    if (blocked !== undefined) return blocked;
+    await delay(10);
+  }
+  throw new Error(`no backend got blocked by ${String(pid)}`);
+}

@@ -77,7 +77,14 @@ export const companyProfilePatchSchema = z
     "at least one field is required",
   );
 
+/**
+ * What a customer edits on the web profile form (PR-06B): every field except
+ * `active`, which has its own buttons. The input schema's rules, unchanged.
+ */
+export const companyProfileSettingsSchema = companyProfileInputSchema.omit({ active: true });
+
 export type CompanyProfileInput = z.input<typeof companyProfileInputSchema>;
+export type CompanyProfileSettings = z.input<typeof companyProfileSettingsSchema>;
 export type CompanyProfilePatch = z.input<typeof companyProfilePatchSchema>;
 
 export interface CompanyProfile extends z.output<typeof companyProfileInputSchema> {

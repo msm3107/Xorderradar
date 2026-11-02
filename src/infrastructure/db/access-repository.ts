@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { sql, type Kysely } from "kysely";
+import { sql, type Kysely, type Transaction } from "kysely";
 import type { AccessTokenPurpose, Database } from "./schema.js";
 
 /**
@@ -72,6 +72,32 @@ export async function issueAccessToken(
     .returning("expires_at")
     .executeTakeFirstOrThrow();
   return { token, expiresAt: row.expires_at };
+}
+
+/**
+ * The two links of one digest e-mail (D-027), issued only while the profile
+ * still has `email`, the address the e-mail goes to. The profile row is
+ * locked FOR SHARE first: an e-mail change in progress (FOR NO KEY UPDATE)
+ * is waited for, and the row is then read again with its new address. null
+ * when the address differs (or the profile is gone): nothing is issued.
+ */
+export async function issueDigestTokens(
+  db: Kysely<Database>,
+  profileId: string,
+  email: string,
+): Promise<{ readonly login: IssuedToken; readonly unsubscribe: IssuedToken } | null> {
+  return db.transaction().execute(async (trx) => {
+    const profile = await trx
+      .selectFrom("company_profiles")
+      .select("id")
+      .where("id", "=", profileId)
+      .where("email", "=", email)
+      .forShare()
+      .executeTakeFirst();
+    if (profile === undefined) return null;
+    const login = await issueAccessToken(trx, profileId, "login");
+    return { login, unsubscribe: await issueAccessToken(trx, profileId, "unsubscribe") };
+  });
 }
 
 /**
@@ -206,6 +232,44 @@ export async function unsubscribeWithToken(db: Kysely<Database>, token: string):
   return row !== undefined;
 }
 
+/**
+ * "Włącz ponownie powiadomienia" on the profile page (PR-06B): the mirror of
+ * deactivateProfile, idempotent the same way. false when the profile does not exist.
+ */
+export async function activateProfile(db: Kysely<Database>, profileId: string): Promise<boolean> {
+  const row = await db
+    .updateTable("company_profiles")
+    .set({
+      active: true,
+      updated_at: sql<Date>`CASE WHEN active THEN updated_at ELSE now() END`,
+    })
+    .where("id", "=", profileId)
+    .returning("id")
+    .executeTakeFirst();
+  return row !== undefined;
+}
+
+/**
+ * The company name of an unexpired unsubscribe token, for its confirmation
+ * page (the token's holder can unsubscribe anyway); null for an unknown or
+ * expired token. Read-only, like isUsableAccessToken.
+ */
+export async function unsubscribeTokenProfileName(
+  db: Kysely<Database>,
+  token: string,
+): Promise<string | null> {
+  if (!isSecretToken(token)) return null;
+  const row = await db
+    .selectFrom("access_tokens")
+    .innerJoin("company_profiles", "company_profiles.id", "access_tokens.profile_id")
+    .select("company_profiles.name")
+    .where("access_tokens.token_hash", "=", hashSecretToken(token))
+    .where("access_tokens.purpose", "=", "unsubscribe")
+    .where("access_tokens.expires_at", ">", sql<Date>`now()`)
+    .executeTakeFirst();
+  return row?.name ?? null;
+}
+
 /** What a profile page shows; read directly, so a row the schema refuses still shows. */
 export interface ProfileStatus {
   readonly name: string;
@@ -235,27 +299,79 @@ export interface RevokedAccess {
  * and every session of the profile, in one transaction, so each e-mail link
  * and signed-in browser stops working at once (a forwarded digest, a lost
  * device; D-026). The profile row itself is not touched.
- *
- * Tokens go first: a login racing with the revoke either has its token
- * deleted under it (the conditional UPDATE then finds nothing) or holds the
- * token row until it commits, so its new session is already visible to the
- * sessions DELETE (a new snapshot per statement in READ COMMITTED).
  */
 export async function revokeProfileAccess(
   db: Kysely<Database>,
   profileId: string,
 ): Promise<RevokedAccess> {
   return db.transaction().execute(async (trx) => {
-    const tokens = await trx
-      .deleteFrom("access_tokens")
-      .where("profile_id", "=", profileId)
-      .executeTakeFirst();
-    const sessions = await trx
-      .deleteFrom("sessions")
-      .where("profile_id", "=", profileId)
-      .executeTakeFirst();
-    return { tokens: Number(tokens.numDeletedRows), sessions: Number(sessions.numDeletedRows) };
+    // The profile row first, like the e-mail change (updateProfileSettings):
+    // the two never run interleaved, so they cannot deadlock over tokens and sessions.
+    await trx
+      .selectFrom("company_profiles")
+      .select("id")
+      .where("id", "=", profileId)
+      .forNoKeyUpdate()
+      .execute();
+    return deleteAccess(trx, profileId, null);
   });
+}
+
+/**
+ * Inside `trx`: true when the session is unexpired and the profile's, and
+ * then locked (FOR KEY SHARE) so a logout or revoke cannot delete it before
+ * `trx` ends. false when it is gone or expired.
+ */
+export async function lockLiveSession(
+  trx: Transaction<Database>,
+  profileId: string,
+  sessionToken: string,
+): Promise<boolean> {
+  if (!isSecretToken(sessionToken)) return false;
+  const row = await trx
+    .selectFrom("sessions")
+    .select("id")
+    .where("token_hash", "=", hashSecretToken(sessionToken))
+    .where("profile_id", "=", profileId)
+    .where("expires_at", ">", sql<Date>`now()`)
+    .forKeyShare()
+    .executeTakeFirst();
+  return row !== undefined;
+}
+
+/**
+ * The e-mail change on the profile form (PR-06B, D-027): like
+ * revokeProfileAccess, but the session that made the change stays open.
+ * `trx` is the transaction of the profile UPDATE (which holds the profile
+ * row), so the new address and the revocation commit together or not at all.
+ */
+export async function revokeOtherAccess(
+  trx: Transaction<Database>,
+  profileId: string,
+  keepSessionToken: string,
+): Promise<RevokedAccess> {
+  return deleteAccess(trx, profileId, hashSecretToken(keepSessionToken));
+}
+
+/**
+ * Tokens go first: a login racing with the revoke either has its token
+ * deleted under it (the conditional UPDATE then finds nothing) or holds the
+ * token row until it commits, so its new session is already visible to the
+ * sessions DELETE (a new snapshot per statement in READ COMMITTED).
+ */
+async function deleteAccess(
+  trx: Transaction<Database>,
+  profileId: string,
+  keepSessionHash: string | null,
+): Promise<RevokedAccess> {
+  const tokens = await trx
+    .deleteFrom("access_tokens")
+    .where("profile_id", "=", profileId)
+    .executeTakeFirst();
+  let sessions = trx.deleteFrom("sessions").where("profile_id", "=", profileId);
+  if (keepSessionHash !== null) sessions = sessions.where("token_hash", "<>", keepSessionHash);
+  const deleted = await sessions.executeTakeFirst();
+  return { tokens: Number(tokens.numDeletedRows), sessions: Number(deleted.numDeletedRows) };
 }
 
 /** Expired rows deleted per table and call, so one cleanup is a short statement. */

@@ -342,6 +342,26 @@ SameSite=Lax`, CSRF dla formularzy. Bez haseł w MVP.
   - zmiana e-maila w profilu unieważnia pozostałe sesje i tokeny profilu (ponowne użycie
     `revokeProfileAccess`, z zachowaniem bieżącej sesji).
 
+  **Stan PR-06B:** zaimplementowane, w review (D-027). Trasy `/profil/ustawienia` (formularz,
+  ciało ≤ 64 KB tylko tutaj), `/dopasowania` (reguły i kandydaci digestu, najbliższy termin
+  pierwszy, najwyżej 50 pozycji), `POST /profil/wlacz`; login-CSRF przez `Origin` albo
+  `Sec-Fetch-Site`; zmiana e-maila w jednej transakcji z unieważnieniem tokenów i innych
+  sesji. Uwagi:
+  - `Referrer-Policy` zmieniona z `no-referrer` na `strict-origin` — przy `no-referrer`
+    przeglądarki wysyłają `Origin: null` i kontrola `Origin` z PR-06A odrzucała formularze;
+  - nowy adres e-mail nie jest potwierdzany wiadomością (brak wysyłki z procesu web), a błąd
+    „adres zajęty” ujawnia, że adres jest w systemie;
+  - `/dopasowania` liczy dopasowanie w procesie `serve` (ok. 0,8 s przy 5 000 kandydatach i typowym
+    profilu, kilkanaście sekund w najgorszym przypadku), oddając pętlę zdarzeń po każdych ok. 20 ms
+    pracy; najwyżej jedno liczenie naraz (kolejne → 503 z `Retry-After`) — limit żądań tej trasy na
+    proxy w PR-07, optymalizacja dopiero po pomiarze na danych pilota;
+  - poprawki po review: kolejność blokad zmiany e-maila bez cyklu z logowaniem (było 40P01)
+    i jedna ponowna próba po 40P01, ponowne sprawdzenie sesji w transakcji, CSRF przed
+    walidacją formularza, digest bez linków na adres zmieniony w trakcie
+    (`address_changed`);
+  - bez zmian (otwarte decyzje właściciela): ważność 7/60/30 dni, brak formularza „wyślij mi
+    link”, ścisły multipart RFC 2046 na `/wypis`, linki w digeście jak w PR-06A.
+
 **Kryteria akceptacji (łącznie):** użytkownik bez instrukcji ustawia profil i widzi wyniki;
 autoryzacja po stronie serwera dla każdego zasobu; brak dashboardu analitycznego.
 
