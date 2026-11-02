@@ -1,16 +1,17 @@
 # Current State
 
-Current phase: PHASE 2 — VALUE DELIVERY
-Current PR: PR-05 — Alert / Daily Digest
-Status: PR-04 **MERGED in PR #8 (merge commit f8f113a)** after the owner's re-review. PR-05
-(daily digest, `deliveries`, test/smtp senders) implemented: Code & Safety Review PASS with
-findings (M1 SMTP setup failures not stopped, L1–L4) → fix round → C&S PASS (optional L-A,
-L-B) → Quality Review ACCEPT WITH NOTES (cancellation caveat, pending rows on stderr, overflow
-notice placement, CPV wording, "Link: nie podano") → fix round 2 (+ L-A, L-B) → C&S PASS (M-1:
-L-A regressed a refused EHLO under STARTTLS) → fix round 3 → C&S PASS. PR #9 opened for the
-owner's review (not merged). Owner review of PR #9: PASS, no blockers (AC1–AC4 met, nodemailer
-age and lockfile integrity checked, end-to-end run on real data) with three suggestions →
-owner-review round (`List-Unsubscribe` mailto header) → C&S PASS (optional L-1).
+Current phase: PHASE 3 — SELF SERVICE
+Current PR: PR-06A — Dostęp do profilu
+Status: PR-05 **MERGED in PR #9 (merge commit 0537d2c)**. PR-06A (profile access by e-mail
+link, cookie session, CSRF, RFC 8058 one-click unsubscribe, `serve` and `access:link`)
+implemented: Code & Safety Review PASS (M-1 docs claimed the outbox `.json` had no token
+links; L-1 timeouts enforced only every 30 s; L-2 client aborts logged as DB failures; L-3
+literal RFC 8058 §8.3 framing; L-4 IDN note) → fix round → C&S PASS → Quality Review ACCEPT
+(should-fix: how to get a new link, way back after unsubscribing) → copy round → C&S PASS →
+Quality ACCEPT. PR #10 opened; owner review PASS (no blockers) → owner follow-up
+`access:revoke <profileId>` + three PR-06B criteria → C&S PASS → Quality ACCEPT → polish
+round (named result type, DB-unreachable test, README/D-026 lines, apostrophe-safe psql
+lookup) → C&S PASS. Not merged.
 
 ## Completed
 
@@ -393,59 +394,122 @@ recorded in `docs/PR_PLAN.md` → PR-03 „Podział”; acceptance criteria 1–
     also removes "Automatyka"); validation on read; maximum-matching de-duplication (only affects
     the +10 bonus and reason lines, never `matched`).
 
+- **PR-05 — Alert / Daily Digest** (`docs/PR_PLAN.md` → PR-05, AC1–AC4) — **MERGED in PR #9
+  (merge commit 0537d2c)** after the owner's review. D-010 Accepted (SMTP through nodemailer),
+  D-024 new (digest rules, idempotency, failure classes, operator procedure for `pending` rows).
+
+  - `digest [--dry-run] [--profile <id>]` (`src/notifications/run.ts`, CLI in `src/cli.ts`): one
+    JSON summary on stdout, exit 0 = ok / nothing to send / lock busy, exit 1 = any profile
+    failed, uncertain, `not_found`, `invalid_profile`, `not_run`, or a schema/DB problem. A stderr
+    line counts `pending` deliveries that need an operator decision (README „Wynik niepewny”).
+  - Eligibility: status not `closed`/`cancelled`; `deadline` null or ≥ now; first seen within 7
+    days; ≤ 10 000 candidates; invalid stored rows skipped per row and counted. ≤ 50 offers per
+    e-mail, soonest deadline first; the overflow is announced under the heading and goes out on
+    the next days.
+  - `deliveries` (migration `0005_deliveries`): unique `(profile_id, opportunity_id, transport)`,
+    status `pending`/`sent`/`failed`, attempts ≤ 3, safe `error_code` CHECK. At most once: a
+    profile with a `sent` or `pending` row on the Warsaw day is skipped; rows are claimed in one
+    committed transaction before sending; `pending` rows (crash or uncertain outcome) are never
+    resent automatically. Shared `withAdvisoryLock` (`src/infrastructure/db/advisory-lock.ts`,
+    extracted from the ingest lock).
+  - E-mail (`src/notifications/digest.ts`, pure): subject with count and profile name only;
+    text + HTML, every source value escaped, links only http(s), missing values „nie podano”
+    (never invented); footer with the reason, the deadline/cancellation caveat and how to
+    unsubscribe (reply or operator sets `active=false`; token link in PR-06).
+  - Senders (`src/notifications/sender.ts`): `test` (default) writes `.eml` + `.json` to
+    `EMAIL_OUTBOX_DIR` (0700/0600, all-or-nothing); `smtp` only with `EMAIL_MODE=smtp`,
+    `EMAIL_FROM`, `SMTP_URL` (smtps:// or smtp:// with STARTTLS required), TLS ≥ 1.2, timeouts,
+    one connection per message. Failure classes `transient`/`permanent`/`unreachable`/`setup`/
+    `uncertain`: setup, exhausted unreachable and uncertain stop the run without spending
+    attempts; the rest of the profiles become `not_run`.
+  - Dependency: `nodemailer` 10.1.7 (MIT-0, no deps). Published 2026-10-18; the owner accepted
+    its age and checked the lockfile integrity in the PR #9 review; < 10.1.4 has addressparser
+    advisories.
+  - Owner-review round of PR #9: every e-mail (SMTP and the test-mode `.eml`) carries
+    `List-Unsubscribe: <mailto:<EMAIL_FROM>?subject=wypis> (Wypisz)` (RFC 2369) built by the
+    shared `mailOptions`/`unsubscribeMailto` in `src/notifications/sender.ts`: only the bare,
+    strictly validated address (no display name), local part and domain percent-encoded, header
+    left out when the address is not one plain address; nodemailer also strips control
+    characters and `<>`. Tests cover the header line, the `.eml`, 11 address cases and a CRLF
+    Bcc injection. One-click unsubscribe (RFC 8058 `List-Unsubscribe-Post`) → PR-06. C&S PASS;
+    optional L-1: the README header example omits the ` (Wypisz)` comment.
+  - Reviews: C&S PASS (M1 SMTP setup failures not stopped — N logins and attempts spent; L1
+    EHOSTUNREACH/ENETUNREACH uncertain; L2 kept, documented; L3 partial outbox files; L4 Markdown
+    code spans) → fixes → C&S PASS (L-A CONN reply at close ≠ setup; L-B 421 → unreachable) →
+    Quality ACCEPT WITH NOTES (cancellation caveat, pending visibility, overflow placement, CPV
+    wording, missing link) → fix round 2 → C&S PASS (M-1 refused EHLO under STARTTLS classified
+    permanent) → fix round 3 → C&S PASS.
+  - Owner decisions open (nodemailer age: accepted by the owner): explicit confirmation
+    before any real `smtp` send; 50 per e-mail (Quality asks 20–30?); skip offers due within
+    24–48 h?; is reply-to-unsubscribe enough before PR-06 (sender identification,
+    `List-Unsubscribe`)?; plan item for BZP cancellation notices before the pilot; coder
+    deviations listed in D-024 (in-run retry only for not-delivered errors, `pending_today` skip,
+    `unreachable` class, uncertain stops the run, `send_*` error codes).
+
 ## In progress
 
-**PR-05 — Alert / Daily Digest** (`docs/PR_PLAN.md` → PR-05, AC1–AC4) — implemented; PR opened
-for the owner's review (not merged). D-010 Accepted (SMTP through nodemailer), D-024 new (digest
-rules, idempotency, failure classes, operator procedure for `pending` rows).
+**PR-06A — Dostęp do profilu** (`docs/PR_PLAN.md` → PR-06A; first part of PR-06) —
+implemented; PR opened for the owner's review (not merged). D-025 new (web server on
+`node:http`, no framework), D-026 new (e-mail tokens, cookie session, CSRF, one-click
+unsubscribe); D-024 amended (digest footer links and `List-Unsubscribe` https + mailto).
 
-- `digest [--dry-run] [--profile <id>]` (`src/notifications/run.ts`, CLI in `src/cli.ts`): one
-  JSON summary on stdout, exit 0 = ok / nothing to send / lock busy, exit 1 = any profile
-  failed, uncertain, `not_found`, `invalid_profile`, `not_run`, or a schema/DB problem. A stderr
-  line counts `pending` deliveries that need an operator decision (README „Wynik niepewny”).
-- Eligibility: status not `closed`/`cancelled`; `deadline` null or ≥ now; first seen within 7
-  days; ≤ 10 000 candidates; invalid stored rows skipped per row and counted. ≤ 50 offers per
-  e-mail, soonest deadline first; the overflow is announced under the heading and goes out on
-  the next days.
-- `deliveries` (migration `0005_deliveries`): unique `(profile_id, opportunity_id, transport)`,
-  status `pending`/`sent`/`failed`, attempts ≤ 3, safe `error_code` CHECK. At most once: a
-  profile with a `sent` or `pending` row on the Warsaw day is skipped; rows are claimed in one
-  committed transaction before sending; `pending` rows (crash or uncertain outcome) are never
-  resent automatically. Shared `withAdvisoryLock` (`src/infrastructure/db/advisory-lock.ts`,
-  extracted from the ingest lock).
-- E-mail (`src/notifications/digest.ts`, pure): subject with count and profile name only;
-  text + HTML, every source value escaped, links only http(s), missing values „nie podano”
-  (never invented); footer with the reason, the deadline/cancellation caveat and how to
-  unsubscribe (reply or operator sets `active=false`; token link in PR-06).
-- Senders (`src/notifications/sender.ts`): `test` (default) writes `.eml` + `.json` to
-  `EMAIL_OUTBOX_DIR` (0700/0600, all-or-nothing); `smtp` only with `EMAIL_MODE=smtp`,
-  `EMAIL_FROM`, `SMTP_URL` (smtps:// or smtp:// with STARTTLS required), TLS ≥ 1.2, timeouts,
-  one connection per message. Failure classes `transient`/`permanent`/`unreachable`/`setup`/
-  `uncertain`: setup, exhausted unreachable and uncertain stop the run without spending
-  attempts; the rest of the profiles become `not_run`.
-- Dependency: `nodemailer` 10.1.7 (MIT-0, no deps). Published 2026-10-18; the owner accepted
-  its age and checked the lockfile integrity in the PR #9 review; < 10.1.4 has addressparser
-  advisories.
-- Owner-review round of PR #9: every e-mail (SMTP and the test-mode `.eml`) carries
-  `List-Unsubscribe: <mailto:<EMAIL_FROM>?subject=wypis> (Wypisz)` (RFC 2369) built by the
-  shared `mailOptions`/`unsubscribeMailto` in `src/notifications/sender.ts`: only the bare,
-  strictly validated address (no display name), local part and domain percent-encoded, header
-  left out when the address is not one plain address; nodemailer also strips control
-  characters and `<>`. Tests cover the header line, the `.eml`, 11 address cases and a CRLF
-  Bcc injection. One-click unsubscribe (RFC 8058 `List-Unsubscribe-Post`) → PR-06. C&S PASS;
-  optional L-1: the README header example omits the ` (Wypisz)` comment.
-- Reviews: C&S PASS (M1 SMTP setup failures not stopped — N logins and attempts spent; L1
-  EHOSTUNREACH/ENETUNREACH uncertain; L2 kept, documented; L3 partial outbox files; L4 Markdown
-  code spans) → fixes → C&S PASS (L-A CONN reply at close ≠ setup; L-B 421 → unreachable) →
-  Quality ACCEPT WITH NOTES (cancellation caveat, pending visibility, overflow placement, CPV
-  wording, missing link) → fix round 2 → C&S PASS (M-1 refused EHLO under STARTTLS classified
-  permanent) → fix round 3 → C&S PASS.
-- Owner decisions open (nodemailer age: accepted by the owner): explicit confirmation
-  before any real `smtp` send; 50 per e-mail (Quality asks 20–30?); skip offers due within
-  24–48 h?; is reply-to-unsubscribe enough before PR-06 (sender identification,
-  `List-Unsubscribe`)?; plan item for BZP cancellation notices before the pilot; coder
-  deviations listed in D-024 (in-run retry only for not-delivered errors, `pending_today` skip,
-  `unreachable` class, uncertain stops the run, `send_*` error codes).
+- `serve` (`src/web/server.ts`): one process, `WEB_HOST` (default 127.0.0.1) / `WEB_PORT`
+  (default 3000), `PUBLIC_BASE_URL` required (https; http only on loopback outside
+  production). Routes: `/`, `/dostep/<token>` (GET confirm page, POST log in → 303 `/profil`),
+  `/profil`, `/profil/wypisz`, `/wyloguj`, `/wypis/<token>`, `/styl.css`. Server-rendered
+  Polish pages, no JavaScript, shared `escapeHtml` (`src/infrastructure/html.ts`).
+- Tokens (`src/infrastructure/db/access-repository.ts`, migration `0006_access`:
+  `access_tokens`, `sessions`): 256-bit base64url, stored only as SHA-256. Login: single use,
+  7 days, consumed by a conditional `UPDATE … RETURNING` with the session created in the same
+  transaction (5-way race tested). Unsubscribe: multi-use, 60 days. Every unknown, used,
+  expired, malformed or wrong-purpose token gets the same neutral 404 page.
+- Session: cookie `__Host-radar_sesja` (HttpOnly, Secure, SameSite=Lax, Path=/, 30 days),
+  new id on every login, logout by POST, expiry checked server-side, `ON DELETE CASCADE`.
+  CSRF: HMAC-SHA256 of the session secret, `timingSafeEqual`; Origin check (missing passes,
+  `null`/foreign → 403) on every route except `/wypis/<token>`.
+- One-click unsubscribe (RFC 8058): POST `List-Unsubscribe=One-Click` as urlencoded or
+  multipart (own bounded parser, `src/web/multipart.ts`), 200 with no redirect and no cookie.
+  The digest adds a "Twój profil" link and the unsubscribe link to the footer, plus
+  `List-Unsubscribe: <https…>, <mailto…>` and `List-Unsubscribe-Post` when `PUBLIC_BASE_URL`
+  is set; without it the e-mail is byte-identical to PR-05. Tokens are issued before
+  `claimDeliveries`; a dry run issues none. The outbox `.json` copy shows the links as
+  `[token]`; the `.eml` keeps them (secret).
+- `access:link <profileId>`: prints the login link on stdout, a "secret" warning on stderr.
+- `access:revoke <profileId>` (owner review of PR #10): deletes every access token (login and
+  unsubscribe) and every session of the profile in one transaction (tokens first), prints
+  only `{"status":"ok","tokens":N,"sessions":M}`; profile and notifications untouched; no
+  `PUBLIC_BASE_URL` needed; unknown profile → 1. Tenant isolation tested end to end.
+- Hardening: 8 KB body (413), urlencoded only (415; multipart only on `/wypis`), headers
+  10 s / request 15 s (`connectionsCheckingInterval` 1 s), 8 KB headers, Host required; CSP,
+  nosniff, no-referrer, no-store; hourly cleanup of expired rows in batches of 1000; graceful
+  shutdown with a 10 s force-close. Logs: method, route name, status, duration; a client abort
+  is `http request aborted` (info, route + reason only).
+- Pages tell the customer how to get back in (reply to the last e-mail → operator sends a new
+  link) and how to undo an unsubscribe; README „Obsługa klienta” gives the operator the
+  `access:link`, `access:revoke` and `UPDATE company_profiles SET active = true` steps, plus a
+  psql `\prompt` lookup of `profileId` by e-mail (safe for an apostrophe in the address).
+- No new dependencies.
+- Reviews: C&S PASS (M-1 outbox `.json` held token links contrary to the docs; L-1 Node checks
+  the timeouts every 30 s by default; L-2 client aborts logged as DB failures; L-3 literal
+  §8.3 framing → 400; L-4 IDN note wrong) → fix round (redaction, 1 s check interval,
+  `RequestAbortedError`, docs) → C&S PASS (live probes: header 10.01 s, body/drip 15.01 s) →
+  Quality ACCEPT (should-fix: re-entry sentence, way back after unsubscribe; README operator
+  note) → copy round → C&S PASS → Quality ACCEPT. Owner review of PR #10: PASS, no blockers;
+  follow-up `access:revoke` → C&S PASS → Quality ACCEPT (should-fix: say that old one-click
+  links stop working; D-026 line; e-mail lookup) → polish round → C&S PASS (L-1: an apostrophe
+  broke the lookup literal) → README `\prompt` fix → C&S PASS.
+- PR-06B acceptance criteria added from the owner's review (`docs/PR_PLAN.md`): „Włącz ponownie
+  powiadomienia” on `/profil` (POST + CSRF); login-CSRF protection on `POST /dostep`
+  (`Sec-Fetch-Site`/`Origin`) before the profile form accepts data; an e-mail change revokes the
+  profile's other sessions and tokens (needs a `revokeProfileAccess` variant that keeps the
+  current session).
+- Owner decisions open: TTLs (login 7, unsubscribe 60, session 30 days); a self-service
+  "e-mail me a link" form (needs anti-enumeration and rate limiting); leniency for the literal
+  RFC 8058 §8.3 example framing on `/wypis` only (body has no security role there; strict
+  RFC 2046 today); send the "Twój profil" link to customers before PR-06B or keep
+  `PUBLIC_BASE_URL` unset until then; forwarded digest e-mails give profile access (footer
+  warns; separate rarer login e-mail?); the inactive-profile sentence was changed from „Aby je
+  włączyć, napisz do operatora serwisu.” to the reply-to-last-message wording.
 
 ## Blockers
 
@@ -479,7 +543,7 @@ rules, idempotency, failure classes, operator procedure for `pending` rows).
 
 ## Decisions made
 
-See `docs/DECISIONS.md` (D-001 … D-024). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
+See `docs/DECISIONS.md` (D-001 … D-026). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
 on `node:https` with pinned lookup, no HTTP library) accepted in PR-02 Part A; D-015 (first
 source: BZP through the official API) in PR-02 Part B; PR-03 Part A: D-016 (fingerprint and
 `content_hash` format), D-017 (`unchanged` writes nothing, no `last_seen_at`), D-018 (ingest
@@ -493,12 +557,25 @@ D-021 (ingest day ranges and automatic catch-up). PR-03 Part C: D-022 (offer det
 `htmlBody`, normalization helpers, CPV → MVP dictionary); D-015/D-016 amended (offers read
 `htmlBody`; `content_hash` consequence of the new values). PR-04: D-023 (matching rules,
 region semantics, profile schema, `match:preview`). PR-05: D-010 accepted (SMTP via
-nodemailer), D-024 (digest, `deliveries`, failure classes, `pending` procedure).
+nodemailer), D-024 (digest, `deliveries`, failure classes, `pending` procedure). PR-06A: D-025
+(web server on `node:http`), D-026 (e-mail tokens, session, CSRF, one-click unsubscribe);
+D-024 amended (footer links, `List-Unsubscribe` https + mailto).
 
 ## Next action
 
-1. Owner re-checks PR #9 after the `List-Unsubscribe` round and merges it. Pilot follow-ups
-   from the owner's PR #9 review (not in PR-05; owner to choose the PR):
+1. Owner reviews the PR-06A PR and decides the open items listed under "In progress"
+   (TTLs, self-service link form, §8.3 leniency, sending "Twój profil" before PR-06B,
+   forwarding). Then PR-06B (screens: profile form, matches list with reasons, link to the
+   source). Notes for PR-06B from the PR-06A Quality Review (non-blocking): short HTML link
+   texts in the digest footer instead of raw token URLs; the confirm page should say the login
+   lasts 30 days on this device; a "Wypisano" confirmation line on `/profil` after unsubscribing;
+   the company name on the unsubscribe confirm page; a link back to `/profil` on error pages;
+   the 404 page repeats „został już użyty albo wygasł” (drop „Aktualny link znajdziesz…” there);
+   plus the three owner criteria now in `docs/PR_PLAN.md` → PR-06B. For PR-07: runbook lines on
+   revoking access (`access:revoke <profileId>`) after a forwarded e-mail or an owner change,
+   monitoring the reply-to mailbox, the proxy must not log `/dostep` and
+   `/wypis` paths, TLS/HSTS and rate limiting at the proxy.
+   Pilot follow-ups from the owner's PR #9 review (owner to choose the PR):
    - Matching calibration (changes PR-04 scoring): in the owner's real-data run 7 of 26 offers
      matched only on a description keyword, several false positives (agricultural tractor,
      excavator/forklift, telescopic loader via „oświetlenie”/„elektryczne”). Options: fewer
@@ -521,8 +598,7 @@ nodemailer), D-024 (digest, `deliveries`, failure classes, `pending` procedure).
    first live `ingest bzp --date <past weekday>` on the same machine is a useful follow-up
    check (exit 0, `inserted` > 0, a second run all `unchanged`; `skipped` > 0 and some
    `updated` from `NoticeUpdateNotice` when originals of that day's updates are stored).
-3. Next PR after PR-05: PR-06 (Minimal User Interface, `docs/ROADMAP.md`; token unsubscribe
-   link). Notes carried from the PR-04 reviews (PR-05 status marked):
+3. PR-06 (Minimal User Interface, `docs/ROADMAP.md`): token unsubscribe link done in PR-06A. Notes carried from the PR-04 reviews (PR-05 status marked):
    - Matching cost: ~10–60 ms per offer × profile pair in the worst case (100 ten-token
      keywords, 10 000-char description); fine for 10–100 profiles × ≤ 1000 offers, measure
      before optimising (D-023).
@@ -704,6 +780,31 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-01, PR-06A owner follow-up `access:revoke` (Node 22, pnpm 10.28.0, PostgreSQL 16):
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 1526/1526 tests passed in 43 files, DB tests included. Full
+`pnpm audit`: unchanged (1 moderate, dev-only minimatch via eslint). No dependency changes.
+Integration test: revoked login/unsubscribe links → 404, sessions → 401, other profile's
+tokens and session still work, exact counts, repeat → 0/0. Quality ran `digest` (test mode),
+`serve`, `access:link` and `access:revoke` end to end in a temporary schema, removed. C&S and
+the coder ran read-only psql probes of the README lookup (apostrophe, injection string,
+backslash). No e-mail sent; existing tests only gained new describe blocks and a stub option;
+no assertion weakened. Working-tree fingerprint unchanged across every reviewer run.
+
+2026-11-01, PR-06A after the copy round (Node 22, pnpm 10.28.0, PostgreSQL 16):
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 1514/1514 tests passed in 43 files, DB tests included (PR-05:
+1276 in 37). `pnpm audit --prod`: no known vulnerabilities; full `pnpm audit`: unchanged (1
+moderate, dev-only minimatch via eslint). No dependency changes. C&S probed a live server
+(HEAD, path tricks, missing Host, CL+TE, 413/415/431, hostile multipart bodies ≤ 0.13 ms,
+slow header/body/drip cut at 10.01/15.01/15.01 s, DB outage, client aborts, outbox redaction)
+in the scratchpad and temporary schemas, all removed. Quality ran `access:link` and `serve`
+end to end with curl (login, reuse, CSRF, Origin, unsubscribe urlencoded + multipart, logout,
+SIGTERM) and `digest` in test mode with and without `PUBLIC_BASE_URL` in temporary schemas,
+all removed. No e-mail sent. Existing tests changed only for the new migration/table lists
+(`0006_access`) and new describe blocks; no assertion weakened. Working-tree fingerprint
+unchanged across every reviewer run.
 
 2026-11-01, PR-05 owner-review round of PR #9 (`List-Unsubscribe`; Node 22, pnpm 10.28.0,
 PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`

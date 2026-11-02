@@ -9,9 +9,19 @@ import {
   ConfigError,
   loadConfig,
   loadEmailConfig,
+  loadPublicBaseUrl,
+  loadWebConfig,
   type AppConfig,
   type EmailConfig,
+  type WebConfig,
 } from "./infrastructure/config.js";
+import {
+  getProfileStatus,
+  issueAccessToken,
+  type IssuedToken,
+  revokeProfileAccess,
+  type RevokedAccess,
+} from "./infrastructure/db/access-repository.js";
 import {
   createDatabase,
   MigrationError,
@@ -76,6 +86,8 @@ import {
 } from "./notifications/run.js";
 import { createEmailSender, type EmailSender } from "./notifications/sender.js";
 import { previewSource, type SourcePreview } from "./sources/preview.js";
+import { loginUrl } from "./web/links.js";
+import { startWebServer, type WebServer, type WebServerOptions } from "./web/server.js";
 import { sourceAdapters } from "./sources/registry.js";
 import { SourceFormatError, type SourceAdapter, type SourceHttpClient } from "./sources/types.js";
 
@@ -128,6 +140,23 @@ export interface CliDatabase {
     task: (db: Kysely<Database>, signal: AbortSignal) => Promise<T>,
     logger: Logger,
   ): Promise<LockResult<T>>;
+  /**
+   * A new single-use login token for the profile (`access:link`); null when
+   * the profile does not exist. Optional only so that stubs for the other
+   * commands need not provide it.
+   */
+  issueLoginToken?(profileId: string): Promise<IssuedToken | null>;
+  /**
+   * Deletes every token and session of the profile (`access:revoke`) and
+   * returns the counts; null when the profile does not exist. Optional only
+   * so that stubs for the other commands need not provide it.
+   */
+  revokeProfileAccess?(profileId: string): Promise<RevokedAccess | null>;
+  /**
+   * Starts the web server on this pool (`serve`, src/web/server.ts).
+   * Optional only so that stubs for the other commands need not provide it.
+   */
+  startWebServer?(options: Omit<WebServerOptions, "db">): Promise<WebServer>;
 }
 
 /** What commands that read sources need; injected so tests run without the network. */
@@ -153,6 +182,12 @@ export interface CliDigestDeps {
   readonly retryDelaysMs?: readonly number[];
 }
 
+/** What `serve` needs besides the database; injected so tests can stop the server. */
+export interface CliWebDeps {
+  /** Resolves when the server should shut down (SIGINT or SIGTERM in production). */
+  readonly waitForShutdown: () => Promise<void>;
+}
+
 /** External dependencies, injected so the CLI can be unit-tested without PostgreSQL. */
 export interface CliDeps {
   /** Must not connect yet; connecting happens on the first operation. */
@@ -161,6 +196,8 @@ export interface CliDeps {
   readonly sources?: CliSourceDeps;
   /** Defaults to defaultDigestDeps (real e-mail per EMAIL_MODE); tests inject fakes. */
   readonly digest?: CliDigestDeps;
+  /** Defaults to defaultWebDeps (process signals); tests inject a promise they resolve. */
+  readonly web?: CliWebDeps;
 }
 
 /**
@@ -202,6 +239,24 @@ export const defaultDigestDeps: CliDigestDeps = {
 };
 
 /**
+ * Production `serve` wiring: the first SIGINT or SIGTERM starts the graceful
+ * shutdown. The listeners are added only while `serve` waits (never at module
+ * load) and removed after, so a second signal stops the process at once.
+ */
+export const defaultWebDeps: CliWebDeps = {
+  waitForShutdown: () =>
+    new Promise((resolve) => {
+      const stop = (): void => {
+        process.off("SIGINT", stop);
+        process.off("SIGTERM", stop);
+        resolve();
+      };
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    }),
+};
+
+/**
  * A real connection pool (src/infrastructure/db). `lockHeartbeatMs` exists for
  * integration tests; production uses INGEST_LOCK_HEARTBEAT_MS (and the digest
  * lock's own default).
@@ -229,6 +284,13 @@ export function openCliDatabase(
         logger,
         ...(options.lockHeartbeatMs === undefined ? {} : { heartbeatMs: options.lockHeartbeatMs }),
       }),
+    issueLoginToken: async (profileId) =>
+      (await getProfileStatus(db, profileId)) === null
+        ? null
+        : issueAccessToken(db, profileId, "login"),
+    revokeProfileAccess: async (profileId) =>
+      (await getProfileStatus(db, profileId)) === null ? null : revokeProfileAccess(db, profileId),
+    startWebServer: (webOptions) => startWebServer({ db, ...webOptions }),
   };
 }
 
@@ -236,6 +298,7 @@ export function openCliDatabase(
 export const defaultCliDeps: CliDeps = {
   sources: defaultSourceDeps,
   digest: defaultDigestDeps,
+  web: defaultWebDeps,
   openDatabase: (databaseUrl) => openCliDatabase(databaseUrl),
 };
 
@@ -322,6 +385,24 @@ Commands:
             --dry-run   build the digests and print the summary; nothing is claimed,
                         sent or written to the outbox
             --profile   only this profile (also when it has nothing new)
+            With PUBLIC_BASE_URL set, every e-mail also carries a single-use login link
+            ("Twój profil", 7 days) and a one-click unsubscribe link (RFC 8058, 60 days).
+  serve     Run the web server (profile access through e-mail links, one-click
+            unsubscribe) until SIGINT/SIGTERM. Listens on WEB_HOST:WEB_PORT (default
+            127.0.0.1:3000) behind a reverse proxy that terminates TLS. Requires
+            PUBLIC_BASE_URL and an up-to-date schema (migrate). Deletes expired links and
+            sessions hourly. Exit 1 when it cannot start.
+  access:link <profileId>
+            Print a new single-use login link for the profile (valid 7 days) as JSON. The
+            link is a secret: whoever opens it gets into the profile; hand it over only
+            to the profile's owner. Requires PUBLIC_BASE_URL. Exit 1 when the profile
+            does not exist.
+  access:revoke <profileId>
+            End every login and unsubscribe link and every session of the profile at once
+            (e.g. after a forwarded e-mail or a lost device) and print the counts as JSON.
+            The profile and its notifications stay as they are; a new link comes from
+            access:link or the next digest. Requires an up-to-date schema (migrate). Exit 1
+            when the profile does not exist.
 `;
 
 type Command =
@@ -332,7 +413,10 @@ type Command =
   | "profile:create"
   | "profile:show"
   | "match:preview"
-  | "digest";
+  | "digest"
+  | "serve"
+  | "access:link"
+  | "access:revoke";
 const commands: readonly Command[] = [
   "health",
   "migrate",
@@ -342,6 +426,9 @@ const commands: readonly Command[] = [
   "profile:show",
   "match:preview",
   "digest",
+  "serve",
+  "access:link",
+  "access:revoke",
 ];
 
 function isCommand(value: string): value is Command {
@@ -379,7 +466,8 @@ interface DigestArgs {
 }
 
 type Invocation =
-  | { readonly command: "health" | "migrate" }
+  | { readonly command: "health" | "migrate" | "serve" }
+  | { readonly command: "access:link" | "access:revoke"; readonly profileId: string }
   | { readonly command: "source:preview"; readonly preview: PreviewArgs }
   | { readonly command: "ingest"; readonly ingest: IngestArgs }
   | { readonly command: "profile:create"; readonly file: string }
@@ -577,10 +665,10 @@ function parseInvocation(
     if (extra.length > 0) return `Unexpected argument: ${JSON.stringify(extra[0])}`;
     return { command, file };
   }
-  if (command === "profile:show") {
+  if (command === "profile:show" || command === "access:link" || command === "access:revoke") {
     const [id, ...extra] = rest;
     const profileId = parseProfileId(id);
-    if (profileId === null) return 'Command "profile:show" needs a profile id (uuid).';
+    if (profileId === null) return `Command "${command}" needs a profile id (uuid).`;
     if (extra.length > 0) return `Unexpected argument: ${JSON.stringify(extra[0])}`;
     return { command, profileId };
   }
@@ -656,17 +744,29 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
   }
 
   let config: AppConfig;
-  // Only `digest` reads the e-mail variables; checked before the database is opened.
+  // Only `digest` reads the e-mail variables, only `serve` the listener and
+  // only the link builders PUBLIC_BASE_URL; checked before the database is opened.
   let emailConfig: EmailConfig | null = null;
+  let webConfig: WebConfig | null = null;
+  let publicBaseUrl: string | null = null;
   try {
     config = loadConfig(io.env);
     if (invocation.command === "digest") emailConfig = loadEmailConfig(io.env);
+    if (invocation.command === "serve") webConfig = loadWebConfig(io.env);
+    if (invocation.command === "digest" || invocation.command === "access:link") {
+      publicBaseUrl = loadPublicBaseUrl(io.env);
+    }
   } catch (error: unknown) {
     if (error instanceof ConfigError) {
       io.stderr(`${error.message}\n`);
       return ExitCode.Failure;
     }
     throw error;
+  }
+
+  if (invocation.command === "access:link" && publicBaseUrl === null) {
+    io.stderr("PUBLIC_BASE_URL is required for access:link (the links are built from it).\n");
+    return ExitCode.Failure;
   }
 
   // Reads a source only: no database is opened (DATABASE_URL is still
@@ -700,7 +800,16 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
           database,
           io,
           deps.digest ?? defaultDigestDeps,
+          publicBaseUrl,
         );
+      case "serve":
+        if (webConfig === null) throw new Error("web configuration was not loaded");
+        return await runServe(config, webConfig, database, io, deps.web ?? defaultWebDeps);
+      case "access:link":
+        if (publicBaseUrl === null) throw new Error("PUBLIC_BASE_URL was not loaded");
+        return await runAccessLink(invocation.profileId, publicBaseUrl, database, io);
+      case "access:revoke":
+        return await runAccessRevoke(invocation.profileId, database, io);
     }
   } finally {
     await database.close();
@@ -1142,6 +1251,7 @@ async function runDigestCommand(
   database: CliDatabase,
   io: CliIo,
   digestDeps: CliDigestDeps,
+  publicBaseUrl: string | null,
 ): Promise<ExitCode> {
   if (database.withDigestLock === undefined || database.pendingMigrations === undefined) {
     throw new Error("database cannot run digest");
@@ -1166,6 +1276,7 @@ async function runDigestCommand(
             logger,
             sleep: digestDeps.sleep,
             signal,
+            publicBaseUrl,
             ...(digestDeps.retryDelaysMs === undefined
               ? {}
               : { retryDelaysMs: digestDeps.retryDelaysMs }),
@@ -1217,4 +1328,149 @@ async function runDigestCommand(
     .map((profile) => `${profile.profileId} (${profile.errorCode ?? profile.status})`);
   if (problems.length > 0) io.stderr(`Digest failed for: ${problems.join(", ")}\n`);
   return ExitCode.Failure;
+}
+
+/** The schema check `serve`, `access:link` and `access:revoke` share; a message when not ready, else null. */
+async function schemaNotReady(database: CliDatabase): Promise<string | null> {
+  if (database.pendingMigrations === undefined) throw new Error("database cannot check migrations");
+  const pending = await database.pendingMigrations();
+  return pending.length > 0 ? "the database schema is not up to date; run `migrate`" : null;
+}
+
+/** A listen failure's errno code (EADDRINUSE, EACCES, ...), validated; else null. */
+function listenErrorCode(error: unknown): string | null {
+  const code =
+    typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+  return typeof code === "string" && /^E[A-Z0-9_]{1,31}$/.test(code) ? code : null;
+}
+
+/**
+ * `serve`: the web server (src/web) until SIGINT/SIGTERM, then a graceful
+ * shutdown (open requests finish, bounded) and exit 0. Exit 1 when the
+ * schema is not up to date, the database is unavailable or the address
+ * cannot be bound. Logs one line per request (method, route name, status,
+ * duration) on stderr; never a URL, token, cookie or address.
+ */
+async function runServe(
+  config: AppConfig,
+  webConfig: WebConfig,
+  database: CliDatabase,
+  io: CliIo,
+  webDeps: CliWebDeps,
+): Promise<ExitCode> {
+  if (database.startWebServer === undefined) throw new Error("database cannot serve");
+  const logger = createLogger(config.logLevel, io.stderr);
+  try {
+    const notReady = await schemaNotReady(database);
+    if (notReady !== null) {
+      io.stderr(`Serve failed: ${notReady}.\n`);
+      return ExitCode.Failure;
+    }
+  } catch (error: unknown) {
+    const failure = describeDatabaseFailure(error);
+    if (failure.reason === "unknown") throw error;
+    io.stderr(`Serve failed: database ${formatDatabaseFailure(failure)}\n`);
+    return ExitCode.Failure;
+  }
+  // Registered before listening, so a signal during startup is not lost.
+  const shutdown = webDeps.waitForShutdown();
+  let server: WebServer;
+  try {
+    server = await database.startWebServer({
+      host: webConfig.host,
+      port: webConfig.port,
+      publicBaseUrl: webConfig.publicBaseUrl,
+      logger,
+    });
+  } catch (error: unknown) {
+    const code = listenErrorCode(error);
+    if (code === null) throw error;
+    io.stderr(`Serve failed: cannot listen on WEB_HOST:WEB_PORT (${code}).\n`);
+    return ExitCode.Failure;
+  }
+  logger.info("web server listening", { host: server.host, port: server.port });
+  await shutdown;
+  logger.info("web server stopping");
+  await server.close();
+  logger.info("web server stopped");
+  return ExitCode.Ok;
+}
+
+/**
+ * `access:link`: a new single-use login link (7 days) for the profile, as
+ * one JSON line on stdout. The link is a secret: printed for the operator to
+ * hand over, never logged.
+ */
+async function runAccessLink(
+  profileId: string,
+  publicBaseUrl: string,
+  database: CliDatabase,
+  io: CliIo,
+): Promise<ExitCode> {
+  if (database.issueLoginToken === undefined) throw new Error("database cannot issue links");
+  let issued: IssuedToken | null;
+  try {
+    const notReady = await schemaNotReady(database);
+    if (notReady !== null) {
+      io.stderr(`Link not created: ${notReady}.\n`);
+      return ExitCode.Failure;
+    }
+    issued = await database.issueLoginToken(profileId);
+  } catch (error: unknown) {
+    const failure = describeDatabaseFailure(error);
+    if (failure.reason === "unknown") throw error;
+    io.stderr(`Link not created: database ${formatDatabaseFailure(failure)}\n`);
+    return ExitCode.Failure;
+  }
+  if (issued === null) {
+    io.stderr("Profile not found.\n");
+    return ExitCode.Failure;
+  }
+  io.stdout(
+    `${JSON.stringify({
+      status: "ok",
+      url: loginUrl(publicBaseUrl, issued.token),
+      expiresAt: issued.expiresAt.toISOString(),
+    })}\n`,
+  );
+  io.stderr(
+    "The link is a secret: whoever opens it gets into the profile. It works once, " +
+      "for 7 days; hand it over only to the profile's owner.\n",
+  );
+  return ExitCode.Ok;
+}
+
+/**
+ * `access:revoke`: deletes every token and session of the profile (one
+ * transaction) and prints the counts as one JSON line. Never prints or logs
+ * a token, hash or address; the profile itself is left as it is.
+ */
+async function runAccessRevoke(
+  profileId: string,
+  database: CliDatabase,
+  io: CliIo,
+): Promise<ExitCode> {
+  if (database.revokeProfileAccess === undefined) throw new Error("database cannot revoke access");
+  let revoked: RevokedAccess | null;
+  try {
+    const notReady = await schemaNotReady(database);
+    if (notReady !== null) {
+      io.stderr(`Access not revoked: ${notReady}.\n`);
+      return ExitCode.Failure;
+    }
+    revoked = await database.revokeProfileAccess(profileId);
+  } catch (error: unknown) {
+    const failure = describeDatabaseFailure(error);
+    if (failure.reason === "unknown") throw error;
+    io.stderr(`Access not revoked: database ${formatDatabaseFailure(failure)}\n`);
+    return ExitCode.Failure;
+  }
+  if (revoked === null) {
+    io.stderr("Profile not found.\n");
+    return ExitCode.Failure;
+  }
+  io.stdout(
+    `${JSON.stringify({ status: "ok", tokens: revoked.tokens, sessions: revoked.sessions })}\n`,
+  );
+  return ExitCode.Ok;
 }

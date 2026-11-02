@@ -241,4 +241,64 @@ export const migrations: Readonly<Record<string, Migration>> = {
       `.execute(db);
     },
   },
+  "0006_access": {
+    async up(db: Kysely<unknown>) {
+      // Secret tokens from e-mails (D-026): a single-use login link and a
+      // multi-use unsubscribe link (RFC 8058). Only SHA-256 of the token is
+      // stored (hex), never the token itself. Expiry in hours, not days:
+      // `timestamptz + interval 'N days'` follows the session time zone across
+      // a DST change, hours do not.
+      await sql`
+        CREATE TABLE access_tokens (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          token_hash text NOT NULL,
+          profile_id uuid NOT NULL,
+          purpose text NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          expires_at timestamptz NOT NULL,
+          used_at timestamptz,
+          CONSTRAINT access_tokens_token_hash_key UNIQUE (token_hash),
+          CONSTRAINT access_tokens_profile_id_fkey
+            FOREIGN KEY (profile_id) REFERENCES company_profiles (id) ON DELETE CASCADE,
+          CONSTRAINT access_tokens_token_hash_check CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+          CONSTRAINT access_tokens_purpose_check CHECK (purpose IN ('login', 'unsubscribe')),
+          CONSTRAINT access_tokens_expiry_check
+            CHECK (expires_at > created_at
+                   AND expires_at <= created_at + CASE purpose
+                     WHEN 'login' THEN interval '168 hours'
+                     ELSE interval '1440 hours'
+                   END),
+          -- Only a login token is used up; an unsubscribe token works until it expires.
+          CONSTRAINT access_tokens_used_at_check CHECK (used_at IS NULL OR purpose = 'login')
+        )
+      `.execute(db);
+      // The cascade from company_profiles and the cleanup of expired rows.
+      await sql`CREATE INDEX access_tokens_profile_id_idx ON access_tokens (profile_id)`.execute(
+        db,
+      );
+      await sql`CREATE INDEX access_tokens_expires_at_idx ON access_tokens (expires_at)`.execute(
+        db,
+      );
+
+      // Browser sessions after a login link (cookie `__Host-radar_sesja`): the
+      // random session id is stored as SHA-256 only.
+      await sql`
+        CREATE TABLE sessions (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          token_hash text NOT NULL,
+          profile_id uuid NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          expires_at timestamptz NOT NULL,
+          CONSTRAINT sessions_token_hash_key UNIQUE (token_hash),
+          CONSTRAINT sessions_profile_id_fkey
+            FOREIGN KEY (profile_id) REFERENCES company_profiles (id) ON DELETE CASCADE,
+          CONSTRAINT sessions_token_hash_check CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+          CONSTRAINT sessions_expiry_check
+            CHECK (expires_at > created_at AND expires_at <= created_at + interval '720 hours')
+        )
+      `.execute(db);
+      await sql`CREATE INDEX sessions_profile_id_idx ON sessions (profile_id)`.execute(db);
+      await sql`CREATE INDEX sessions_expires_at_idx ON sessions (expires_at)`.execute(db);
+    },
+  },
 };

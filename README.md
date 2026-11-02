@@ -8,15 +8,17 @@ i informuje firmę tylko o tych, które faktycznie do niej pasują.
 źródła → pobranie → normalizacja → deduplikacja → dopasowanie → alert
 ```
 
-> Status: **PR-04 (matching) — w toku**. Repozytorium zawiera szkielet
+> Status: **PR-06A (dostęp do profilu) — w toku**. Repozytorium zawiera szkielet
 > projektu, model domenowy (`Source`, `Opportunity`, `CompanyProfile`), schemat PostgreSQL z
 > migracjami, repozytoria, bezpieczny klient HTTP, pierwszy adapter źródła (BZP przez oficjalne
 > API platformy e-Zamówienia), zapis ogłoszeń z deduplikacją i wykrywaniem zmian, zmiany
 > terminów z ogłoszeń o zmianie, nadrabianie pominiętych dni, opis, kontakt i wartość ofert
 > BZP odczytane z treści ogłoszenia, deterministyczny matching ofert do profilu firmy z
-> wyjaśnieniem oraz komendy CLI `health`, `migrate`, `source:preview`, `ingest`,
-> `profile:create`, `profile:show` i `match:preview`. Pozostałe funkcje produktu (e-mail,
-> UI) powstają w kolejnych PR-ach — patrz
+> wyjaśnieniem, dzienny digest e-mail, dostęp do profilu z linku w e-mailu (serwer web,
+> sesja, wypis jednym kliknięciem) oraz komendy CLI `health`, `migrate`, `source:preview`,
+> `ingest`, `profile:create`, `profile:show`, `match:preview`, `digest`, `serve`,
+> `access:link` i `access:revoke`. Pozostałe funkcje produktu (ekrany profilu, wdrożenie)
+> powstają w kolejnych PR-ach — patrz
 > [`docs/PR_PLAN.md`](docs/PR_PLAN.md) i [`docs/STATE.md`](docs/STATE.md).
 
 ## Wymagania
@@ -64,6 +66,9 @@ Sprawdzenie `source:preview` (AC1): kod wyjścia 0, `normalized` > 0, a w logach
 | `profile:show <profileId>`                                                                  | Wypisuje profil jako JSON; nieznany id → `1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `match:preview <profileId> [--limit N]`                                                     | Dopasowuje najnowsze oferty (bez `closed` i `cancelled`; `--limit` ofert do odczytu, 1–1000, domyślnie 100) do profilu (D-023) i wypisuje tekstem dopasowane — po terminie (najbliższy pierwszy, bez terminu na końcu), potem wyniku — z wynikiem, tytułem, zamawiającym, terminem (czas polski), linkiem i powodami („dlaczego: kategoria: elektryka (CPV 45310000-3); słowo: oświetlenie (tytuł); region: mazowieckie”), na końcu „dopasowane X z Y”. Oferty po terminie — na samym końcu, z „(po terminie)”; nieprawidłowe zapisane wiersze ofert są pomijane (ostrzeżenie w logu, licznik w podsumowaniu, kod `0`), ale liczą się do `--limit`, więc ofert może być mniej niż N — ile pominięto, mówi podsumowanie. Bez danych kontaktowych; nic nie zapisuje ani nie wysyła. Działa też dla profilu nieaktywnego (z informacją o tym).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `digest [--dry-run] [--profile <profileId>]`                                                | Dzisiejszy digest (dzień w Polsce): każdy aktywny profil (albo tylko `--profile`) dostaje najwyżej jeden e-mail dziennie z nowymi dopasowanymi ofertami (pierwszy zapis w ostatnich 7 dniach, bez `closed`/`cancelled`, bez ofert po terminie — termin nieznany zostaje jako „nie podano”), których jeszcze nie dostał; najwyżej 50 na e-mail, najbliższy termin pierwszy (reszta w kolejnych dniach). Bez nowych ofert — bez e-maila. Domyślnie tryb `test`: e-mail trafia do plików w `EMAIL_OUTBOX_DIR`, nic nie jest wysyłane. `--dry-run`: tylko liczy, nic nie zapisuje ani nie wysyła. Wynik: jedna linia JSON (`status`, `digestDate`, `transport`, `profiles[]` z `status` i licznikami), bez adresów i tytułów. Kod `0`, gdy wszystko wysłano albo nie było czego wysłać, także gdy trwa inny `digest` (`"status":"skipped"`); `1`, gdy wysyłka się nie udała lub jej wynik jest niepewny, profil nie istnieje lub jest nieprawidłowy, są niewykonane migracje albo baza jest niedostępna. Szczegóły — niżej, „Digest (e-mail)”.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `serve`                                                                                     | Serwer web (PR-06A): strony logowania z linku, profilu i wypisu na `WEB_HOST:WEB_PORT` (domyślnie `127.0.0.1:3000`), za reverse proxy z TLS. Wymaga `PUBLIC_BASE_URL` i aktualnego schematu bazy; działa do SIGINT/SIGTERM (łagodne zatrzymanie, kod `0`). Szczegóły — niżej, „Serwer web (`serve`)”.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `access:link <profileId>`                                                                   | Wydaje link logowania do profilu (jednorazowy, ważny 7 dni) i wypisuje `{"status":"ok","url":…,"expiresAt":…}` na stdout. **Link jest sekretem** — daje dostęp do profilu; przekazuj go tylko właścicielowi profilu. Wymaga `PUBLIC_BASE_URL`; nieznany profil → `1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `access:revoke <profileId>`                                                                 | Unieważnia naraz wszystkie linki (logowania i wypisu) i sesje profilu, w jednej transakcji — reakcja na przekazany dalej e-mail albo zgubione urządzenie. Wypisuje tylko liczby: `{"status":"ok","tokens":…,"sessions":…}`. Profil i powiadomienia bez zmian; nie wymaga `PUBLIC_BASE_URL`; nieznany profil → `1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 Kody wyjścia: `0` — OK, `1` — błąd konfiguracji/wykonania (np. baza niedostępna), `2` — błędne
 użycie (komenda i argumenty są sprawdzane przed konfiguracją, więc błędne użycie zawsze daje `2`;
@@ -266,13 +271,20 @@ crontab z `CRON_TZ=Europe/Warsaw`):
   DELETE FROM deliveries WHERE status = 'pending' AND profile_id = '…';
   ```
 
+- **Linki (PR-06A):** gdy ustawiono `PUBLIC_BASE_URL`, każdy e-mail ma w stopce link „Twój
+  profil” (logowanie, jednorazowy, 7 dni) i link wypisu (60 dni), a nagłówki
+  `List-Unsubscribe: <https://…/wypis/…>, <mailto:…>` i
+  `List-Unsubscribe-Post: List-Unsubscribe=One-Click` — przycisk „Anuluj subskrypcję” w
+  programie pocztowym wypisuje wtedy jednym kliknięciem, bez udziału operatora. Kto ma e-mail,
+  ma dostęp do profilu — stopka ostrzega, żeby nie przekazywać wiadomości dalej. Bez
+  `PUBLIC_BASE_URL` — jak niżej (tylko `mailto`).
 - **Rezygnacja:** odbiorca odpisuje lub pisze do operatora; operator wyłącza profil
   (`UPDATE company_profiles SET active = false WHERE id = '…';`). Każdy e-mail (także plik
   `.eml` w trybie `test`) ma nagłówek
   `List-Unsubscribe: <mailto:<adres z EMAIL_FROM>?subject=wypis>` (sam adres, bez nazwy) —
   przycisk „Anuluj subskrypcję” w Gmailu czy Outlooku (jeśli program go pokaże) wysyła e-mail
-  „wypis” na skrzynkę `EMAIL_FROM`, obsługiwany jak odpowiedź. Wypis jednym kliknięciem
-  (RFC 8058, `List-Unsubscribe-Post`) i link z tokenem — PR-06.
+  „wypis” na skrzynkę `EMAIL_FROM`, obsługiwany jak odpowiedź (z `PUBLIC_BASE_URL` — także
+  link `https`, wyżej).
 - Nakładające się uruchomienia są bezpieczne: drugie kończy się
   `{"status":"skipped","reason":"lock_busy",…}`, komunikatem `Digest skipped: …` i kodem `0`.
 - **Termin:** „po terminie” liczy się z zapisanego terminu. Dla małych zamówień BZP i dni
@@ -281,6 +293,56 @@ crontab z `CRON_TZ=Europe/Warsaw`):
   odwołaniu) nie są jeszcze pobierane, więc odwołany przetarg może trafić do digestu jako
   otwarty. E-mail przypomina, że termin mógł się zmienić, a postępowanie zostać odwołane, i
   każe sprawdzić ogłoszenie w źródle (D-024).
+
+### Serwer web (`serve`)
+
+`serve` to jedyny długo działający proces (PR-06A, D-025, D-026): `node:http` bez
+frameworka, strony HTML bez JavaScriptu. Uruchamiany jako usługa (np. unit systemd z
+`Restart=on-failure`), nie z crona; wymaga wykonanego `migrate`.
+
+```sh
+PUBLIC_BASE_URL=https://radar.example.invalid node dist/main.js serve
+```
+
+- **Dostęp:** klient loguje się linkiem z e-maila (`/dostep/<token>` → przycisk „Zaloguj
+  się”; samo otwarcie linku, np. przez skaner poczty, go nie zużywa) albo linkiem od
+  operatora (`access:link <profileId>`). Sesja w ciasteczku `__Host-radar_sesja` (30 dni).
+  `/profil` pokazuje nazwę i status profilu oraz przyciski „Wypisz” i „Wyloguj”. Każdy
+  nieważny link (zużyty, wygasły, nieznany) daje tę samą stronę „link nieważny”.
+- **Wypis:** `/wypis/<token>` — strona z przyciskiem; POST RFC 8058 z programu pocztowego
+  (`multipart/form-data` albo `application/x-www-form-urlencoded`) wypisuje bez logowania i
+  odpowiada 200, nigdy przekierowaniem. Ponowny wypis niczego nie zmienia.
+- **Obsługa klienta:** strony „link nieważny”, „Zaloguj się”, strona główna i „Wypisano”
+  odsyłają klienta do odpowiedzi na ostatnią wiadomość. Prośba o nowy link:
+  `node dist/main.js access:link <profileId>` i wyślij URL **tylko na adres e-mail zapisany w
+  tym profilu** (link jest sekretem — nie na adres, z którego przyszła prośba, jeśli jest
+  inny). Ponowne włączenie powiadomień po wypisie przez pomyłkę:
+  `UPDATE company_profiles SET active = true WHERE id = '<profileId>';`. Przekazany dalej
+  e-mail z linkami albo zgubione urządzenie z otwartą sesją:
+  `node dist/main.js access:revoke <profileId>` — usuwa naraz wszystkie linki (logowania i
+  wypisu) i sesje profilu, wypisuje tylko liczby (`{"status":"ok","tokens":…,"sessions":…}`);
+  profil i powiadomienia zostają bez zmian. Potem nowy link: `access:link` jak wyżej. Po
+  `access:revoke` wypis jednym kliknięciem ze starszych e-maili przestaje działać — klient
+  może wypisać się odpowiedzią albo linkiem z kolejnego digestu. `<profileId>` po adresie
+  e-mail (w bazie zawsze małymi literami, bez spacji na brzegach) — w `psql`; adres wklej po
+  „Adres:” bez cudzysłowów, `:'adres'` sam go cytuje (bezpieczne także dla apostrofu w
+  adresie):
+
+  ```sql
+  \prompt 'Adres: ' adres
+  SELECT id FROM company_profiles WHERE email = lower(btrim(:'adres'));
+  ```
+
+- **Reverse proxy i TLS (PR-07):** `serve` mówi czystym HTTP i domyślnie słucha tylko na
+  `127.0.0.1:3000` — nie wystawiaj go bezpośrednio. TLS, HSTS i przekierowanie z `http` robi
+  proxy (np. Caddy, nginx) kierujące `PUBLIC_BASE_URL` na `WEB_HOST:WEB_PORT`. Ścieżki
+  `/dostep/…` i `/wypis/…` zawierają tokeny: **proxy nie może ich zapisywać w logach
+  dostępu** (wyłącz log albo przycinaj ścieżkę). Przed wysyłką do prawdziwych odbiorców
+  sprawdź, że **DKIM podpisuje nagłówki `List-Unsubscribe` i `List-Unsubscribe-Post`**
+  (RFC 8058; bez tego duże skrzynki ignorują wypis jednym kliknięciem).
+- **Sprzątanie:** `serve` co godzinę usuwa wygasłe tokeny i sesje (bez osobnego crona).
+- **Logi:** jedna linia na żądanie (metoda, nazwa trasy, status, czas) — bez URL-i, tokenów,
+  ciasteczek i adresów.
 
 ## Konfiguracja
 
@@ -310,6 +372,13 @@ Aplikacja czyta konfigurację **wyłącznie ze zmiennych środowiskowych** proce
   i parametrów; nigdy nie wypisywany), `EMAIL_OUTBOX_DIR` (tryb `test`, domyślnie
   `./outbox`). Czytane tylko przez `digest`; w trybie `smtp` `EMAIL_FROM` i `SMTP_URL` są
   wymagane. Błąd → `Invalid e-mail configuration: <nazwy zmiennych>`.
+- **Web (`serve`, `access:link`, linki w `digest`; PR-06A):** `PUBLIC_BASE_URL` — adres, pod
+  którym klienci widzą serwis (sam origin: `https://host[:port]`, bez ścieżki, zapytania i
+  danych logowania; `http://` tylko dla `localhost`/`127.0.0.1`/`[::1]` poza
+  `NODE_ENV=production`). Wymagany przez `serve` i `access:link`; w `digest` opcjonalny
+  (ustawiony → linki w e-mailach). `WEB_HOST` (adres IP lub `localhost`, domyślnie
+  `127.0.0.1`) i `WEB_PORT` (domyślnie `3000`) — czytane tylko przez `serve`. Błąd →
+  `Invalid web configuration: <nazwy zmiennych>`.
 - **Produkcja / cron:** bezpośrednie `node dist/main.js …` **nie czyta** `.env`. Zmienne
   eksportuje środowisko uruchomieniowe (crontab, unit systemd, panel hostingu). Kto chce
   użyć pliku, podaje go jawnie: `node --env-file=/ścieżka/do/pliku dist/main.js health`.

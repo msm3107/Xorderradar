@@ -4,11 +4,15 @@ import type {
   OpportunityContact,
   OpportunityLocation,
 } from "../domain/opportunity.js";
+import { escapeHtml } from "../infrastructure/html.js";
 import { formatReasons } from "../matching/format.js";
 import type { MatchReason } from "../matching/match.js";
 import { mvpCategoriesForCpv } from "../sources/normalize/cpv-categories.js";
 import { formatWarsawMinute, warsawDay } from "../sources/normalize/warsaw-time.js";
 import { cleanText } from "../sources/normalize/whitespace.js";
+
+/** Re-exported: the escaping the digest uses (one implementation, src/infrastructure/html.ts). */
+export { escapeHtml };
 
 /**
  * The daily digest e-mail (docs/PRODUCT.md "Pojedynczy wynik w alercie",
@@ -27,6 +31,17 @@ export interface DigestItem {
 export interface DigestOptions {
   /** Matching offers left out of this e-mail by the per-e-mail cap. */
   readonly overflow: number;
+  /**
+   * The web links of this e-mail (PR-06A, D-024), when PUBLIC_BASE_URL is
+   * set: a single-use login link ("Twój profil") and the one-click
+   * unsubscribe link. Without them the footer asks for a reply instead.
+   */
+  readonly links?: DigestLinks;
+}
+
+export interface DigestLinks {
+  readonly profileUrl: string;
+  readonly unsubscribeUrl: string;
 }
 
 export interface DigestEmail {
@@ -55,12 +70,18 @@ interface ItemModel {
   readonly fields: readonly Field[];
 }
 
+/** A footer paragraph, optionally ending with a link (shown as its URL in the text part). */
+interface FooterParagraph {
+  readonly text: string;
+  readonly href?: string;
+}
+
 interface DigestModel {
   readonly heading: string;
   /** Shown right under the heading: matching offers left for later e-mails. */
   readonly overflowNotice: string | null;
   readonly items: readonly ItemModel[];
-  readonly footer: readonly string[];
+  readonly footer: readonly FooterParagraph[];
 }
 
 /** Polish plural form for `count`: one, few (2–4, not 12–14), many. */
@@ -196,15 +217,42 @@ function digestModel(
   now: Date,
   options: DigestOptions,
 ): DigestModel {
-  const footer = [
-    `Stan na ${formatWarsawMinute(now)} (czas polski).`,
-    "Dane pochodzą z publicznych ogłoszeń. Termin mógł się zmienić, a postępowanie mogło " +
-      "zostać odwołane — przed złożeniem oferty sprawdź ogłoszenie w źródle.",
-    `Otrzymujesz tę wiadomość, ponieważ dla firmy „${profileName(profile)}” założono profil ` +
-      "w Radarze Zamówień: raz dziennie wysyłamy nowe zamówienia pasujące do jego kategorii, " +
-      "słów kluczowych i regionów.",
-    "Aby zrezygnować z powiadomień, odpowiedz na tę wiadomość lub napisz do operatora " +
-      "serwisu — wyłączymy profil.",
+  const profileUrl = options.links === undefined ? null : safeLink(options.links.profileUrl);
+  const unsubscribeUrl =
+    options.links === undefined ? null : safeLink(options.links.unsubscribeUrl);
+  const footer: FooterParagraph[] = [
+    { text: `Stan na ${formatWarsawMinute(now)} (czas polski).` },
+    {
+      text:
+        "Dane pochodzą z publicznych ogłoszeń. Termin mógł się zmienić, a postępowanie mogło " +
+        "zostać odwołane — przed złożeniem oferty sprawdź ogłoszenie w źródle.",
+    },
+    {
+      text:
+        `Otrzymujesz tę wiadomość, ponieważ dla firmy „${profileName(profile)}” założono profil ` +
+        "w Radarze Zamówień: raz dziennie wysyłamy nowe zamówienia pasujące do jego kategorii, " +
+        "słów kluczowych i regionów.",
+    },
+    ...(profileUrl === null
+      ? []
+      : [
+          {
+            text:
+              "Twój profil (link jednorazowy, ważny 7 dni; nie przekazuj tej wiadomości " +
+              "dalej — link daje dostęp do profilu):",
+            href: profileUrl,
+          },
+        ]),
+    unsubscribeUrl === null
+      ? {
+          text:
+            "Aby zrezygnować z powiadomień, odpowiedz na tę wiadomość lub napisz do operatora " +
+            "serwisu — wyłączymy profil.",
+        }
+      : {
+          text: "Aby zrezygnować z powiadomień, otwórz ten link (albo odpowiedz na tę wiadomość):",
+          href: unsubscribeUrl,
+        },
   ];
   return {
     heading: `Znaleźliśmy dziś ${newOffers(items.length)} ${matching(items.length)} do Twojej firmy.`,
@@ -222,26 +270,14 @@ function renderText(model: DigestModel): string {
     for (const field of item.fields) lines.push(`   ${field.label}: ${field.value}`);
     lines.push("");
   });
-  lines.push("--", ...model.footer.flatMap((paragraph) => [paragraph, ""]));
+  lines.push(
+    "--",
+    ...model.footer.flatMap((paragraph) => [
+      paragraph.href === undefined ? paragraph.text : `${paragraph.text} ${paragraph.href}`,
+      "",
+    ]),
+  );
   return `${lines.join("\n").trimEnd()}\n`;
-}
-
-const HTML_ESCAPES: Readonly<Record<string, string>> = {
-  "&": "&amp;",
-  "<": "&lt;",
-  ">": "&gt;",
-  '"': "&quot;",
-  "'": "&#39;",
-  "`": "&#96;",
-};
-
-/**
- * Escapes text for an HTML text node or a double-quoted attribute value. All
- * interpolated values go through it, the href included (which is also
- * restricted to http(s) before).
- */
-export function escapeHtml(value: string): string {
-  return value.replace(/[&<>"'`]/g, (char) => HTML_ESCAPES[char] ?? char);
 }
 
 function renderField(field: Field): string {
@@ -269,7 +305,14 @@ function renderHtml(model: DigestModel, subject: string): string {
     ...(model.overflowNotice === null ? [] : [`<p>${escapeHtml(model.overflowNotice)}</p>`]),
     `<ol style="padding-left:1.2em">${items.join("")}</ol>`,
     '<hr><div style="font-size:0.9em;color:#555">',
-    ...model.footer.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`),
+    ...model.footer.map(
+      (paragraph) =>
+        `<p>${escapeHtml(paragraph.text)}` +
+        (paragraph.href === undefined
+          ? ""
+          : ` <a href="${escapeHtml(paragraph.href)}">${escapeHtml(paragraph.href)}</a>`) +
+        "</p>",
+    ),
     "</div></body></html>",
     "",
   ].join("\n");

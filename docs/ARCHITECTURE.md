@@ -17,7 +17,10 @@
 > D-022), bez migracji. PR-04 dodaje matching (`src/matching/`: czyste `matchOpportunity` z
 > powodami i ich polskim opisem, D-023), reguły profilu w domenie (`src/domain/vocabulary.ts`:
 > kategorie MVP i województwa) oraz komendy `profile:create`, `profile:show` i `match:preview`
-> (`src/profile-commands.ts`), bez migracji. Wszystko poniżej oznaczone
+> (`src/profile-commands.ts`), bez migracji. PR-05 dodaje `digest` (`src/notifications/`,
+> tabela `deliveries`). PR-06A dodaje dostęp do profilu: komendy `serve` i `access:link`,
+> moduł `src/web/` (`node:http`, D-025) oraz tabele `access_tokens` i `sessions` (migracja
+> `0006_access`, D-026). Wszystko poniżej oznaczone
 > _(plan, PR-xx)_ to projekt docelowy — kontrakty mogą zostać doprecyzowane w danym PR, a
 > zmiana musi trafić do tego dokumentu i do `docs/DECISIONS.md`.
 
@@ -57,8 +60,10 @@ src/
 ├── infrastructure/
 │   ├── config.ts           # walidacja env (zod)                                    [PR-00]
 │   ├── logger.ts           # JSON-lines logger na stderr                            [PR-00]
+│   ├── html.ts             # escapeHtml (wspólny dla e-maila i UI)                  [PR-06A]
 │   ├── db/                 # pula pg + Kysely, migracje, repozytoria, mapowanie błędów [PR-01]
 │   │                       # advisory-lock.ts: sesyjny advisory lock (ingest, digest) [PR-05]
+│   │                       # access-repository.ts: tokeny dostępu, sesje        [PR-06A]
 │   └── http/               # SafeHttpClient: polityka URL/IP, retry, limity      [PR-02]
 ├── domain/                 # typy + schematy zod: Source, Opportunity, CompanyProfile [PR-01]
 │                           # vocabulary.ts: kategorie MVP, 16 województw (D-023) [PR-04]
@@ -72,7 +77,8 @@ src/
 │                           # format.ts (polskie opisy powodów); czyste (D-023)
 ├── notifications/          # digest.ts (szablon, czysty), sender.ts (outbox/SMTP), [PR-05]
 │                           # run.ts (wybór ofert, idempotencja, blokada digest; D-024)
-└── web/                    # minimalny UI renderowany po stronie serwera       (plan, PR-06)
+└── web/                    # serve: node:http, strony SSR, sesja, CSRF, wypis  [PR-06A]
+                            # server.ts, pages.ts, session.ts, links.ts, multipart.ts
 tests/
 ├── *.test.ts               # unit / smoke                                           [PR-00]
 ├── fixtures/<source>/      # prawdziwe odpowiedzi źródeł + README (pseudonimizacja) [PR-02]
@@ -91,8 +97,10 @@ Zasada zależności: `domain` nie importuje niczego z innych modułów. `sources
 z jednym wyjątkiem (D-023): może importować czyste helpery `sources/normalize/` (nic innego ze
 `sources`, nic z `infrastructure`, żadnych pakietów ani modułów Node); pilnuje tego
 `no-restricted-imports` w `eslint.config.js` i test `tests/matching-dependency-guard.test.ts`.
-`ingestion` i `notifications` orkiestrują i jako jedyne dotykają repozytoriów. `cli`/`web`
-składają zależności (proste wstrzykiwanie przez parametry, bez kontenera DI).
+`ingestion` i `notifications` orkiestrują i dotykają repozytoriów; od PR-06A także `web`
+(tylko `access-repository.ts`). `cli`/`web` składają zależności (proste wstrzykiwanie przez
+parametry, bez kontenera DI). `notifications` importuje z `web` wyłącznie `web/links.ts`
+(czyste budowanie URL-i tras `/dostep/…` i `/wypis/…`, bez I/O) — trasy definiuje `web`.
 
 ### Warstwa bazy danych (PR-01)
 
@@ -469,10 +477,50 @@ Szczegóły i uzasadnienie: D-010 (SMTP, biblioteka) i D-024 (wybór ofert, idem
   `uncertain` zatrzymuje przebieg (pozostałe profile `not_run`, `errorCode` podsumowania);
   przy `setup`/`unreachable` wiersze są `failed` bez zużycia próby. Zegar, sender, `sleep` i sygnał
   przerwania są wstrzykiwane (`CliDeps.digest`), więc testy działają bez sieci.
+- Linki web (PR-06A): przy ustawionym `PUBLIC_BASE_URL` (`DigestRunDeps.publicBaseUrl`)
+  `runDigest` wydaje dla każdego e-maila token logowania i token wypisu (po `--dry-run`,
+  przed rezerwacją), `buildDigest` dostaje `links` (stopka „Twój profil” i wypis), a e-mail
+  `unsubscribeUrl` (nagłówki RFC 8058 w `mailOptions`; D-024, D-026).
+
+### 4.6 Web (PR-06A, zaimplementowany)
+
+Szczegóły i uzasadnienie: D-025 (`node:http`, limity) i D-026 (tokeny, sesja, CSRF, wypis).
+
+- `startWebServer({ db, publicBaseUrl, logger, host, port, cleanupIntervalMs })`
+  (`server.ts`) → `{ host, port, close() }`. Stała tabela tras:
+
+  | Trasa (nazwa w logu)                     | Metody          | Działanie                                           |
+  | ---------------------------------------- | --------------- | --------------------------------------------------- |
+  | `/` (`home`)                             | GET, HEAD       | strona główna                                       |
+  | `/styl.css` (`stylesheet`)               | GET, HEAD       | arkusz stylów (jedyna odpowiedź z cache, 1 h)       |
+  | `/dostep/<token>` (`login_link`)         | GET, HEAD       | sprawdza token (bez zużycia) → strona z przyciskiem |
+  | `/dostep` (`login`)                      | POST            | zużywa token, tworzy sesję → 303 `/profil`          |
+  | `/profil` (`profile`)                    | GET, HEAD       | nazwa, status, formularze Wypisz/Wyloguj (sesja)    |
+  | `/profil/wypisz` (`profile_unsubscribe`) | POST            | `active = false` (sesja + CSRF) → 303 `/profil`     |
+  | `/wyloguj` (`logout`)                    | POST            | usuwa sesję i ciasteczko (sesja + CSRF) → 303 `/`   |
+  | `/wypis/<token>` (`unsubscribe`)         | GET, HEAD, POST | GET: strona z przyciskiem; POST RFC 8058: wypis     |
+
+  Inna ścieżka → 404 (`not_found`), inna metoda → 405 z `Allow`. POST: `Origin` (poza
+  wypisem) → typ treści (urlencoded; dla wypisu także `multipart/form-data`) → rozmiar →
+  trasa. Błąd bazy → 500 i log bez szczegółów.
+
+- `pages.ts` — czyste funkcje `→ { status, html }`, po polsku, `lang="pl"`, bez JS i stylów
+  inline (CSP), każda wartość przez `escapeHtml`. `session.ts` — ciasteczko `__Host-`,
+  odczyt (tylko wartość w kształcie tokenu), CSRF (HMAC z id sesji, `timingSafeEqual`),
+  kontrola `Origin`. `multipart.ts` — minimalny ścisły parser `multipart/form-data` tylko dla
+  wypisu RFC 8058 (boundary według RFC 2046, jedno pole; D-026). `links.ts` —
+  `loginUrl`/`unsubscribeUrl` (czyste; używa też `notifications` i `access:link`).
+- Dane: `src/infrastructure/db/access-repository.ts` (`issueAccessToken`,
+  `isUsableAccessToken`, `consumeLoginToken`, `findSessionProfile`, `deleteSession`,
+  `deactivateProfile`, `unsubscribeWithToken`, `getProfileStatus`, `deleteExpiredAccess`).
+  Strona profilu czyta tylko `name` i `active` (bez schematu domenowego), więc wypis działa
+  także dla wiersza, którego schemat by nie przyjął.
+- Sprzątanie wygasłych tokenów i sesji: przy starcie i co godzinę w procesie `serve`, po 1000
+  wierszy na tabelę, bez nakładania się (`cleanupIntervalMs: null` w testach wyłącza timer).
 
 ## 5. Model danych
 
-Stan zgodny z migracjami `0001_core_schema` … `0005_deliveries`
+Stan zgodny z migracjami `0001_core_schema` … `0006_access`
 (`src/infrastructure/db/migrations.ts`) — źródłem
 prawdy są migracje. Wszystkie kolumny czasu to `timestamptz`; `id` typu uuid generuje
 `gen_random_uuid()`. Statusy to `text` + `CHECK` (a nie typ `enum` PostgreSQL): dodanie
@@ -659,6 +707,31 @@ transport)` — podstawa „najwyżej raz”), `deliveries_transport_check`,
 `deliveries_profile_transport_date_idx (profile_id, transport, digest_date)` pod „czy profil
 dostał dziś digest”. Nigdy treść e-maila, adres ani komunikat serwera.
 
+### `access_tokens` i `sessions` (PR-06A, migracja `0006_access`, D-026)
+
+`access_tokens` — tokeny z linków (logowanie, wypis); sam sekret nigdy nie jest zapisywany:
+
+| Kolumna      | Typ                        | Null | Uwagi                                                     |
+| ------------ | -------------------------- | ---- | --------------------------------------------------------- |
+| `id`         | uuid                       | nie  | PK, `gen_random_uuid()`                                   |
+| `token_hash` | text                       | nie  | SHA-256 tokenu, hex (64 znaki), unikalny                  |
+| `profile_id` | uuid FK → company_profiles | nie  | `ON DELETE CASCADE`                                       |
+| `purpose`    | text + CHECK               | nie  | `login` (jednorazowy, ≤ 7 dni) / `unsubscribe` (≤ 60 dni) |
+| `created_at` | timestamptz                | nie  | domyślnie `now()`                                         |
+| `expires_at` | timestamptz                | nie  | `> created_at` i nie dalej niż limit celu                 |
+| `used_at`    | timestamptz                | tak  | zużycie tokenu logowania; dla `unsubscribe` zawsze `NULL` |
+
+Ograniczenia: `access_tokens_token_hash_key`, `access_tokens_profile_id_fkey`,
+`access_tokens_token_hash_check`, `access_tokens_purpose_check`,
+`access_tokens_expiry_check`, `access_tokens_used_at_check`; indeksy
+`access_tokens_profile_id_idx` i `access_tokens_expires_at_idx` (sprzątanie).
+
+`sessions` — sesje przeglądarki: `id`, `token_hash` (SHA-256 id sesji z ciasteczka,
+unikalny, `sessions_token_hash_key`, `sessions_token_hash_check`), `profile_id` (FK →
+`company_profiles`, `ON DELETE CASCADE`, `sessions_profile_id_fkey`), `created_at`,
+`expires_at` (`sessions_expiry_check`: `> created_at`, najwyżej 30 dni); indeksy
+`sessions_profile_id_idx` i `sessions_expires_at_idx`. Wszystkie kolumny `NOT NULL`.
+
 ### Później
 
 Żadnych tabel analitycznych w MVP.
@@ -736,6 +809,19 @@ failed`) — wynik zostaje, a blokada znika z końcem sesji. Każde połączenie
   `src/infrastructure/db/advisory-lock.ts`), klucz `7206120309002` (`DIGEST_LOCK_KEY` w
   `src/notifications/run.ts`), sprawdzanie co 5 s, logi `digest lock lost` / `digest lock
 release failed`. `ingest` i `digest` nie blokują się wzajemnie.
+- `serve` (PR-06A, D-025) — jedyny długo działający proces: serwer HTTP `WEB_HOST:WEB_PORT`
+  (domyślnie `127.0.0.1:3000`) za reverse proxy z TLS (PR-07). Kolejność kontroli:
+  konfiguracja (`PUBLIC_BASE_URL` wymagany, `WEB_HOST`, `WEB_PORT`; kod 1) → baza (oczekujące
+  migracje → kod 1) → nasłuch (zajęty port → kod 1). SIGINT/SIGTERM → łagodne zatrzymanie
+  (otwarte połączenia zamykane najpóźniej po 10 s), kod 0.
+- `access:link <profileId>` (PR-06A) — wydaje link logowania (jednorazowy, 7 dni) i wypisuje
+  `{"status":"ok","url":…,"expiresAt":…}` na stdout (ostrzeżenie „link jest sekretem” na
+  stderr). Wymaga `PUBLIC_BASE_URL`; nieznany profil → kod 1. Link jest tylko na stdout.
+- `access:revoke <profileId>` (PR-06A) — usuwa w jednej transakcji wszystkie tokeny (logowania
+  i wypisu) i sesje profilu (`revokeProfileAccess`); `company_profiles` bez zmian. Wypisuje
+  `{"status":"ok","tokens":…,"sessions":…}`. Kontrola schematu jak w `access:link`, bez
+  `PUBLIC_BASE_URL`; nieznany profil → kod 1.
+- `digest` przy ustawionym `PUBLIC_BASE_URL` dodaje do e-maili linki (§4.5).
 - Planowany harmonogram (przykład w README; ten PR nie dodaje artefaktu cron/wdrożenia):
   `ingest` raz dziennie ok. 06:00 Europe/Warsaw bez opcji dnia (nadrabianie: zwykle tylko
   wczoraj UTC, dzień już zamknięty; po przerwie — pominięte dni); `digest` — rano, po
@@ -764,4 +850,12 @@ dokumentów, tytułów, danych kontaktowych i adresu bazy. Podsumowanie każdego
 `status`, liczniki, `errorCode`), nieudaną i niepewną wysyłkę (`profileId`, `errorCode`,
 liczba ofert), pominięte nieprawidłowe oferty i profile (id i ścieżki pól), osiągnięty limit
 kandydatów oraz blokadę — bez adresów e-mail, tytułów, treści e-maili i `SMTP_URL`.
-Doręczenia są w `deliveries`. Alerting/deployment: PR-07.
+Doręczenia są w `deliveries`. `serve` (PR-06A) loguje jedno zdarzenie na żądanie
+(`http request`: `method`, `route` — nazwa trasy z §4.6, `status`, `durationMs`), błąd
+obsługi (`http request failed`: `route`, powód i kod błędu bazy), połączenie przerwane przez
+klienta w trakcie ciała (`http request aborted`, `info`: `route`, `reason: "aborted"` — bez
+linii `http request`, bo odpowiedź nie powstała), start i zatrzymanie
+(`web server listening` z hostem i portem, `web server stopping`, `web server stopped`) oraz
+sprzątanie (`access cleanup` — liczby usuniętych wierszy, `access cleanup failed`) — nigdy
+URL-a (tokeny), ciasteczek, nagłówków, treści formularzy, adresu klienta ani danych profilu.
+Alerting/deployment: PR-07.

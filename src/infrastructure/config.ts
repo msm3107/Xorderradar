@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { z } from "zod";
 
 /**
@@ -216,4 +217,109 @@ export function loadEmailConfig(env: Readonly<Record<string, string | undefined>
     throw new ConfigError("Invalid e-mail configuration: EMAIL_FROM, SMTP_URL");
   }
   return { mode, from, smtp };
+}
+
+/** Hosts for which PUBLIC_BASE_URL may use plain `http:` (local development only). */
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * PUBLIC_BASE_URL: the address users reach the web server at (through the
+ * reverse proxy that terminates TLS), e.g. `https://radar.example.com`. Links
+ * in e-mails and the Origin check are built from it. `https:` only; `http:`
+ * only for localhost/127.0.0.1/[::1] outside production. No credentials,
+ * path, query or fragment: the session cookie is `__Host-` (Path=/), so the
+ * application lives at the root. Normalized to the origin.
+ */
+function publicBaseUrlSchema(environment: string | undefined) {
+  return z.string().transform((value, context): string => {
+    const url = URL.parse(value);
+    const valid =
+      url !== null &&
+      (url.protocol === "https:" ||
+        (url.protocol === "http:" &&
+          LOOPBACK_HOSTS.has(url.hostname) &&
+          environment !== "production")) &&
+      url.username === "" &&
+      url.password === "" &&
+      url.pathname === "/" &&
+      url.search === "" &&
+      url.hash === "" &&
+      // URL.parse accepts e.g. "https://a b"; the raw value must already be clean.
+      !/[\s\p{Cc}]/u.test(value);
+    if (!valid) {
+      context.addIssue({ code: "custom", message: "not an https:// origin" });
+      return z.NEVER;
+    }
+    return url.origin;
+  });
+}
+
+/** Defaults of the `serve` listener: loopback only; the reverse proxy forwards to it. */
+export const DEFAULT_WEB_HOST = "127.0.0.1";
+export const DEFAULT_WEB_PORT = 3000;
+
+/** The configuration of `serve` (PR-06A, D-025). */
+export interface WebConfig {
+  /** Interface to listen on: an IP address or `localhost`. */
+  readonly host: string;
+  readonly port: number;
+  /** PUBLIC_BASE_URL as an origin, e.g. `https://radar.example.com`. */
+  readonly publicBaseUrl: string;
+}
+
+function webEnvSchema(environment: string | undefined) {
+  return z.object({
+    WEB_HOST: z
+      .string()
+      .refine((value) => value === "localhost" || isIP(value) !== 0)
+      .default(DEFAULT_WEB_HOST),
+    WEB_PORT: z
+      .string()
+      .regex(/^[1-9]\d{0,4}$/)
+      .transform(Number)
+      .refine((port) => port <= 65_535)
+      .optional(),
+    PUBLIC_BASE_URL: publicBaseUrlSchema(environment),
+  });
+}
+
+function nonEmptyEnv(env: Readonly<Record<string, string | undefined>>) {
+  return Object.fromEntries(Object.entries(env).filter(([, value]) => value !== ""));
+}
+
+function configError(prefix: string, error: z.ZodError): ConfigError {
+  const names = [...new Set(error.issues.map((issue) => issue.path.join(".")))];
+  return new ConfigError(`${prefix}: ${names.join(", ")}`);
+}
+
+/**
+ * Parses the variables of `serve`: PUBLIC_BASE_URL is required, WEB_HOST and
+ * WEB_PORT default to 127.0.0.1:3000. Like loadConfig: empty values count as
+ * unset and a ConfigError names the variables only.
+ */
+export function loadWebConfig(env: Readonly<Record<string, string | undefined>>): WebConfig {
+  const values = nonEmptyEnv(env);
+  const result = webEnvSchema(values.NODE_ENV).safeParse(values);
+  if (!result.success) throw configError("Invalid web configuration", result.error);
+  return {
+    host: result.data.WEB_HOST,
+    port: result.data.WEB_PORT ?? DEFAULT_WEB_PORT,
+    publicBaseUrl: result.data.PUBLIC_BASE_URL,
+  };
+}
+
+/**
+ * PUBLIC_BASE_URL for the commands that only build links (`digest`,
+ * `access:link`): null when unset — `digest` then sends no web links and
+ * keeps the mailto-only List-Unsubscribe; invalid → ConfigError.
+ */
+export function loadPublicBaseUrl(
+  env: Readonly<Record<string, string | undefined>>,
+): string | null {
+  const values = nonEmptyEnv(env);
+  const result = z
+    .object({ PUBLIC_BASE_URL: publicBaseUrlSchema(values.NODE_ENV).optional() })
+    .safeParse(values);
+  if (!result.success) throw configError("Invalid web configuration", result.error);
+  return result.data.PUBLIC_BASE_URL ?? null;
 }

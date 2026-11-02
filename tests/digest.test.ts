@@ -277,3 +277,42 @@ describe("snippet", () => {
     expect(snippet("a\r\n\tb\u0000c")).toBe("a b c");
   });
 });
+
+describe("web links in the digest (PR-06A)", () => {
+  const token = "T".repeat(43);
+  const links = {
+    profileUrl: `https://radar.example.invalid/dostep/${token}`,
+    unsubscribeUrl: `https://radar.example.invalid/wypis/${"U".repeat(43)}`,
+  };
+
+  it("adds the profile link and the one-click unsubscribe link to both parts", () => {
+    const { text, html } = buildDigest(profile, [item()], NOW, { overflow: 0, links });
+    expect(text).toContain(`Twój profil (link jednorazowy, ważny 7 dni;`);
+    expect(text).toContain(`dostęp do profilu): ${links.profileUrl}\n`);
+    expect(text).toContain(
+      `Aby zrezygnować z powiadomień, otwórz ten link (albo odpowiedz na tę wiadomość): ${links.unsubscribeUrl}\n`,
+    );
+    expect(html).toContain(`<a href="${links.profileUrl}">${links.profileUrl}</a>`);
+    expect(html).toContain(`<a href="${links.unsubscribeUrl}">${links.unsubscribeUrl}</a>`);
+    expect(text).not.toContain("napisz do operatora");
+  });
+
+  it("keeps the reply-only footer without links", () => {
+    const { text, html } = buildDigest(profile, [item()], NOW, { overflow: 0 });
+    for (const part of [text, html]) {
+      expect(part).not.toContain("Twój profil");
+      expect(part).not.toContain("/wypis/");
+      expect(part).toContain("odpowiedz na tę wiadomość lub napisz do operatora serwisu");
+    }
+  });
+
+  it("shows no link that is not http(s), and escapes the ones it shows", () => {
+    const odd = buildDigest(profile, [item()], NOW, {
+      overflow: 0,
+      links: { profileUrl: "javascript:alert(1)", unsubscribeUrl: 'https://a.invalid/w?x="<' },
+    });
+    expect(odd.text).not.toContain("javascript:");
+    expect(odd.text).not.toContain("Twój profil");
+    expect(odd.html).toContain('<a href="https://a.invalid/w?x=%22%3C">');
+  });
+});
