@@ -430,5 +430,9 @@ bezpośredni wychodzący HTTPS — D-014).
 - **PR-07B — Wdrożenie pilotażowe** (po decyzji właściciela o hostingu): artefakty
   uruchomieniowe (obraz albo unit systemd), reverse proxy (TLS, limity żądań, bez logowania
   ścieżek `/dostep` i `/wypis`), crontab z `ingest`/`digest`/`status --notify`/`backup`,
-  smoke test po wdrożeniu, kopia poza hostem, pierwsze wdrożenie i odtworzenie kopii na
-  środowisku pilotażowym (kryteria akceptacji całego PR-07).
+  smoke test po wdrożeniu, kopia poza hostem, zewnętrzny heartbeat („dead man's switch”) dla
+  `status` (ping po kodzie `0`, alarm przy braku pingu — cisza przy martwym hoście, cronie lub
+  SMTP; albo drugi kanał, np. `MAILTO` crona przez inny serwer pocztowy), `status`
+  sprawdzający wiek najnowszego `radar-*.dump` w katalogu kopii z env (brakująca kopia
+  przestaje być cicha), pierwsze wdrożenie i odtworzenie kopii na środowisku pilotażowym
+  (kryteria akceptacji całego PR-07).

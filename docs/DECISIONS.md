@@ -1458,15 +1458,18 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     Zmiana schematu odczytu zamieniłaby istniejące profile w `invalid_stored_row`. Skutek dla
     testów: test ostrzeżeń `profile:create` o czyszczeniu ESC w słowach sprawdza teraz
     `profileWarnings` bezpośrednio, bo `profile:create` takiego słowa już nie przyjmie.
-  - **CI (`.github/workflows/ci.yml`):** `pnpm check` na push i pull request, z usługą
+  - **CI (`.github/workflows/ci.yml`):** `pnpm check` na pull request i na push tylko do
+    gałęzi domyślnej (PR z tego samego repozytorium — jeden przebieg, nie dwa), z usługą
     PostgreSQL 16 i `REQUIRE_DB_TESTS=1` (pominięte testy z bazą = błąd). Akcje przypięte do
     pełnych SHA commitów (komentarz z wersją), `permissions: contents: read`,
-    `persist-credentials: false`, `pnpm install --frozen-lockfile`, wersja pnpm z
-    `packageManager`. Klient `pg_dump`/`pg_restore` z `postgresql-client`, z kontrolą wersji ≥
-    16 — test backup/restore nie może się po cichu pominąć w CI. Ten test działa w osobnym
-    projekcie Vitest po wszystkich pozostałych (`groupOrder`), bo introspekcja katalogu przez
-    Migrator Kysely w innych plikach ściga się z relacjami usuwanymi przez restore w tej samej
-    bazie.
+    `persist-credentials: false`, `pnpm install --frozen-lockfile`, potem `pnpm audit --prod`
+    (znana podatność zależności produkcyjnej = błąd; zależności tylko deweloperskie nie
+    blokują CI — obejmuje je dalej pełny `pnpm audit` w Code & Safety Review,
+    `docs/SECURITY.md` §13), wersja pnpm z `packageManager`. Klient `pg_dump`/`pg_restore`
+    z `postgresql-client`, z kontrolą wersji ≥ 16 — test backup/restore nie może się po cichu
+    pominąć w CI. Ten test działa w osobnym projekcie Vitest po wszystkich pozostałych
+    (`groupOrder`), bo introspekcja katalogu przez Migrator Kysely w innych plikach ściga się
+    z relacjami usuwanymi przez restore w tej samej bazie.
 - **Odrzucone alternatywy:** alert z procesu `ingest`/`digest` (każda komenda musiałaby znać
   e-mail operatora i stan innych; `status` widzi też komendę, która w ogóle nie ruszyła);
   zewnętrzny monitoring/kolejka (sprzeczne z D-001); deduplikacja alertów w bazie (wyżej);
@@ -1479,6 +1482,8 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
   nie usunie przyczyny (np. nie zdecyduje o wierszach `pending`); `status` nie zastępuje
   monitoringu procesu `serve` (tylko cron — dostępność strony sprawdza PR-07B). Backup
   wymaga klienta PostgreSQL ≥ 16 na hoście i zawiera dane osobowe — do PR-07B kopia poza
-  hostem jest ręczna. Dwa żądania `/dopasowania` jednej sesji to nadal dwa miejsca w kolejce. Profil
-  zapisany wcześniej ze znakiem sterującym trzeba poprawić przy następnym zapisie formularza
-  (formularz pokaże błąd przy polu).
+  hostem jest ręczna. Do PR-07B nie ma „dead man's switch”: alert idzie tym samym SMTP i z
+  tego samego crona, więc przy martwym hoście, cronie lub SMTP operator nie dostaje nic (cisza
+  ≠ wszystko w porządku; ręczna kontrola — `docs/RUNBOOK.md`). Dwa żądania `/dopasowania`
+  jednej sesji to nadal dwa miejsca w kolejce. Profil zapisany wcześniej ze znakiem sterującym
+  trzeba poprawić przy następnym zapisie formularza (formularz pokaże błąd przy polu).

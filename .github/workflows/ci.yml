@@ -1,10 +1,14 @@
 # CI (PR-07A, D-028): the same `pnpm check` as locally, with the PostgreSQL
 # integration tests required (a missing database or missing pg_dump/pg_restore
 # fails the run instead of skipping). Actions are pinned to commit SHAs.
+# Push runs only on the default branch; other branches are checked through their
+# pull request, so a same-repo PR gets one run, not two.
 name: CI
 
 on:
   push:
+    # The repository's default branch: update if the default branch is renamed.
+    branches: [ccr-919f3e62-g6j3w9]
   pull_request:
 
 permissions:
@@ -61,6 +65,11 @@ jobs:
           done
 
       - run: pnpm install --frozen-lockfile
+
+      # --prod: production dependencies must be free of known advisories; dev-only
+      # advisories (tooling never shipped or run in production) do not block CI. They are
+      # still covered by the full `pnpm audit` in Code & Safety Review (docs/SECURITY.md §13).
+      - run: pnpm audit --prod
 
       - run: pnpm check
         env:

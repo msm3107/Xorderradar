@@ -4,9 +4,10 @@ Current phase: PHASE 4 — PILOT
 Current PR: PR-07A — Gotowość operacyjna (repozytorium)
 Status: PR-06B **MERGED in PR #11 (merge commit 2ef7c20)**. PR-07 split by the coordinator
 (`docs/PR_PLAN.md`): PR-07A (CI, `status [--notify]`, `backup`/`restore`, review hardening,
-timeout table, runbook) **PR READY for the owner's review**: Code & Safety Review PASS
-(round 3), Quality Review ACCEPT (round 2); not merged. PR-07B (deployment) waits for the
-owner's hosting decision.
+timeout table, runbook) **PR READY for the owner's review** (PR #12, CI green on GitHub): Code &
+Safety Review PASS (round 3), Quality Review ACCEPT (round 2); owner review PASS with QoL notes,
+addressed in an owner-review round (C&S PASS round 3, Quality ACCEPT round 2); not merged.
+PR-07B (deployment) waits for the owner's hosting decision.
 
 ## Completed
 
@@ -568,7 +569,19 @@ the owner's review (not merged). D-028 new. Reviews: C&S PASS WITH NOTES (M1 PG*
 L1–L5) → fix round → C&S PASS → Quality ACCEPT WITH NOTES (alert-path proof and softened
 „no alert” sentence, 429 text after a refresh, UTC label in the alert, backup manual until
 PR-07B, consistent control-character messages) → copy round → C&S PASS → Quality ACCEPT.
-Working-tree fingerprint unchanged across every reviewer run. Round-1 fixes:
+Working-tree fingerprint unchanged across every reviewer run.
+
+Owner review (PR #12, PASS, no blockers; QoL notes) → owner-review round: CI `push` only on the
+default branch (`ccr-919f3e62-g6j3w9`, commented) + `pull_request` (one run per same-repo PR);
+`pnpm audit --prod` step after install (dev-only advisories stay with the full `pnpm audit` in
+C&S, SECURITY §13); RUNBOOK „Znane ograniczenie — brak dead man's switch”: silence ≠ OK, real
+alert-failure codes (`smtp_535`, `smtp_econnrefused`), daily manual check until PR-07B
+(`grep '"checkedAt"'` in `status.log`, `grep '"digestDate"'` in `digest.log`); PR_PLAN PR-07B
+gains the external heartbeat (or second mail channel) and a backup-age check in `status`
+(owner's 4th note, deferred there); D-028 updated. C&S PASS WITH NOTES (wrong example code) →
+fix → PASS → Quality ACCEPT WITH NOTES (concrete daily check) → fix → C&S PASS → Quality ACCEPT.
+
+Round-1 fixes:
 
 - M1: `pg` fills what DATABASE_URL omits from PG* variables, the tools (fresh env) would not:
   `backup`/`restore` now refuse a non-empty `PGHOST`, `PGHOSTADDR`, `PGPORT`, `PGUSER`,
@@ -586,7 +599,8 @@ Working-tree fingerprint unchanged across every reviewer run. Round-1 fixes:
   `REQUIRE_DB_TESTS=1`, actions pinned to full commit SHAs verified with `git ls-remote`
   (checkout v7.0.1, pnpm/action-setup v6.1.0 — peeled commit of the annotated tag, setup-node
   v7.1.0), `permissions: contents: read`, `persist-credentials: false`,
-  `--frozen-lockfile`, `postgresql-client` with a ≥ 16 version check. Not yet run on GitHub.
+  `--frozen-lockfile`, `postgresql-client` with a ≥ 16 version check. First GitHub run on
+  7cd741b green (push and pull_request).
 - `status [--notify]` (`src/operations/status.ts`, `status-repository.ts`): per enabled source
   last run / last success / unresolved failed days (36 h), pending (unless a digest holds its
   lock, read from `pg_locks`) and failed deliveries since yesterday (Warsaw); also
@@ -670,8 +684,8 @@ control characters at input, CI).
 
 ## Next action
 
-1. PR-07A: owner review of the PR (not merged by the agents); check the first CI run on GitHub (service container, client ≥ 16
-   step, DB tests not skipped). Still open from PR-06B: last write wins, already-sent offers on
+1. PR-07A: owner re-review of PR #12 after the owner-review round (not merged by the agents);
+   check CI on the new head (one `pull_request` run, `pnpm audit --prod` step). Still open from PR-06B: last write wins, already-sent offers on
    `/dopasowania`, the shared `/dopasowania` slot. Still open from PR-06A: TTLs (7/60/30 days), a
    self-service "e-mail me a link" form, §8.3 leniency on `/wypis`, forwarded digests.
 2. PR-07B (after the owner's hosting decision): hosting/container/proxy/systemd artefacts and
@@ -680,7 +694,9 @@ control characters at input, CI).
    entry from the RUNBOOK and `status` does not check backups — a failed or missing backup
    raises no alert); rate limiting at the proxy (incl. `/dopasowania` across sessions);
    proxy access logs without `/dostep/…` and `/wypis/…`; monitoring that `serve` is up
-   (`status` covers the cron commands only).
+   (`status` covers the cron commands only); external heartbeat / dead man's switch for
+   `status` (or a second mail channel) — until then the operator checks `status.log` and
+   `digest.log` by hand daily (RUNBOOK); `status` checks the age of the newest `radar-*.dump`.
    Follow-ups from the PR-06B reviews (owner to choose the PR):
    - (Done in PR-07A: `\p{Cc}` refused at input — C&S L-c.)
    - Category labels: match reasons on `/dopasowania` and in the digest show raw keys
@@ -900,6 +916,11 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-03, PR-07A owner-review round (CI and docs only): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 1793 tests passed in 52 files,
+none skipped. `pnpm audit --prod`: no known vulnerabilities; full `pnpm audit`: 1 moderate,
+dev-only (eslint>minimatch, GHSA-g3hv-75wg-m249). Workflow YAML parses. No e-mail sent.
 
 2026-11-02, PR-07A after the Quality copy round (Node 22, pnpm 10.28.0, PostgreSQL 16,
 pg_dump/pg_restore 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test

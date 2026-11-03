@@ -37,9 +37,9 @@ outboxu, nikt go nie dostanie.
 ## Alert statusu
 
 Alert (temat `Radar Zamówień: problem (<kody>)`) przychodzi przy **każdym** uruchomieniu
-`status --notify`, dopóki problem trwa — brak kolejnego alertu zwykle oznacza, że problem
-minął; w razie wątpliwości sprawdź `/var/log/radar/status.log` (alert mógł się nie wysłać).
-Bieżący stan zawsze pokaże:
+`status --notify`, dopóki problem trwa. Brak alertu **nie** dowodzi, że wszystko działa:
+problem mógł minąć, ale alert mógł się też nie wysłać albo `status` w ogóle się nie uruchomić
+(niżej, „Znane ograniczenie”) — sprawdź `/var/log/radar/status.log`. Bieżący stan zawsze pokaże:
 
 ```sh
 node dist/main.js status | jq .
@@ -84,6 +84,24 @@ SELECT id, publication_date::text, status, error_code, started_at, finished_at
 Sam alert nie przyszedł, a powinien: sprawdź `/var/log/radar/status.log` (linia JSON z
 `"notification":"failed"` i komunikat `Operator alert not sent (<kod>)`) oraz skrzynkę
 spamu operatora.
+
+**Znane ograniczenie — brak „dead man's switch” (do PR-07B).** `status --notify` wysyła
+alert tym samym SMTP i z tego samego crona co reszta systemu. Gdy leży host, cron albo SMTP
+(np. `Operator alert not sent (smtp_535)` — odrzucone logowanie, `(smtp_econnrefused)` —
+serwer nieosiągalny), operator nie dostaje żadnego e-maila — cisza **nie** oznacza, że
+wszystko w porządku. Do czasu PR-07B sprawdzaj ręcznie codziennie (np. rano po 7:45):
+
+```sh
+grep '"checkedAt"' /var/log/radar/status.log | tail -n 2  # raporty z 6:30 i 7:45
+grep '"digestDate"' /var/log/radar/digest.log | tail -n 1 # wynik dzisiejszego digest
+```
+
+Obie linie `status` mają dzisiejszy `checkedAt` (UTC; 6:30 i 7:45 w Polsce to ta sama data) i
+nie mają `"notification":"failed"`; linia `digest` ma dzisiejszy `digestDate` i
+`"status":"ok"`. Brak linii, stara data albo `"failed"` — zacznij od
+`node dist/main.js status` i logu crona. PR-07B doda zewnętrzny heartbeat (ping do
+zewnętrznego endpointu po `status` z kodem `0`, alarm przy braku pingu) albo drugi kanał (np.
+`MAILTO` crona przez inny serwer pocztowy).
 
 ## Źródła: włączanie i wyłączanie
 
@@ -202,12 +220,13 @@ node dist/main.js backup /var/backups/radar
   nadpisywania. Bez twardych dowiązań (np. część udziałów sieciowych, FAT/exFAT) → `write_failed`.
 - Plik ma prawa `0600` i **zawiera dane osobowe**. Kopia poza hostem — tylko zaszyfrowana
   (np. `age`/`gpg` przed wysłaniem) i w miejscu z ograniczonym dostępem.
-- **Do PR-07B backup i jego pilnowanie są ręczne.** `status` nie sprawdza backupów: nieudany
-  albo nieuruchomiony backup nie da alertu. Dopisz backup do crona sam (codziennie przed
-  `ingest`), sprawdzaj jego log i kod wyjścia (np. przy cotygodniowym przeglądzie: dzisiejszy
-  plik w `/var/backups/radar` i `"status":"ok"` w ostatniej linii logu), kasuj ręcznie pliki
-  starsze niż uzgodniona retencja i rób ręcznie zaszyfrowaną kopię poza hostem. Przykładowa
-  linia crona (ścieżki i plik logu — przykład; w tej samej tabeli z `CRON_TZ=Europe/Warsaw`):
+- **Do PR-07B backup i jego pilnowanie są ręczne.** `status` nie sprawdza backupów (PR-07B
+  doda kontrolę wieku najnowszego `radar-*.dump`): nieudany albo nieuruchomiony backup nie da
+  alertu. Dopisz backup do crona sam (codziennie przed `ingest`), sprawdzaj jego log i kod
+  wyjścia (np. przy cotygodniowym przeglądzie: dzisiejszy plik w `/var/backups/radar` i
+  `"status":"ok"` w ostatniej linii logu), kasuj ręcznie pliki starsze niż uzgodniona retencja
+  i rób ręcznie zaszyfrowaną kopię poza hostem. Przykładowa linia crona (ścieżki i plik logu
+  — przykład; w tej samej tabeli z `CRON_TZ=Europe/Warsaw`):
 
   ```cron
   30 5 * * * cd /opt/radar-zamowien && node dist/main.js backup /var/backups/radar >>/var/log/radar/backup.log 2>&1
