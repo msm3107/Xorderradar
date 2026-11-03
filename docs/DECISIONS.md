@@ -1376,3 +1376,114 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
   e-mail (bez linków) na stary adres; z linkami — nie. Pełne listy (100 + 100 + 100 długich wpisów z
   polskimi znakami) mogą przekroczyć 64 KB → 413. Klient bez `Origin` i bez `Sec-Fetch-Site` nie
   zaloguje się.
+
+## D-028 — Gotowość operacyjna: `status`, alert operatora, backup/restore, CI, twardnienie web
+
+- **Status:** Accepted (PR-07A; wdrożenie, retencja i kopia poza hostem — PR-07B)
+- **Kontekst:** przed pilotem operator musi się dowiedzieć, że coś nie działa (źródło się nie
+  pobrało, wysyłki czekają na decyzję), umieć odtworzyć bazę i mieć powtarzalną weryfikację
+  każdej zmiany. Przegląd PR-06B zostawił też drobne twardnienie web: jedna sesja mogła zająć
+  całą kolejkę `/dopasowania`, brak HSTS i znaki sterujące przechodziły do profilu.
+- **Decyzja:**
+  - **`status [--notify]`** — osobna, krótka komenda (cron po `ingest` i po `digest`), tylko
+    odczyt, bez blokady, jedna linia JSON. Reguły (`src/operations/status.ts`):
+    - źródło: `source_failed`, gdy ostatni przebieg jest `failed` albo nieudany dzień z
+      ostatnich 36 h nie został później pokryty przebiegiem `succeeded`/`incomplete` tego
+      źródła (nadrabianie ponawia nieudane dni, D-021 — pokryty dzień przestaje być problemem);
+      `source_stale`, gdy od 36 h (`STATUS_STALE_AFTER_MS`) żaden przebieg nie zakończył się
+      `succeeded`/`incomplete` — `ingest` biegnie codziennie, więc jeden opóźniony cykl to
+      jeszcze nie alarm, dwa pominięte już tak; `source_never_run`; `no_enabled_sources`;
+    - wysyłki: `deliveries_pending` — każdy wiersz `pending` (wynik niepewny, decyzja
+      operatora, D-024), **chyba że trwa `digest`** (jego zarezerwowane wiersze są `pending` do
+      zapisu wyniku): advisory lock `DIGEST_LOCK_KEY` trzymany przez inną sesję, odczytany z
+      `pg_locks` (`classid` = górne, `objid` = dolne 32 bity, `objsubid = 1`), bez blokowania;
+      `deliveries_failed` — wiersze `failed` z dniem digestu od wczoraj (kalendarz Polski,
+      czyli dwa ostatnie przebiegi), osobno ponawiane (`attempts` < 3) i wyczerpane, z
+      kodami błędów; starsze `failed` (oferta już nie kwalifikuje się — zostaje `failed` na
+      zawsze, D-024) nie alarmują w nieskończoność;
+    - baza nieczytelna → `database_unavailable` (stały powód + kod), oczekujące migracje →
+      `schema_not_ready` — raportowane i alertowane jak każdy problem, bo właśnie wtedy
+      operator musi wiedzieć; nieoczekiwany błąd samego `status` → stały komunikat, kod 1, a z
+      `--notify` alert z samym kodem `status_internal_error` (bez treści błędu — może
+      zawierać konfigurację).
+      Kod 0 bez problemu, 1 przy problemie (cron i monitoring widzą kod).
+  - **Alert operatora (`--notify`):** przy problemie jeden e-mail na `OPERATOR_EMAIL` (nowa
+    zmienna, czytana tylko przez `status --notify`) tym samym transportem i z tymi samymi
+    ponowieniami co `digest` (`EMAIL_MODE=test` → outbox). Zwykły tekst po polsku bez HTML i
+    bez `List-Unsubscribe` (wiadomość do operatora, nie do klienta); treść i temat tylko z
+    identyfikatorów, statusów, kodów, czasów i liczb; kończy się odesłaniem do
+    `docs/RUNBOOK.md` → „Alert statusu”. Alert **powtarza się przy każdym uruchomieniu**, dopóki
+    problem trwa — bez tabeli „już zgłoszono” (dwa uruchomienia dziennie to dwa e-maile; stan
+    deduplikacji byłby nową tabelą i nowym sposobem na przegapienie problemu). Nieudana wysyłka
+    → kod 1 i `notification: "failed"` na stdout (cron loguje wynik).
+  - **`backup <dir>` / `restore <file>`:** `pg_dump`/`pg_restore` (klient PostgreSQL ≥ 16)
+    jako procesy potomne — bez nowej zależności i bez własnego formatu. Zakres = bieżący
+    schemat połączenia (jak migracje; z tabelą migracji), format custom, `--no-owner
+--no-acl` (odtworzenie innym użytkownikiem). Połączenie: `DATABASE_URL` sparsowany tak jak
+    `pg` (parametry zapytania wygrywają, domyślnie `localhost:5432`) → conninfo libpq **bez
+    hasła** w `--dbname`, hasło tylko w `PGPASSWORD` środowiska dziecka, budowanego od zera
+    — wszystkie ustawienia połączenia muszą być w URL: `pg` uzupełnia brakujące z `PG*`
+    procesu, narzędzia w czystym środowisku nie, więc niepusta zmienna `PGHOST`, `PGHOSTADDR`,
+    `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGOPTIONS`, `PGSSLMODE` lub
+    `PGSSLNEGOTIATION` → odmowa `unsupported_database_url` z samą nazwą zmiennej (fail-closed;
+    inaczej inny serwer albo słabszy TLS niż w aplikacji). TLS: `pg` weryfikuje certyfikat i
+    host dla `prefer`/`require`/`verify-ca`/`verify-full`, więc narzędzia dostają
+    `verify-full` (z `sslrootcert=system`, gdy nie podano pliku); `no-verify` → `require`;
+    parametr bez dokładnego odpowiednika → odmowa (`unsupported_database_url`). Plik: zapis do
+    pliku tymczasowego `0600` (`wx`), `fsync`, `link` do `radar-<czas UTC>.dump` — nigdy nie
+    zastępuje istniejącego pliku, przy błędzie nic nie zostaje. `restore` tylko do istniejącego
+    schematu **bez żadnej relacji** (nigdy na dane), `--single-transaction --exit-on-error`,
+    potem kontrola migracji jak `health` i liczby wierszy. Limit 30 min na narzędzie (SIGTERM,
+    po 5 s SIGKILL), `PGCONNECT_TIMEOUT=10`. stderr narzędzi nigdy nie jest wypisywany — stały
+    powód + kod wyjścia. Restore jest testowany w CI (backup → pusty schemat → restore →
+    identyczne dane). Retencja i szyfrowana kopia poza hostem: PR-07B (do tego czasu — ręcznie,
+    `docs/RUNBOOK.md`).
+  - **`/dopasowania`: najwyżej 2 żądania jednej sesji naraz** (w toku lub w kolejce,
+    `MATCHES_MAX_PER_SESSION`); trzecie → od razu 429 z `Retry-After: 5` i stroną „Lista
+    dopasowań już się przygotowuje (np. w innej karcie albo po odświeżeniu strony) — poczekaj
+    kilka sekund i spróbuj ponownie.”, bez wejścia do kolejki. Licznik po **id sesji z
+    bazy** (po sprawdzeniu sesji), nigdy po wartości ciasteczka — losowe ciasteczka nie tworzą
+    wpisów, a mapa ma najwyżej tyle wpisów, ile żądań jest w toku. Dwa, nie jedno: odświeżenie
+    strony w trakcie liczenia nie kończy się błędem. Wiele sesji nadal może zapełnić kolejkę —
+    to limit na proxy (PR-07B).
+  - **HSTS:** `Strict-Transport-Security: max-age=31536000` na każdej odpowiedzi, gdy
+    `PUBLIC_BASE_URL` to `https://`; **bez `includeSubDomains`** (nie znamy subdomen domeny
+    pilota) i **bez `preload`** (trudne do cofnięcia). Przy `http://` (loopback, development)
+    brak nagłówka — HSTS na `localhost` psułby inne lokalne serwisy.
+  - **Znaki sterujące (`\p{Cc}`) odrzucane tylko na wejściu:** formularz profilu i
+    `profile:create` odrzucają nazwę i wpisy list ze znakiem sterującym wewnątrz (np. wklejony
+    tabulator; brzegi są przycinane jak dotąd), z komunikatem przy polu / ścieżką pola.
+    Schematy zapisanych wierszy się nie zmieniają: stary wiersz ze znakiem sterującym dalej
+    się wczytuje, digest i strona go pokazują (wyjście i tak przez `escapeHtml`/`cleanText`).
+    Zmiana schematu odczytu zamieniłaby istniejące profile w `invalid_stored_row`. Skutek dla
+    testów: test ostrzeżeń `profile:create` o czyszczeniu ESC w słowach sprawdza teraz
+    `profileWarnings` bezpośrednio, bo `profile:create` takiego słowa już nie przyjmie.
+  - **CI (`.github/workflows/ci.yml`):** `pnpm check` na pull request i na push tylko do
+    gałęzi domyślnej (PR z tego samego repozytorium — jeden przebieg, nie dwa), z usługą
+    PostgreSQL 16 i `REQUIRE_DB_TESTS=1` (pominięte testy z bazą = błąd). Akcje przypięte do
+    pełnych SHA commitów (komentarz z wersją), `permissions: contents: read`,
+    `persist-credentials: false`, `pnpm install --frozen-lockfile`, potem `pnpm audit --prod`
+    (znana podatność zależności produkcyjnej = błąd; zależności tylko deweloperskie nie
+    blokują CI — obejmuje je dalej pełny `pnpm audit` w Code & Safety Review,
+    `docs/SECURITY.md` §13), wersja pnpm z `packageManager`. Klient `pg_dump`/`pg_restore`
+    z `postgresql-client`, z kontrolą wersji ≥ 16 — test backup/restore nie może się po cichu
+    pominąć w CI. Ten test działa w osobnym projekcie Vitest po wszystkich pozostałych
+    (`groupOrder`), bo introspekcja katalogu przez Migrator Kysely w innych plikach ściga się
+    z relacjami usuwanymi przez restore w tej samej bazie.
+- **Odrzucone alternatywy:** alert z procesu `ingest`/`digest` (każda komenda musiałaby znać
+  e-mail operatora i stan innych; `status` widzi też komendę, która w ogóle nie ruszyła);
+  zewnętrzny monitoring/kolejka (sprzeczne z D-001); deduplikacja alertów w bazie (wyżej);
+  własny eksport SQL/JSON zamiast `pg_dump` (niekompletny, nietestowany format); hasło w
+  `--dbname` albo pliku `.pgpass` (widoczne w `ps` / plik z sekretem na dysku); restore z
+  `--clean` do niepustego schematu (nadpisanie danych jednym poleceniem); limit żądań na IP
+  w aplikacji (za proxy adres klienta to proxy — zadanie dla proxy, PR-07B); zaostrzenie
+  schematu zapisanych wierszy (wyżej).
+- **Konsekwencje:** operator dostaje e-mail przy każdym uruchomieniu `status --notify`, dopóki
+  nie usunie przyczyny (np. nie zdecyduje o wierszach `pending`); `status` nie zastępuje
+  monitoringu procesu `serve` (tylko cron — dostępność strony sprawdza PR-07B). Backup
+  wymaga klienta PostgreSQL ≥ 16 na hoście i zawiera dane osobowe — do PR-07B kopia poza
+  hostem jest ręczna. Do PR-07B nie ma „dead man's switch”: alert idzie tym samym SMTP i z
+  tego samego crona, więc przy martwym hoście, cronie lub SMTP operator nie dostaje nic (cisza
+  ≠ wszystko w porządku; ręczna kontrola — `docs/RUNBOOK.md`). Dwa żądania `/dopasowania`
+  jednej sesji to nadal dwa miejsca w kolejce. Profil zapisany wcześniej ze znakiem sterującym
+  trzeba poprawić przy następnym zapisie formularza (formularz pokaże błąd przy polu).

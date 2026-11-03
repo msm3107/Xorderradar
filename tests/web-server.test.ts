@@ -223,6 +223,26 @@ describe("web server without a session", () => {
     expect(await head.text()).toBe("");
   });
 
+  it("sends Strict-Transport-Security on every reply for an https PUBLIC_BASE_URL", async () => {
+    const replies = [
+      await fetch(`${url}/`),
+      await fetch(`${url}/styl.css`),
+      await fetch(`${url}/nie-ma`),
+      await fetch(`${url}/`, { method: "PUT" }),
+      await fetch(`${url}/profil`, { redirect: "manual" }),
+      await fetch(`${url}/dostep`, {
+        method: "POST",
+        headers: { "content-type": FORM, origin: "https://other.example.invalid" },
+        body: "token=x",
+      }),
+    ];
+    expect(replies.map((reply) => reply.status)).toEqual([200, 200, 404, 405, 401, 403]);
+    for (const reply of replies) {
+      // One year, this host only: no includeSubDomains, no preload (D-028).
+      expect(reply.headers.get("strict-transport-security")).toBe("max-age=31536000");
+    }
+  });
+
   it.each(["/nie-ma", "/profil/", "/dostep/a/b", "/wypis", "/styl.css/x", "//", "/PROFIL"])(
     "answers 404 for %j",
     async (path) => {
@@ -529,5 +549,29 @@ describe("web server without a session", () => {
       ["level", "message", "reason", "route", "time"].sort(),
     );
     expect(lines.join("")).not.toContain(token);
+  });
+});
+
+describe("web server for an http PUBLIC_BASE_URL (local development)", () => {
+  it("sends no Strict-Transport-Security", async () => {
+    const db = createDatabase("postgres://radar:not-a-real-password@127.0.0.1:1/radar");
+    const server = await startWebServer({
+      db,
+      publicBaseUrl: "http://localhost:3000",
+      logger: createLogger("error", () => undefined),
+      host: "127.0.0.1",
+      port: 0,
+      cleanupIntervalMs: null,
+    });
+    try {
+      const url = `http://127.0.0.1:${String(server.port)}`;
+      for (const path of ["/", "/styl.css", "/nie-ma"]) {
+        const reply = await fetch(`${url}${path}`);
+        expect(reply.headers.get("strict-transport-security")).toBeNull();
+      }
+    } finally {
+      await server.close();
+      await db.destroy();
+    }
   });
 });

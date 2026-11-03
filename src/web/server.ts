@@ -8,7 +8,7 @@ import {
   deactivateProfile,
   deleteExpiredAccess,
   deleteSession,
-  findSessionProfile,
+  findSession,
   getProfileStatus,
   isUsableAccessToken,
   SESSION_TTL_MS,
@@ -40,6 +40,7 @@ import {
   loginRequiredPage,
   loginRefusedPage,
   matchesBusyPage,
+  matchesTooManyPage,
   matchesPage,
   matchesUnavailablePage,
   type Page,
@@ -100,6 +101,14 @@ export const MATCHES_RETRY_AFTER_SECONDS = 5;
 export const MATCHES_MAX_WAIT_MS = 3000;
 /** Most requests waiting for the /dopasowania slot; one more gets the 503 at once. */
 export const MATCHES_MAX_WAITERS = 8;
+/**
+ * Most /dopasowania requests of one session in progress (waiting or
+ * computing) at a time; one more gets 429 at once, so one session cannot
+ * fill the whole queue (D-028).
+ */
+export const MATCHES_MAX_PER_SESSION = 2;
+/** HSTS for an https PUBLIC_BASE_URL: one year, this host only (D-028). */
+const STRICT_TRANSPORT_SECURITY = "max-age=31536000";
 /** How often `serve` deletes expired tokens and sessions (bounded batches). */
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 /** How long `close()` waits for open requests before cutting the connections. */
@@ -189,7 +198,8 @@ function pageReply(page: Page, headers?: Readonly<Record<string, string>>): Repl
   return { status: page.status, body: page.html, ...(headers === undefined ? {} : { headers }) };
 }
 
-function send(res: ServerResponse, reply: Reply): void {
+/** `https`: the replies also carry Strict-Transport-Security (PUBLIC_BASE_URL is https). */
+function send(res: ServerResponse, reply: Reply, https: boolean): void {
   const body = Buffer.from(reply.body, "utf8");
   res.statusCode = reply.status;
   res.setHeader("Content-Type", reply.contentType ?? "text/html; charset=utf-8");
@@ -202,6 +212,9 @@ function send(res: ServerResponse, reply: Reply): void {
   res.setHeader("Referrer-Policy", "strict-origin");
   // Pages may hold a token or a session's data: no cache may keep them.
   res.setHeader("Cache-Control", reply.cacheable === true ? "public, max-age=3600" : "no-store");
+  // Not on http (local development): a browser ignores it there, and
+  // includeSubDomains/preload would bind hosts this service does not run.
+  if (https) res.setHeader("Strict-Transport-Security", STRICT_TRANSPORT_SECURITY);
   for (const [name, value] of Object.entries(reply.headers ?? {})) res.setHeader(name, value);
   if (reply.close === true) res.setHeader("Connection", "close");
   res.end(body);
@@ -382,6 +395,8 @@ export interface WebServer {
   readonly port: number;
   /** Requests waiting for the /dopasowania slot now (tests). */
   readonly matchesWaiting: number;
+  /** Sessions with a /dopasowania request in progress now (tests). */
+  readonly matchesSessions: number;
   /** Stops accepting connections, lets open requests finish (bounded), then resolves. */
   close(): Promise<void>;
 }
@@ -394,6 +409,11 @@ interface ServerState {
    * briefly in FIFO order, or gets 503.
    */
   readonly matches: MatchesSlot;
+  /**
+   * /dopasowania requests in progress per session (by the session row's id,
+   * never the cookie value); an entry is removed when its count drops to 0.
+   */
+  readonly matchesPerSession: Map<string, number>;
 }
 
 /**
@@ -454,19 +474,36 @@ async function handle(
       case "matches": {
         const session = await currentSession(req, db);
         if (session === null) return unauthenticated(req);
-        const slot = await state.matches.acquire(res);
-        // A client already gone or gone while waiting: nothing computed, nothing to release.
-        if (slot === "gone") throw new RequestAbortedError();
-        if (slot !== "acquired") {
-          return pageReply(matchesBusyPage(), {
+        const counts = state.matchesPerSession;
+        const inProgress = counts.get(session.sessionId) ?? 0;
+        if (inProgress >= MATCHES_MAX_PER_SESSION) {
+          return pageReply(matchesTooManyPage(), {
             "Retry-After": String(MATCHES_RETRY_AFTER_SECONDS),
           });
         }
+        counts.set(session.sessionId, inProgress + 1);
         try {
-          return await matchesReply(db, session.profileId, new Date(), () => unauthenticated(req));
+          const slot = await state.matches.acquire(res);
+          // A client already gone or gone while waiting: nothing computed, nothing to release.
+          if (slot === "gone") throw new RequestAbortedError();
+          if (slot !== "acquired") {
+            return pageReply(matchesBusyPage(), {
+              "Retry-After": String(MATCHES_RETRY_AFTER_SECONDS),
+            });
+          }
+          try {
+            return await matchesReply(db, session.profileId, new Date(), () =>
+              unauthenticated(req),
+            );
+          } finally {
+            // Also after an error; a client gone meanwhile does not stop the work.
+            state.matches.release();
+          }
         } finally {
-          // Also after an error; a client gone meanwhile does not stop the work.
-          state.matches.release();
+          // On every path: refused, timed out, gone, failed or answered.
+          const left = (counts.get(session.sessionId) ?? 1) - 1;
+          if (left <= 0) counts.delete(session.sessionId);
+          else counts.set(session.sessionId, left);
         }
       }
       case "login":
@@ -679,6 +716,8 @@ async function matchesReply(
 
 interface Session {
   readonly token: string;
+  /** The session row's id (not secret, unlike the token). */
+  readonly sessionId: string;
   readonly profileId: string;
 }
 
@@ -686,8 +725,8 @@ interface Session {
 async function currentSession(req: IncomingMessage, db: Kysely<Database>): Promise<Session | null> {
   const token = readSessionCookie(req.headers.cookie);
   if (token === null) return null;
-  const profileId = await findSessionProfile(db, token);
-  return profileId === null ? null : { token, profileId };
+  const session = await findSession(db, token);
+  return session === null ? null : { token, ...session };
 }
 
 /** 401; a stale or unknown session cookie is cleared on the way. */
@@ -710,7 +749,9 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       maxWaitMs: options.matchesMaxWaitMs ?? MATCHES_MAX_WAIT_MS,
       maxWaiters: options.matchesMaxWaiters ?? MATCHES_MAX_WAITERS,
     }),
+    matchesPerSession: new Map(),
   };
+  const https = options.publicBaseUrl.startsWith("https:");
 
   const server = createServer(
     {
@@ -730,7 +771,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       const path = (req.url ?? "").split("?", 1)[0] ?? "";
       const route = matchRoute(path);
       const finish = (reply: Reply): void => {
-        send(res, reply);
+        send(res, reply, https);
         logger.info("http request", {
           method,
           route: route?.name ?? "not_found",
@@ -814,6 +855,9 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
     port: address.port,
     get matchesWaiting() {
       return state.matches.waiting;
+    },
+    get matchesSessions() {
+      return state.matchesPerSession.size;
     },
     close: async () => {
       if (timer !== null) clearInterval(timer);

@@ -388,3 +388,51 @@ dokumentacja operacyjna (runbook: dodanie źródła, wyłączenie źródła, pon
 testowo; błąd źródła widoczny dla operatora w ciągu jednego cyklu.
 
 **Poza zakresem:** płatności, nowe funkcje produktu.
+
+**Podział (koordynator, po merge'u PR-06B):** część repozytoryjna, którą da się w pełni
+przetestować bez hosta pilotażowego, i część wdrożeniowa, która zależy od wyboru hostingu
+przez właściciela (otwarte pytanie z „Blockers” w `docs/STATE.md`: czy host crona ma
+bezpośredni wychodzący HTTPS — D-014).
+
+- **PR-07A — Gotowość operacyjna (repozytorium):**
+  - **CI** (GitHub Actions): `pnpm install --frozen-lockfile` i `pnpm check` na Node 22 z
+    PostgreSQL 16 (`CI`, `REQUIRE_DB_TESTS=1`, `TEST_DATABASE_URL`), minimalne uprawnienia
+    (`contents: read`), akcje przypięte do wersji;
+  - **raport operatora** `status [--notify]`: ostatni przebieg każdego włączonego źródła
+    (status, `errorCode`, czas), źródło bez udanego przebiegu w oczekiwanym oknie, niepewne
+    (`pending`) i nieudane doręczenia; kod 1 przy problemie; `--notify` wysyła przy problemie
+    e-mail na `OPERATOR_EMAIL` istniejącym transportem (`test`/`smtp`) — bez adresów klientów
+    i treści ofert. Uruchamiany z crona po `ingest`/`digest`, więc błąd źródła dociera do
+    operatora w tym samym cyklu;
+  - **kopia i odtworzenie**: komendy `backup` (`pg_dump`, format custom, plik `0600`, hasło
+    nigdy w argumentach procesu ani w logach) i `restore` (`pg_restore` tylko do pustej bazy,
+    potem kontrola jak w `health`); test integracyjny kopia → odtworzenie → porównanie
+    liczby wierszy w każdej tabeli (w CI);
+  - **poprawki bezpieczeństwa z review:** limit równoległych żądań `/dopasowania` na sesję
+    (C&S L-b z PR-06B), odrzucanie znaków sterujących `\p{Cc}` we wpisach profilu na wejściu
+    (formularz i `profile:create`; C&S L-c), `Strict-Transport-Security` przy `https`
+    w `PUBLIC_BASE_URL`;
+  - **przegląd retry/timeoutów**: jedna tabela (źródła, baza, SMTP, serwer web) w
+    `docs/ARCHITECTURE.md`, poprawki tylko dla wykazanych luk;
+  - **runbook** `docs/RUNBOOK.md`: dodanie i wyłączenie źródła, ponowna wysyłka i niepewne
+    doręczenia, kopia i odtworzenie, unieważnienie dostępu (`access:revoke`) po przekazanym
+    e-mailu lub zmianie właściciela, obsługa skrzynki odpowiedzi, reakcja na alert `status`.
+
+  **Kryteria akceptacji PR-07A:** CI uruchamia pełny `pnpm check` z testami bazy; test
+  kopia → odtworzenie przechodzi i porównuje dane; nieudany przebieg źródła daje `status`
+  z kodem 1 i (z `--notify`) e-mail do operatora w trybie `test`; jedna sesja nie zajmie
+  więcej niż ustalony limit miejsc w kolejce `/dopasowania`; runbook pokrywa procedury z
+  zakresu PR-07.
+
+  **Poza zakresem PR-07A:** konfiguracja hosta, kontenera i reverse proxy, prawdziwe
+  wdrożenie, nowe źródła, zmiany matchingu i treści digestu.
+
+- **PR-07B — Wdrożenie pilotażowe** (po decyzji właściciela o hostingu): artefakty
+  uruchomieniowe (obraz albo unit systemd), reverse proxy (TLS, limity żądań, bez logowania
+  ścieżek `/dostep` i `/wypis`), crontab z `ingest`/`digest`/`status --notify`/`backup`,
+  smoke test po wdrożeniu, kopia poza hostem, zewnętrzny heartbeat („dead man's switch”) dla
+  `status` (ping po kodzie `0`, alarm przy braku pingu — cisza przy martwym hoście, cronie lub
+  SMTP; albo drugi kanał, np. `MAILTO` crona przez inny serwer pocztowy), `status`
+  sprawdzający wiek najnowszego `radar-*.dump` w katalogu kopii z env (brakująca kopia
+  przestaje być cicha), pierwsze wdrożenie i odtworzenie kopii na środowisku pilotażowym
+  (kryteria akceptacji całego PR-07).

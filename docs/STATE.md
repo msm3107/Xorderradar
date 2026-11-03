@@ -1,19 +1,13 @@
 # Current State
 
-Current phase: PHASE 3 — SELF SERVICE
-Current PR: PR-06B — Ekrany klienta
-Status: PR-06A **MERGED in PR #10 (merge commit 558b226)**. PR-06B (profile settings form,
-e-mail change with access revocation, matches list with reasons, „Włącz ponownie”, login-CSRF on
-`POST /dostep`) implemented: Code & Safety Review PASS (M-1 deadlock between an e-mail change and
-a login; M-2 `/dopasowania` blocked the process; L-1–L-3) → fix round → C&S PASS (L-a stall per
-200-offer chunk) → time-budget yield → C&S PASS → Quality REJECT (counties hint misleading) →
-copy round → C&S PASS → Quality ACCEPT (should-fix: counties note wording) → final copy round →
-C&S PASS. PR #11 opened for the owner's review. Owner review of 84adc33: PASS, no blockers,
-3 QoL asks (`/dopasowania` 503 under normal load, long list, show the address after a change) →
-owner round (FIFO wait queue, compact cards, address line on `/profil`) → C&S PASS (L-1 closed
-client with a free slot) → fix → C&S PASS → Quality ACCEPT (Medium: location hidden, deviation
-from the owner's ask not recorded) → fix → C&S PASS → Quality ACCEPT. Pushed for the owner's
-re-review. Not merged.
+Current phase: PHASE 4 — PILOT
+Current PR: PR-07A — Gotowość operacyjna (repozytorium)
+Status: PR-06B **MERGED in PR #11 (merge commit 2ef7c20)**. PR-07 split by the coordinator
+(`docs/PR_PLAN.md`): PR-07A (CI, `status [--notify]`, `backup`/`restore`, review hardening,
+timeout table, runbook) **PR READY for the owner's review** (PR #12, CI green on GitHub): Code &
+Safety Review PASS (round 3), Quality Review ACCEPT (round 2); owner review PASS with QoL notes,
+addressed in an owner-review round (C&S PASS round 3, Quality ACCEPT round 2); not merged.
+PR-07B (deployment) waits for the owner's hosting decision.
 
 ## Completed
 
@@ -511,65 +505,129 @@ recorded in `docs/PR_PLAN.md` → PR-03 „Podział”; acceptance criteria 1–
     warns; separate rarer login e-mail?); the inactive-profile sentence was changed from „Aby je
     włączyć, napisz do operatora serwisu.” to the reply-to-last-message wording.
 
+- **PR-06B — Ekrany klienta** (MERGED in PR #11, merge commit 2ef7c20; second part of PR-06). D-027 new (customer screens, e-mail change, matches
+  list, login-CSRF); D-025 amended (`Referrer-Policy: strict-origin`).
+
+  - **PR-06A bug fixed here:** `Referrer-Policy: no-referrer` made real browsers send
+    `Origin: null` on form POSTs, which the PR-06A Origin check refuses with 403 (login, logout,
+    unsubscribe from `/profil`). Header and meta tag are now `strict-origin` (WHATWG Fetch).
+  - Routes (`src/web/server.ts`): `GET/HEAD/POST /profil/ustawienia` (urlencoded ≤ 64 KB / 64
+    pairs, only this route; others stay 8 KB), `POST /profil/wlacz`, `GET/HEAD /dopasowania`.
+    Profile only from the session; CSRF checked before form validation (missing/duplicate → 403);
+    unknown fields (e.g. `active`) → 400.
+  - Form (`src/web/profile-form.ts`): Polish per-field errors with a linked summary, line-numbered
+    keyword/county errors, county names checked with `countyKey` (same rule as `profile:create`);
+    counties hint says honestly that offers carry no county yet. Domain schema
+    `companyProfileSettingsSchema` (no `active`).
+  - E-mail change (`updateProfileSettings`): one transaction — profile `FOR NO KEY UPDATE`, the
+    kept session re-checked (`FOR KEY SHARE`, unexpired; else 401, nothing written), then tokens
+    and other sessions deleted, then the profile UPDATE; one retry on 40P01 for the hourly cleanup.
+    Cycle-free against login, logout, `access:revoke` (now locks the profile first) and digest
+    token issue (tested with paused transactions and a timing assertion). No verification of the
+    new address (owner decision); repeat field required.
+  - `/dopasowania`: same rules as the digest (`src/notifications/candidates.ts`: 7 days, 10 000
+    candidates), ≤ 50 offers, soonest deadline first, reasons and source link; includes offers
+    already e-mailed (stated on the page). `matchingItems` yields after ~20 ms of work (worst
+    event-loop stall measured ≤ 73 ms with a maximal profile and 5 000 candidates). One computation
+    per process (`src/web/matches-slot.ts`, owner round): a concurrent request waits in a FIFO
+    queue (≤ 8 waiters, ≤ 3 s, slot handed straight to the oldest waiter); a full queue or a timed
+    out wait gets 503 + `Retry-After: 5`; a waiter whose client disconnects leaves the queue and
+    nothing is computed for it; no result cache (D-027). Compact cards: title, buyer, location,
+    deadline, reasons and source link visible; publication date, category, description and
+    contact inside `<details>` („Szczegóły ogłoszenia”, no JS).
+  - `/profil` always shows „Adres powiadomień” (escaped, from the DB via `getProfileStatus`); after
+    an e-mail change the notice asks to check it. The old address is not shown (it would have to
+    travel in a cookie, URL or column; D-027 rejected alternatives).
+  - Digest: short HTML link texts „Otwórz swój profil” / „Wypisz się z powiadomień”; tokens issued
+    only while the profile still has the address being sent to (`issueDigestTokens`), else status
+    `address_changed` (exit 0, next run sends to the new address).
+  - One-shot notice cookie `__Host-radar_komunikat` (Max-Age 60, closed list of values).
+  - No new dependencies, tables or migrations. 1658 tests (PR-06A: 1526).
+  - Reviews: C&S PASS (M-1 deadlock reproduced as 40P01 → 500; M-2 `/dopasowania` blocked other
+    requests ~5 s; L-1 missing csrf → 400; L-2 kept session not re-checked; L-3 digest tokens after
+    an address change) → fix round → C&S PASS (live probe: no 40P01; L-a 200-offer chunk ~0.4 s) →
+    time-budget yield → C&S PASS (stall 690 → ≤ 73 ms) → Quality REJECT (counties hint: a county
+    alone empties the list silently; bare „powiat” accepted) → copy round → C&S PASS → Quality
+    ACCEPT (should-fix: counties note by voivodeship selection) → final copy round → C&S PASS.
+  - Owner review of 84adc33 (PR #11): PASS, no blockers; tested in real Chromium (Playwright) with
+    500 real BZP offers. Accepted: e-mail change without verifying the new address, the
+    duplicate-address message, very old browsers without `Origin`/`Sec-Fetch-Site`. QoL asks done
+    in the owner round above. Owner-round reviews: C&S PASS (L-1 a closed client got the free slot
+    → fixed; L-2 one session can fill the queue → PR-07; L-3 `CARD_LABELS` tied to digest label
+    strings → follow-up) → C&S PASS → Quality ACCEPT (live: 2 parallel requests both 200 in
+    0.54/0.91 s; heavy 5.8 s computation → waiters 503 after ~3.07 s, the 9th at once; Medium:
+    location hidden in `<details>`, old-address deviation not documented) → fix → C&S PASS →
+    Quality ACCEPT. The PR-06A assertion `/profil` `not.toContain(EMAIL)` was replaced (owner
+    requirement) by a stricter one: the address appears exactly once, inside the address line.
+  - Owner decisions open: last write wins; `/dopasowania` shows already e-mailed offers; one
+    `/dopasowania` slot per process shared by all customers (now with a bounded wait queue).
+
 ## In progress
 
-**PR-06B — Ekrany klienta** (`docs/PR_PLAN.md` → PR-06B; second part of PR-06) — implemented;
-PR opened for the owner's review (not merged). D-027 new (customer screens, e-mail change, matches
-list, login-CSRF); D-025 amended (`Referrer-Policy: strict-origin`).
+**PR-07A — Gotowość operacyjna (repozytorium)** (`docs/PR_PLAN.md` → PR-07A) — PR READY for
+the owner's review (not merged). D-028 new. Reviews: C&S PASS WITH NOTES (M1 PG* variables,
+L1–L5) → fix round → C&S PASS → Quality ACCEPT WITH NOTES (alert-path proof and softened
+„no alert” sentence, 429 text after a refresh, UTC label in the alert, backup manual until
+PR-07B, consistent control-character messages) → copy round → C&S PASS → Quality ACCEPT.
+Working-tree fingerprint unchanged across every reviewer run.
 
-- **PR-06A bug fixed here:** `Referrer-Policy: no-referrer` made real browsers send
-  `Origin: null` on form POSTs, which the PR-06A Origin check refuses with 403 (login, logout,
-  unsubscribe from `/profil`). Header and meta tag are now `strict-origin` (WHATWG Fetch).
-- Routes (`src/web/server.ts`): `GET/HEAD/POST /profil/ustawienia` (urlencoded ≤ 64 KB / 64
-  pairs, only this route; others stay 8 KB), `POST /profil/wlacz`, `GET/HEAD /dopasowania`.
-  Profile only from the session; CSRF checked before form validation (missing/duplicate → 403);
-  unknown fields (e.g. `active`) → 400.
-- Form (`src/web/profile-form.ts`): Polish per-field errors with a linked summary, line-numbered
-  keyword/county errors, county names checked with `countyKey` (same rule as `profile:create`);
-  counties hint says honestly that offers carry no county yet. Domain schema
-  `companyProfileSettingsSchema` (no `active`).
-- E-mail change (`updateProfileSettings`): one transaction — profile `FOR NO KEY UPDATE`, the
-  kept session re-checked (`FOR KEY SHARE`, unexpired; else 401, nothing written), then tokens
-  and other sessions deleted, then the profile UPDATE; one retry on 40P01 for the hourly cleanup.
-  Cycle-free against login, logout, `access:revoke` (now locks the profile first) and digest
-  token issue (tested with paused transactions and a timing assertion). No verification of the
-  new address (owner decision); repeat field required.
-- `/dopasowania`: same rules as the digest (`src/notifications/candidates.ts`: 7 days, 10 000
-  candidates), ≤ 50 offers, soonest deadline first, reasons and source link; includes offers
-  already e-mailed (stated on the page). `matchingItems` yields after ~20 ms of work (worst
-  event-loop stall measured ≤ 73 ms with a maximal profile and 5 000 candidates). One computation
-  per process (`src/web/matches-slot.ts`, owner round): a concurrent request waits in a FIFO
-  queue (≤ 8 waiters, ≤ 3 s, slot handed straight to the oldest waiter); a full queue or a timed
-  out wait gets 503 + `Retry-After: 5`; a waiter whose client disconnects leaves the queue and
-  nothing is computed for it; no result cache (D-027). Compact cards: title, buyer, location,
-  deadline, reasons and source link visible; publication date, category, description and
-  contact inside `<details>` („Szczegóły ogłoszenia”, no JS).
-- `/profil` always shows „Adres powiadomień” (escaped, from the DB via `getProfileStatus`); after
-  an e-mail change the notice asks to check it. The old address is not shown (it would have to
-  travel in a cookie, URL or column; D-027 rejected alternatives).
-- Digest: short HTML link texts „Otwórz swój profil” / „Wypisz się z powiadomień”; tokens issued
-  only while the profile still has the address being sent to (`issueDigestTokens`), else status
-  `address_changed` (exit 0, next run sends to the new address).
-- One-shot notice cookie `__Host-radar_komunikat` (Max-Age 60, closed list of values).
-- No new dependencies, tables or migrations. 1658 tests (PR-06A: 1526).
-- Reviews: C&S PASS (M-1 deadlock reproduced as 40P01 → 500; M-2 `/dopasowania` blocked other
-  requests ~5 s; L-1 missing csrf → 400; L-2 kept session not re-checked; L-3 digest tokens after
-  an address change) → fix round → C&S PASS (live probe: no 40P01; L-a 200-offer chunk ~0.4 s) →
-  time-budget yield → C&S PASS (stall 690 → ≤ 73 ms) → Quality REJECT (counties hint: a county
-  alone empties the list silently; bare „powiat” accepted) → copy round → C&S PASS → Quality
-  ACCEPT (should-fix: counties note by voivodeship selection) → final copy round → C&S PASS.
-- Owner review of 84adc33 (PR #11): PASS, no blockers; tested in real Chromium (Playwright) with
-  500 real BZP offers. Accepted: e-mail change without verifying the new address, the
-  duplicate-address message, very old browsers without `Origin`/`Sec-Fetch-Site`. QoL asks done
-  in the owner round above. Owner-round reviews: C&S PASS (L-1 a closed client got the free slot
-  → fixed; L-2 one session can fill the queue → PR-07; L-3 `CARD_LABELS` tied to digest label
-  strings → follow-up) → C&S PASS → Quality ACCEPT (live: 2 parallel requests both 200 in
-  0.54/0.91 s; heavy 5.8 s computation → waiters 503 after ~3.07 s, the 9th at once; Medium:
-  location hidden in `<details>`, old-address deviation not documented) → fix → C&S PASS →
-  Quality ACCEPT. The PR-06A assertion `/profil` `not.toContain(EMAIL)` was replaced (owner
-  requirement) by a stricter one: the address appears exactly once, inside the address line.
-- Owner decisions open: last write wins; `/dopasowania` shows already e-mailed offers; one
-  `/dopasowania` slot per process shared by all customers (now with a bounded wait queue).
+Owner review (PR #12, PASS, no blockers; QoL notes) → owner-review round: CI `push` only on the
+default branch (`ccr-919f3e62-g6j3w9`, commented) + `pull_request` (one run per same-repo PR);
+`pnpm audit --prod` step after install (dev-only advisories stay with the full `pnpm audit` in
+C&S, SECURITY §13); RUNBOOK „Znane ograniczenie — brak dead man's switch”: silence ≠ OK, real
+alert-failure codes (`smtp_535`, `smtp_econnrefused`), daily manual check until PR-07B
+(`grep '"checkedAt"'` in `status.log`, `grep '"digestDate"'` in `digest.log`); PR_PLAN PR-07B
+gains the external heartbeat (or second mail channel) and a backup-age check in `status`
+(owner's 4th note, deferred there); D-028 updated. C&S PASS WITH NOTES (wrong example code) →
+fix → PASS → Quality ACCEPT WITH NOTES (concrete daily check) → fix → C&S PASS → Quality ACCEPT.
+
+Round-1 fixes:
+
+- M1: `pg` fills what DATABASE_URL omits from PG* variables, the tools (fresh env) would not:
+  `backup`/`restore` now refuse a non-empty `PGHOST`, `PGHOSTADDR`, `PGPORT`, `PGUSER`,
+  `PGPASSWORD`, `PGDATABASE`, `PGOPTIONS`, `PGSSLMODE`, `PGSSLNEGOTIATION`
+  (`unsupported_database_url`, variable name only), before reading the database; docs say all
+  connection settings must be in DATABASE_URL.
+- L1/L2/L5 RUNBOOK: restore only our own backups (dump SQL runs as the application role);
+  backup directory on a local filesystem with hard links (else `write_failed`); a failed day is
+  listed only while its run is < 36 h old, ongoing failures stay `source_failed`/`source_stale`.
+- L3: the profile-cli trim test asserts exit 0 and the stored trimmed name.
+- L4: an unexpected `status` error with `--notify` sends a fixed alert `status_internal_error`
+  (no error text) and still exits 1 with the internal message, also when the alert fails.
+
+- CI (`.github/workflows/ci.yml`): `pnpm check` on push/PR with a PostgreSQL 16 service,
+  `REQUIRE_DB_TESTS=1`, actions pinned to full commit SHAs verified with `git ls-remote`
+  (checkout v7.0.1, pnpm/action-setup v6.1.0 — peeled commit of the annotated tag, setup-node
+  v7.1.0), `permissions: contents: read`, `persist-credentials: false`,
+  `--frozen-lockfile`, `postgresql-client` with a ≥ 16 version check. First GitHub run on
+  7cd741b green (push and pull_request).
+- `status [--notify]` (`src/operations/status.ts`, `status-repository.ts`): per enabled source
+  last run / last success / unresolved failed days (36 h), pending (unless a digest holds its
+  lock, read from `pg_locks`) and failed deliveries since yesterday (Warsaw); also
+  `schema_not_ready` and `database_unavailable`. Exit 0/1. `--notify` sends one plain-text
+  alert (ids, codes, timestamps, counts; no `List-Unsubscribe`) to the new `OPERATOR_EMAIL`
+  over `EMAIL_MODE`, on every run while a problem lasts; an unexpected error of `status` is
+  alerted as `status_internal_error` (no error text) before exiting 1.
+- `backup <dir>` / `restore <file>` (`src/operations/backup.ts`, `maintenance-repository.ts`):
+  `pg_dump`/`pg_restore` ≥ 16 as children without a shell, password only in the child's
+  `PGPASSWORD`, fresh env, refusal (`unsupported_database_url`, variable name only) when a PG* connection
+  variable (PGHOST … PGSSLNEGOTIATION) is set, TLS never weaker than `pg`, custom format of the
+  current schema, `0600` temp file + `link` (never replaces), restore only into an empty schema
+  in one transaction. Restore tested end to end (`tests/integration/backup-restore.test.ts`,
+  separate Vitest project run last; fails in CI when the tools are missing).
+- Hardening: `/dopasowania` ≤ 2 requests per session (by session id) → 429; HSTS
+  `max-age=31536000` for an https `PUBLIC_BASE_URL` only; `\p{Cc}` refused at input (form and
+  `profile:create`), stored-row schemas unchanged.
+- Docs: `docs/RUNBOOK.md` (new, Polish; „Alert statusu”, sources, deliveries, reply-to mailbox,
+  `access:revoke`, backup/restore drill, proxy logs), README (commands, cron `status --notify`
+  after ingest and digest, `OPERATOR_EMAIL`, backup), ARCHITECTURE (§2, §4.6, §6 incl. the
+  timeout/retry table, §7), SECURITY (§1, §10, §11, §12, §14), `.env.example`.
+- One existing test changed deliberately: `profile:create` „names at most five short keywords,
+  cleaned” fed an ESC sequence through the CLI, which now refuses control characters; the CLI
+  part uses plain keywords and the ESC-cleaning assertion calls `profileWarnings` directly
+  (same expected text). The 503 queue test sends its third request from a second session (the
+  same session now gets 429 first); its assertions are unchanged.
+- No new dependencies, tables or migrations.
 
 ## Blockers
 
@@ -603,7 +661,7 @@ list, login-CSRF); D-025 amended (`Referrer-Policy: strict-origin`).
 
 ## Decisions made
 
-See `docs/DECISIONS.md` (D-001 … D-027). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
+See `docs/DECISIONS.md` (D-001 … D-028). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
 on `node:https` with pinned lookup, no HTTP library) accepted in PR-02 Part A; D-015 (first
 source: BZP through the official API) in PR-02 Part B; PR-03 Part A: D-016 (fingerprint and
 `content_hash` format), D-017 (`unchanged` writes nothing, no `last_seen_at`), D-018 (ingest
@@ -620,24 +678,27 @@ region semantics, profile schema, `match:preview`). PR-05: D-010 accepted (SMTP 
 nodemailer), D-024 (digest, `deliveries`, failure classes, `pending` procedure). PR-06A: D-025
 (web server on `node:http`), D-026 (e-mail tokens, session, CSRF, one-click unsubscribe);
 D-024 amended (footer links, `List-Unsubscribe` https + mailto). PR-06B: D-027 (customer
-screens, e-mail change, matches list, login-CSRF); D-025 amended (`strict-origin`).
+screens, e-mail change, matches list, login-CSRF); D-025 amended (`strict-origin`). PR-07A:
+D-028 (`status` rules and operator alert, backup/restore, per-session `/dopasowania` cap, HSTS,
+control characters at input, CI).
 
 ## Next action
 
-1. Owner re-reviews PR #11 (owner round on top of 84adc33) and decides the open items under
-   "In progress" (last write wins, already-sent offers on `/dopasowania`, the shared
-   `/dopasowania` slot with its wait queue). Still open from
-   PR-06A: TTLs (7/60/30 days), a self-service "e-mail me a link" form, §8.3 leniency on
-   `/wypis`, forwarded digests; RESUBSCRIBE_HINT stays on the post-unsubscribe page only.
-   Then PR-07 (hardening and deployment). For PR-07: runbook lines on revoking access
-   (`access:revoke <profileId>`) after a forwarded e-mail or an owner change, monitoring the
-   reply-to mailbox, the proxy must not log `/dostep` and `/wypis` paths, TLS/HSTS and rate
-   limiting at the proxy, plus a per-session rate limit for `/dopasowania` (one session can keep
-   the shared slot busy; C&S L-b).
+1. PR-07A: owner re-review of PR #12 after the owner-review round (not merged by the agents);
+   check CI on the new head (one `pull_request` run, `pnpm audit --prod` step). Still open from PR-06B: last write wins, already-sent offers on
+   `/dopasowania`, the shared `/dopasowania` slot. Still open from PR-06A: TTLs (7/60/30 days), a
+   self-service "e-mail me a link" form, §8.3 leniency on `/wypis`, forwarded digests.
+2. PR-07B (after the owner's hosting decision): hosting/container/proxy/systemd artefacts and
+   deployment; backup retention and an encrypted off-host copy (today manual, RUNBOOK);
+   a backup cron line and backup monitoring (gap until then: scheduled backup is a manual cron
+   entry from the RUNBOOK and `status` does not check backups — a failed or missing backup
+   raises no alert); rate limiting at the proxy (incl. `/dopasowania` across sessions);
+   proxy access logs without `/dostep/…` and `/wypis/…`; monitoring that `serve` is up
+   (`status` covers the cron commands only); external heartbeat / dead man's switch for
+   `status` (or a second mail channel) — until then the operator checks `status.log` and
+   `digest.log` by hand daily (RUNBOOK); `status` checks the age of the newest `radar-*.dump`.
    Follow-ups from the PR-06B reviews (owner to choose the PR):
-   - Reject C0 control characters (`\p{Cc}`) in profile text/county entries: an entry of only
-     control characters (alone or after „m. st.”) gets a non-empty `countyKey` and is stored but
-     never matches (C&S L-c, pre-existing; affects only the customer's own profile).
+   - (Done in PR-07A: `\p{Cc}` refused at input — C&S L-c.)
    - Category labels: match reasons on `/dopasowania` and in the digest show raw keys
      („kategoria: sprzatanie”) next to the form's „Sprzątanie” (reuse `CATEGORY_LABELS`).
    - Digest footer wording could say what the profile page offers („zmień kategorie i regiony,
@@ -670,11 +731,11 @@ screens, e-mail change, matches list, login-CSRF); D-025 amended (`strict-origin
      per call, README); cosmetic nits from Part B (over-wide `ingest` help lines in
      `src/cli.ts`; two test titles still say "200 000"); watch live runs for `too_large` on update
      pages (`BZP_PAGE_SIZE` 25 kept).
-2. Owner verifies PR-02 AC1 outside the container (command and checklist under Blockers); a
+3. Owner verifies PR-02 AC1 outside the container (command and checklist under Blockers); a
    first live `ingest bzp --date <past weekday>` on the same machine is a useful follow-up
    check (exit 0, `inserted` > 0, a second run all `unchanged`; `skipped` > 0 and some
    `updated` from `NoticeUpdateNotice` when originals of that day's updates are stored).
-3. PR-06 (Minimal User Interface, `docs/ROADMAP.md`): token unsubscribe link done in PR-06A. Notes carried from the PR-04 reviews (PR-05 status marked):
+4. PR-06 (Minimal User Interface, `docs/ROADMAP.md`): token unsubscribe link done in PR-06A. Notes carried from the PR-04 reviews (PR-05 status marked):
    - Matching cost: ~10–60 ms per offer × profile pair in the worst case (100 ten-token
      keywords, 10 000-char description); fine for 10–100 profiles × ≤ 1000 offers, measure
      before optimising (D-023).
@@ -718,16 +779,16 @@ screens, e-mail change, matches list, login-CSRF); D-025 amended (`strict-origin
    - D-016 "Konsekwencje" still describes the pre-D-021 cron ("tylko wczorajszy dzień") as a
      historical record; optionally add a pointer to D-021 in a later docs pass.
 
-4. Open points carried from D-015/PR-02 for PR-03: whether the API's publication-day boundary
+5. Open points carried from D-015/PR-02 for PR-03: whether the API's publication-day boundary
    is UTC or Polish time (cron at ~06:00 Europe/Warsaw ingests yesterday UTC; overlapping days
    are harmless thanks to dedup) — verify on the first live runs.
-5. Open question for PR-03C/PR-05 (Quality Review N6): BZP cancellation notices (a tender
+6. Open question for PR-03C/PR-05 (Quality Review N6): BZP cancellation notices (a tender
    withdrawn → status `cancelled`) have no plan item yet and are not handled by PR-03B
    (recorded in D-015). Without one the digest may show cancelled tenders as open; decide
    whether to fetch and apply them like `NoticeUpdateNotice` (by `tenderId`). PR-05 records
    the limitation (D-024, README) and the e-mail footer says the procedure may have been
    cancelled; since the digest now reaches customers, decide before the pilot.
-6. Open item from the PR-03B reviews (C&S L5, Quality Review): deadline changes of small
+7. Open item from the PR-03B reviews (C&S L5, Quality Review): deadline changes of small
    contracts are effectively not applied. Both captured `SmallContractNotice` originals
    (fixture 2026-10-29) have `tenderId` = `null`, and updates are linked only by `tenderId`, so
    no update can reach them whatever section 3.1 says. Verify on live data both questions:
@@ -738,7 +799,7 @@ screens, e-mail change, matches list, login-CSRF); D-025 amended (`strict-origin
    on a few weekdays — `SmallContractNotice` records in the list and `updates[].skipReason`
    (`no_original`/`not_contract_notice_change`) of their updates. Until then the stored
    deadline of a small contract may be outdated (recorded in D-015).
-7. Deferred in Part A: fingerprint variant for sources with neither an external id nor a
+8. Deferred in Part A: fingerprint variant for sources with neither an external id nor a
    stable URL (D-016; with the first such source); `last_seen_at` (D-017; when a feature needs
    it, e.g. detecting withdrawn notices).
 
@@ -842,8 +903,7 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
     `listMatchCandidates`/`match:preview` in PR-04 and for the digest in PR-05.
   - **PR-05/06:** stored URLs may still contain `'`, `` ` ``, `{`, `}` and percent-encoded
     controls — escape contextually on output (SECURITY §10).
-  - **PR-07 CI:** set `CI`/`REQUIRE_DB_TESTS` with `TEST_DATABASE_URL`; without the URL the run
-    now fails instead of skipping.
+  - **PR-07 CI:** done in PR-07A (`CI=true`, `REQUIRE_DB_TESTS=1`, `TEST_DATABASE_URL`).
 - From PR-01 Code & Safety Review (optional Low):
   - If `close()` fails after a successful command, stdout shows `ok` but exit is 1 (safe
     direction); assert/document it.
@@ -856,6 +916,31 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-03, PR-07A owner-review round (CI and docs only): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 1793 tests passed in 52 files,
+none skipped. `pnpm audit --prod`: no known vulnerabilities; full `pnpm audit`: 1 moderate,
+dev-only (eslint>minimatch, GHSA-g3hv-75wg-m249). Workflow YAML parses. No e-mail sent.
+
+2026-11-02, PR-07A after the Quality copy round (Node 22, pnpm 10.28.0, PostgreSQL 16,
+pg_dump/pg_restore 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 1793 tests passed in 52 files,
+none skipped (run by the coder, C&S round 3 and Quality round 2). Quality also ran the RUNBOOK
+restore drill by hand on scratch databases (dropped afterwards). No dependency changes; no
+e-mail sent. The CI workflow has not run on GitHub yet.
+
+2026-11-02, PR-07A C&S round-1 fixes (Node 22, pnpm 10.28.0, PostgreSQL 16, pg_dump/pg_restore
+16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1
+pnpm check` — format, lint, typecheck clean; 1793 tests passed in 52 files, none skipped (+15:
+PG* refusal unit and integration tests, `status_internal_error` alert via the outbox and with
+a failing send). No dependency changes; no e-mail sent; test schemas dropped by the teardown.
+
+2026-11-02, PR-07A implementation (Node 22, pnpm 10.28.0, PostgreSQL 16, pg_dump/pg_restore 16):
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 1778 tests passed in 52 files, none skipped, DB and
+backup/restore tests included (PR-06B: 1658 in 47). No dependency changes. Test schemas dropped
+by the global teardown; no e-mail sent (operator alerts only into temporary outboxes). The CI
+workflow has not run on GitHub yet.
 
 2026-11-02, PR-06B owner round (Node 22, pnpm 10.28.0, PostgreSQL 16):
 `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`

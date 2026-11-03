@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { open, type FileHandle } from "node:fs/promises";
 import type { z } from "zod";
+import { hasControlCharacter } from "./domain/common.js";
 import {
   companyProfileInputSchema,
   type CompanyProfile,
@@ -225,6 +226,18 @@ export async function readProfileFile(path: string): Promise<CompanyProfileInput
   const result = companyProfileInputSchema.safeParse(canonicalVoivodeships(parsed));
   if (!result.success) return schemaProblems(parsed, result.error.issues);
   const profile: CompanyProfileInput = result.data;
+  // Refused at input only, like the web form (D-028); field paths, never values.
+  const controls = [
+    ...(hasControlCharacter(profile.name) ? ["name"] : []),
+    ...(["counties", "includeKeywords", "excludeKeywords"] as const).flatMap((field) =>
+      profile[field].flatMap((entry, index) =>
+        hasControlCharacter(entry) ? [`${field}.${String(index)}`] : [],
+      ),
+    ),
+  ];
+  if (controls.length > 0) {
+    return `Invalid profile: ${controls.join(", ")} (control character).`;
+  }
   // Counties are kept as entered (no county dictionary, D-022), but an entry
   // that is no county name at all ("powiat", "m. st.") could never match.
   const counties = profile.counties.flatMap((county, index) =>

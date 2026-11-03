@@ -18,6 +18,29 @@ dotyczą projektu).
 - Sekrety nie trafiają do logów, URL-i, komunikatów błędów, fixture'ów ani snapshotów testów.
 - Poświadczenia z minimalnymi uprawnieniami (osobny użytkownik DB dla aplikacji, bez praw
   superusera).
+- `backup`/`restore` (PR-07A, D-028): hasło z `DATABASE_URL` trafia do `pg_dump`/`pg_restore`
+  wyłącznie przez zmienną `PGPASSWORD` w środowisku procesu potomnego — nigdy w argumentach
+  (widocznych w `ps`), na stdout/stderr ani w logu; `--dbname` dostaje conninfo libpq bez
+  hasła. Środowisko dziecka jest budowane od zera (`PATH`, `HOME`, `PGPASSWORD`,
+  `PGCONNECT_TIMEOUT`, `PGAPPNAME`, `LC_ALL`), więc żadna inna zmienna procesu (np. `SMTP_URL`)
+  do niego nie trafia. Wszystkie ustawienia połączenia muszą być w `DATABASE_URL`: `pg` sięga
+  po `PGHOST`, `PGHOSTADDR`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGOPTIONS` (i
+  `PGSSLMODE`, gdy URL nie ustawia TLS), czego narzędzia w czystym środowisku by nie zrobiły —
+  inny serwer albo słabszy TLS. Dlatego niepusta zmienna z tej listy (lub
+  `PGSSLNEGOTIATION`) → odmowa `unsupported_database_url` (fail-closed) z samą nazwą zmiennej,
+  nigdy jej wartością. TLS narzędzi nigdy nie jest słabszy niż TLS
+  aplikacji (`pg` weryfikuje certyfikat od `sslmode=require` → narzędzia `verify-full`,
+  domyślnie z systemowymi CA); parametr bez dokładnego odpowiednika → odmowa z nazwą
+  parametru. stderr narzędzi nie jest wypisywany (może zawierać host, użytkownika, nazwy
+  obiektów) — tylko stały powód i kod wyjścia. Testy sprawdzają, że hasło nie pojawia się w
+  argumentach ani na wyjściu.
+- **Pliki backupu zawierają dane osobowe** (adresy e-mail i ustawienia profili, historia
+  doręczeń, skróty tokenów i sesji): tworzone z prawami `0600` w katalogu wskazanym przez
+  operatora (zalecany `0700`), nigdy nie nadpisują istniejącego pliku, przy błędzie nic nie
+  zostaje. Kopia poza hostem musi być **zaszyfrowana**; retencja i automatyczna, szyfrowana
+  kopia poza hostem — PR-07B (do tego czasu procedura ręczna w `docs/RUNBOOK.md`). Backup jest
+  objęty prawem do usunięcia danych: usunięty profil zostaje w starszych plikach do końca
+  ich retencji.
 
 ## 2. SSRF protection _(egzekwowane od PR-02)_
 
@@ -194,6 +217,13 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
   `http(s)`, `rel="noopener noreferrer"`), a formularz profilu odsyła wysłane wartości
   escapowane (także w `<textarea>`); wartości pól wyboru spoza zamkniętych list nie są
   odsyłane. Testy z wrogim tytułem, URL-em `javascript:` i wartościami formularza.
+- Alert operatora (`status --notify`, PR-07A, D-028): tylko na `OPERATOR_EMAIL` (adres
+  operatora, walidowany jak inne adresy; błąd → nazwa zmiennej, bez wartości), tym samym
+  transportem co `digest` (`EMAIL_MODE=test` → outbox). Zwykły tekst bez HTML i bez
+  `List-Unsubscribe` (to nie jest wiadomość do klienta). Treść i temat zawierają wyłącznie
+  identyfikatory (`sourceId`, `runId`), statusy, kody błędów, czasy i liczby — nigdy adresów
+  e-mail, tytułów ofert, nazw firm, treści profili, URL-i z tokenami ani komunikatów serwera
+  (test: brak `@`, `<`, `>` w treści).
 - Testy nie wysyłają prawdziwych e-maili: fałszywy sender, outbox w katalogu tymczasowym albo
   lokalny serwer na `127.0.0.1`; adresy wyłącznie pseudonimizowane (`*.invalid`).
 
@@ -264,7 +294,17 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   `nosniff`, `Referrer-Policy: strict-origin` (`Referer` niesie tylko origin, więc token z
   URL nie wycieka w `Referer`, także do logów własnego proxy; PR-06A miał `no-referrer`, przy
   którym przeglądarki wysyłają w formularzach `Origin: null` i kontrola `Origin` odrzucała
-  każdy formularz — poprawione w PR-06B), `Cache-Control: no-store`.
+  każdy formularz — poprawione w PR-06B), `Cache-Control: no-store`. Od PR-07A (D-028) przy
+  `PUBLIC_BASE_URL` `https://` każda odpowiedź ma też
+  `Strict-Transport-Security: max-age=31536000` — rok, tylko ten host: **bez**
+  `includeSubDomains` (nie wiemy, czy wszystkie subdomeny domeny mają TLS) i bez `preload`
+  (wpis na listę preload jest trudny do cofnięcia). Przy `http://` (tylko loopback poza
+  produkcją) nagłówka nie ma. Proxy nie powinno dodawać drugiego nagłówka HSTS.
+- **Znaki sterujące na wejściu (PR-07A, D-028):** nazwa firmy i wpisy list (powiaty, słowa)
+  ze znakiem sterującym `\p{Cc}` wewnątrz (np. wklejony tabulator) są odrzucane — w formularzu
+  (błąd przy polu) i w `profile:create` (ścieżka pola, bez wartości); znaki na brzegach są
+  przycinane jak dotąd. Schematy wierszy zapisanych w bazie się nie zmieniają (stary wiersz
+  dalej się wczytuje); wyjście i tak przechodzi przez `escapeHtml`/`cleanText`.
 - **Bez limitu żądań w aplikacji:** tokenów 256-bitowych nie da się zgadnąć, a każde żądanie jest
   ograniczone rozmiarem i czasem; zalew żądań zatrzymuje reverse proxy (PR-07). Wyjątek kosztowy
   (PR-06B, D-027): `/dopasowania` liczy dopasowanie na żądanie w wątku procesu `serve` (zmierzone
@@ -275,8 +315,10 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   liczenia, bez pozostawionych timerów i nasłuchów); pełna kolejka albo upływ czasu → 503 z
   `Retry-After`. To jedno miejsce jest **wspólne dla wszystkich klientów**: posiadacz sesji
   ponawiający żądania może je zajmować i inni klienci czekają wtedy albo dostają 503 (reszta stron
-  działa).
-  Dostępne tylko z sesją; limit dla tej trasy na proxy — PR-07. Funkcja „wyślij mi link e-mailem”
+  działa). Od PR-07A jedna sesja ma naraz najwyżej 2 żądania `/dopasowania` w toku lub w
+  kolejce; trzecie → od razu 429 z `Retry-After` (licznik po id sesji z bazy, nigdy po wartości
+  ciasteczka; D-028) — jeden klient nie zajmie całej kolejki, ale wiele sesji nadal może.
+  Dostępne tylko z sesją; limit dla tej trasy na proxy — PR-07B. Funkcja „wyślij mi link e-mailem”
   (otwarta decyzja właściciela) będzie wymagać limitu.
 - **Reverse proxy (PR-07):** `serve` słucha domyślnie na `127.0.0.1:3000` czystym HTTP; TLS,
   HSTS i przekierowanie z `http` robi proxy. Tokeny są w ścieżkach `/dostep/…` i `/wypis/…`
@@ -322,6 +364,10 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   `http request aborted` (poziom `info`, tylko `route` i `reason: "aborted"`) — nie jest
   błędem bazy ani odpowiedzią 500. `access:link` wypisuje link
   wyłącznie na stdout (ostrzeżenie na stderr), nigdy do logu.
+- `status` (od PR-07A) wypisuje i loguje wyłącznie identyfikatory źródeł i przebiegów,
+  statusy, kody błędów, czasy i liczby (wysyłki — tylko liczniki i kody, bez `profileId`);
+  `backup`/`restore` — ścieżkę pliku, rozmiar, schemat, liczby tabel/wierszy i stały powód
+  błędu z kodem wyjścia narzędzia; nigdy conninfo, hasła ani stderr narzędzia.
 - Komunikaty błędów dla użytkownika są bezpieczne; szczegóły tylko w logu.
 - Błędy bazy danych (od PR-01): CLI pokazuje tylko stały powód + kod SQLSTATE/errno, nigdy
   komunikatu sterownika/serwera; repozytoria zamieniają naruszenia ograniczeń na
@@ -345,3 +391,8 @@ branchy, przepisywanie historii, usuwanie danych/tabel, migracje nieodwracalne n
 produkcyjnych, zmiany infrastruktury produkcyjnej, deployment produkcyjny, wysyłka do
 prawdziwych użytkowników. Zakaz `--no-verify`. Migracje: wersjonowane, testowane na kopii,
 z opisaną strategią odtworzenia (nie każda migracja jest odwracalna).
+
+`restore` (PR-07A) nigdy nie nadpisuje danych: działa tylko do istniejącego schematu bez
+żadnej relacji i w jednej transakcji (błąd → schemat pusty jak przed). Usunięcie i ponowne
+utworzenie schematu produkcyjnego przed odtworzeniem jest usuwaniem danych — wymaga
+potwierdzenia właściciela (procedura: `docs/RUNBOOK.md`).

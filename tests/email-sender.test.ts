@@ -546,3 +546,49 @@ describe("redactTokenLinks", () => {
     expect(redactTokenLinks("bez linków")).toBe("bez linków");
   });
 });
+
+describe("an operator e-mail (status --notify, PR-07A)", () => {
+  // Plain text, no List-Unsubscribe: it goes to the operator, not to a customer.
+  const alert: OutgoingEmail = {
+    to: "operator@example.invalid",
+    subject: "Radar Zamówień: problem (source_failed)",
+    text: "Radar Zamówień — status: problem\n",
+    listUnsubscribe: false,
+    unsubscribeUrl: `https://radar.example.invalid/wypis/${"a".repeat(43)}`,
+  };
+
+  it("has no List-Unsubscribe header (not even with a link) and no HTML part", async () => {
+    const options = mailOptions(from, alert);
+    expect(options).not.toHaveProperty("html");
+    expect(options).not.toHaveProperty("list");
+    expect(options).not.toHaveProperty("headers");
+    const transporter = createTransport({ streamTransport: true, buffer: true, newline: "unix" });
+    const info = await transporter.sendMail(options);
+    if (!Buffer.isBuffer(info.message)) throw new Error("no buffer");
+    const message = info.message.toString("utf8");
+    const lines = headerLines(message);
+    expect(lines.some((line) => /^list-unsubscribe/i.test(line))).toBe(false);
+    expect(message).toContain("Content-Type: text/plain");
+    expect(message).not.toContain("text/html");
+  });
+
+  it("is written to the outbox with html null in the readable copy", async () => {
+    const outboxDir = join(dir, "outbox-operator");
+    await createOutboxSender({ outboxDir, from }).send(alert);
+    const files = (await readdir(outboxDir)).sort();
+    const json = files.find((file) => file.endsWith(".json"));
+    if (json === undefined) throw new Error("no .json");
+    expect(JSON.parse(await readFile(join(outboxDir, json), "utf8"))).toEqual({
+      from,
+      to: alert.to,
+      subject: alert.subject,
+      text: alert.text,
+      html: null,
+    });
+  });
+
+  it("keeps List-Unsubscribe for an e-mail that does not opt out", () => {
+    expect(mailOptions(from, { ...email, listUnsubscribe: true })).toHaveProperty("list");
+    expect(mailOptions(from, email)).toHaveProperty("list");
+  });
+});

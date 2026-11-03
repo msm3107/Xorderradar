@@ -9,6 +9,7 @@ import {
   ConfigError,
   loadConfig,
   loadEmailConfig,
+  loadOperatorEmail,
   loadPublicBaseUrl,
   loadWebConfig,
   type AppConfig,
@@ -84,7 +85,28 @@ import {
   withDigestLock,
   type DigestSummary,
 } from "./notifications/run.js";
-import { createEmailSender, type EmailSender } from "./notifications/sender.js";
+import {
+  createEmailSender,
+  sendWithRetry,
+  type EmailSender,
+  type SendResult,
+} from "./notifications/sender.js";
+import {
+  BackupError,
+  backupDatabase,
+  restoreDatabase,
+  type BackupFailureReason,
+  type BackupResult,
+  type RestoreResult,
+  type ToolOptions,
+} from "./operations/backup.js";
+import {
+  collectStatus,
+  failedStatus,
+  formatOperatorAlert,
+  STATUS_STALE_AFTER_MS,
+  type StatusReport,
+} from "./operations/status.js";
 import { previewSource, type SourcePreview } from "./sources/preview.js";
 import { loginUrl } from "./web/links.js";
 import { startWebServer, type WebServer, type WebServerOptions } from "./web/server.js";
@@ -157,6 +179,17 @@ export interface CliDatabase {
    * Optional only so that stubs for the other commands need not provide it.
    */
   startWebServer?(options: Omit<WebServerOptions, "db">): Promise<WebServer>;
+  /**
+   * The operator's status report (`status`, src/operations/status.ts).
+   * Optional only so that stubs for the other commands need not provide it.
+   */
+  collectStatus?(now: Date): Promise<StatusReport>;
+  /**
+   * `backup` and `restore` (src/operations/backup.ts) on this database.
+   * Optional only so that stubs for the other commands need not provide them.
+   */
+  backup?(dir: string, now: Date, options: ToolOptions): Promise<BackupResult>;
+  restore?(file: string, options: ToolOptions): Promise<RestoreResult>;
 }
 
 /** What commands that read sources need; injected so tests run without the network. */
@@ -291,6 +324,9 @@ export function openCliDatabase(
     revokeProfileAccess: async (profileId) =>
       (await getProfileStatus(db, profileId)) === null ? null : revokeProfileAccess(db, profileId),
     startWebServer: (webOptions) => startWebServer({ db, ...webOptions }),
+    collectStatus: (now) => collectStatus(db, now),
+    backup: (dir, now, toolOptions) => backupDatabase(db, databaseUrl, dir, now, toolOptions),
+    restore: (file, toolOptions) => restoreDatabase(db, databaseUrl, file, toolOptions),
   };
 }
 
@@ -403,6 +439,28 @@ Commands:
             The profile and its notifications stay as they are; a new link comes from
             access:link or the next digest. Requires an up-to-date schema (migrate). Exit 1
             when the profile does not exist.
+  status [--notify]
+            Print one JSON line on what the operator must know: per enabled source its last
+            run and its last succeeded/incomplete run, the failed days not covered since
+            (last ${String(STATUS_STALE_AFTER_MS / 3_600_000)} h), and the pending and recently failed deliveries. Problems:
+            source_failed, source_stale (no success in ${String(STATUS_STALE_AFTER_MS / 3_600_000)} h), source_never_run,
+            no_enabled_sources, deliveries_pending, deliveries_failed, schema_not_ready,
+            database_unavailable. Read-only; run it after ingest and after digest (cron).
+            Exit 0 when there is no problem, 1 otherwise.
+            --notify  when there is a problem, also send one plain-text alert (ids, codes,
+                      timestamps and counts only) to OPERATOR_EMAIL over EMAIL_MODE (test:
+                      the outbox); exit 1 also when it cannot be sent. An unexpected error
+                      of status itself is alerted as status_internal_error (no details).
+  backup <dir>
+            Dump the database schema (pg_dump >= 16, custom format, no owners or
+            privileges) into a new file <dir>/radar-<UTC time>.dump readable by the owner
+            only, and print its path and size as JSON. The file holds personal data.
+            Exit 1 when the dump fails (nothing is left behind).
+  restore <file>
+            Restore a backup (pg_restore >= 16, one transaction) into the schema of
+            DATABASE_URL, only when that schema exists and is empty; then check the
+            schema like health and print the row count per table as JSON. Exit 1 when
+            the target is not empty, the restore fails or migrations are pending.
 `;
 
 type Command =
@@ -416,7 +474,10 @@ type Command =
   | "digest"
   | "serve"
   | "access:link"
-  | "access:revoke";
+  | "access:revoke"
+  | "status"
+  | "backup"
+  | "restore";
 const commands: readonly Command[] = [
   "health",
   "migrate",
@@ -429,6 +490,9 @@ const commands: readonly Command[] = [
   "serve",
   "access:link",
   "access:revoke",
+  "status",
+  "backup",
+  "restore",
 ];
 
 function isCommand(value: string): value is Command {
@@ -473,7 +537,10 @@ type Invocation =
   | { readonly command: "profile:create"; readonly file: string }
   | { readonly command: "profile:show"; readonly profileId: string }
   | { readonly command: "match:preview"; readonly match: MatchPreviewArgs }
-  | { readonly command: "digest"; readonly digest: DigestArgs };
+  | { readonly command: "digest"; readonly digest: DigestArgs }
+  | { readonly command: "status"; readonly notify: boolean }
+  | { readonly command: "backup"; readonly dir: string }
+  | { readonly command: "restore"; readonly file: string };
 
 /** A real calendar day as `YYYY-MM-DD` (2026-02-30 is rejected, not rolled over). */
 function isCalendarDate(value: string): boolean {
@@ -680,6 +747,24 @@ function parseInvocation(
     const digest = parseDigestArgs(rest);
     return typeof digest === "string" ? digest : { command, digest };
   }
+  if (command === "status") {
+    const [option, ...extra] = rest;
+    if (option !== undefined && option !== "--notify") {
+      return `Unexpected argument: ${JSON.stringify(option)}`;
+    }
+    if (extra.length > 0) return `Unexpected argument: ${JSON.stringify(extra[0])}`;
+    return { command, notify: option === "--notify" };
+  }
+  if (command === "backup" || command === "restore") {
+    const [path, ...extra] = rest;
+    if (path === undefined || path === "" || path.startsWith("-")) {
+      return command === "backup"
+        ? 'Command "backup" needs a directory.'
+        : 'Command "restore" needs a backup file.';
+    }
+    if (extra.length > 0) return `Unexpected argument: ${JSON.stringify(extra[0])}`;
+    return command === "backup" ? { command, dir: path } : { command, file: path };
+  }
   if (rest.length > 0) return `Command "${command}" takes no arguments.`;
   return { command };
 }
@@ -749,9 +834,13 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
   let emailConfig: EmailConfig | null = null;
   let webConfig: WebConfig | null = null;
   let publicBaseUrl: string | null = null;
+  // Only `status --notify` reads OPERATOR_EMAIL (and then the e-mail variables).
+  let operatorEmail: string | null = null;
+  const notify = invocation.command === "status" && invocation.notify;
   try {
     config = loadConfig(io.env);
-    if (invocation.command === "digest") emailConfig = loadEmailConfig(io.env);
+    if (invocation.command === "digest" || notify) emailConfig = loadEmailConfig(io.env);
+    if (notify) operatorEmail = loadOperatorEmail(io.env);
     if (invocation.command === "serve") webConfig = loadWebConfig(io.env);
     if (invocation.command === "digest" || invocation.command === "access:link") {
       publicBaseUrl = loadPublicBaseUrl(io.env);
@@ -762,6 +851,11 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
       return ExitCode.Failure;
     }
     throw error;
+  }
+
+  if (notify && operatorEmail === null) {
+    io.stderr("OPERATOR_EMAIL is required for status --notify.\n");
+    return ExitCode.Failure;
   }
 
   if (invocation.command === "access:link" && publicBaseUrl === null) {
@@ -810,6 +904,23 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
         return await runAccessLink(invocation.profileId, publicBaseUrl, database, io);
       case "access:revoke":
         return await runAccessRevoke(invocation.profileId, database, io);
+      case "status": {
+        const digestDeps = deps.digest ?? defaultDigestDeps;
+        const alert =
+          emailConfig === null || operatorEmail === null
+            ? null
+            : { emailConfig, to: operatorEmail, deps: digestDeps };
+        return await runStatus(config, database, io, digestDeps.now, alert);
+      }
+      case "backup":
+        return await runBackup(
+          invocation.dir,
+          database,
+          io,
+          (deps.digest ?? defaultDigestDeps).now,
+        );
+      case "restore":
+        return await runRestore(invocation.file, database, io);
     }
   } finally {
     await database.close();
@@ -1472,5 +1583,211 @@ async function runAccessRevoke(
   io.stdout(
     `${JSON.stringify({ status: "ok", tokens: revoked.tokens, sessions: revoked.sessions })}\n`,
   );
+  return ExitCode.Ok;
+}
+
+/** Where and how `status --notify` sends its alert. */
+interface OperatorAlert {
+  readonly emailConfig: EmailConfig;
+  readonly to: string;
+  readonly deps: CliDigestDeps;
+}
+
+/**
+ * One plain-text e-mail to the operator over the configured transport
+ * (EMAIL_MODE=test: the outbox), with the in-run retries of `digest`.
+ */
+async function sendOperatorAlert(report: StatusReport, alert: OperatorAlert): Promise<SendResult> {
+  const sender = alert.deps.createSender(alert.emailConfig);
+  try {
+    const { subject, text } = formatOperatorAlert(report);
+    return await sendWithRetry(
+      sender,
+      { to: alert.to, subject, text, listUnsubscribe: false },
+      {
+        sleep: alert.deps.sleep,
+        // Nothing aborts it: every send is bounded by the transport's own timeouts.
+        signal: new AbortController().signal,
+        ...(alert.deps.retryDelaysMs === undefined ? {} : { delaysMs: alert.deps.retryDelaysMs }),
+      },
+    );
+  } finally {
+    sender.close();
+  }
+}
+
+/**
+ * With `--notify`, an unexpected error of `status` (a bug) is alerted too, so
+ * a cron job that keeps failing is not silent: the fixed code
+ * `status_internal_error` only — the error's text may carry configuration.
+ * A failing alert is reported by its code and never hides the error.
+ */
+async function alertInternalError(checkedAt: Date, alert: OperatorAlert, io: CliIo): Promise<void> {
+  try {
+    const result = await sendOperatorAlert(
+      failedStatus(checkedAt, "status_internal_error", null),
+      alert,
+    );
+    if (!result.ok) io.stderr(`Operator alert not sent (${result.error.code}).\n`);
+  } catch {
+    io.stderr("Operator alert not sent.\n");
+  }
+}
+
+/**
+ * `status [--notify]`: the operator's report as one JSON line on stdout
+ * (ids, statuses, codes, timestamps and counts; src/operations/status.ts).
+ * Read-only, takes no lock. Exit 0 when there is no problem; 1 when there is
+ * one — including a database that cannot be read or a schema that is not
+ * migrated, which are reported (and alerted) like any other problem — or
+ * when the alert could not be sent. With `--notify` and a problem, one alert
+ * goes to OPERATOR_EMAIL; it is sent again by every run while the problem
+ * lasts.
+ */
+async function runStatus(
+  config: AppConfig,
+  database: CliDatabase,
+  io: CliIo,
+  now: () => Date,
+  alert: OperatorAlert | null,
+): Promise<ExitCode> {
+  if (database.collectStatus === undefined || database.pendingMigrations === undefined) {
+    throw new Error("database cannot report status");
+  }
+  const logger = createLogger(config.logLevel, io.stderr);
+  const checkedAt = now();
+  let report: StatusReport;
+  try {
+    const pending = await database.pendingMigrations();
+    report =
+      pending.length > 0
+        ? failedStatus(checkedAt, "schema_not_ready", null)
+        : await database.collectStatus(checkedAt);
+  } catch (error: unknown) {
+    const failure = describeDatabaseFailure(error);
+    if (failure.reason === "unknown") {
+      if (alert !== null) await alertInternalError(checkedAt, alert, io);
+      // Still the fixed internal message and exit 1 (runCli), whatever the alert did.
+      throw error;
+    }
+    report = failedStatus(checkedAt, "database_unavailable", failure);
+  }
+
+  let notification: "sent" | "failed" | "not_needed" | null = null;
+  let sendError: string | null = null;
+  if (alert !== null) {
+    if (report.status === "ok") {
+      notification = "not_needed";
+    } else {
+      const result = await sendOperatorAlert(report, alert);
+      notification = result.ok ? "sent" : "failed";
+      sendError = result.ok ? null : result.error.code;
+    }
+  }
+  io.stdout(`${JSON.stringify({ ...report, notification })}\n`);
+  logger.info("status checked", {
+    status: report.status,
+    problems: report.problems.length,
+    notification,
+    ...(sendError === null ? {} : { errorCode: sendError }),
+  });
+  if (report.status === "problem") {
+    io.stderr(`Status: problem (${report.problems.join(", ")}); see docs/RUNBOOK.md.\n`);
+  }
+  if (sendError !== null) io.stderr(`Operator alert not sent (${sendError}).\n`);
+  return report.status === "ok" && notification !== "failed" ? ExitCode.Ok : ExitCode.Failure;
+}
+
+const BACKUP_FAILURE_TEXT: Readonly<Record<BackupFailureReason, string>> = {
+  unsupported_database_url:
+    "a connection setting the PostgreSQL tools cannot be given the same way (all of them must be in DATABASE_URL, with no PG* variable set)",
+  invalid_schema: "the schema of DATABASE_URL does not exist or has an unsupported name",
+  nothing_to_back_up: "the schema has no tables (run `migrate` first)",
+  target_not_empty: "the target schema is not empty; restore only into an empty schema",
+  not_a_directory: "the directory does not exist",
+  not_a_file: "the backup file does not exist or is not a regular file",
+  file_exists: "a backup with the same name already exists",
+  write_failed: "the backup file cannot be written",
+  tool_not_found: "pg_dump/pg_restore not found on PATH (PostgreSQL 16 client or newer)",
+  version_mismatch: "pg_dump/pg_restore is older than the server or the backup file",
+  authentication_failed: "the database refused the login",
+  unreachable: "the database cannot be reached",
+  timeout: "the time limit was exceeded; the tool was stopped",
+  tool_failed: "the tool failed",
+  nothing_restored: "the backup holds no tables of this schema",
+};
+
+/** A fixed message for a backup/restore failure; null for anything else (a bug). */
+function backupFailure(error: unknown): string | null {
+  if (error instanceof BackupError) {
+    const text = BACKUP_FAILURE_TEXT[error.reason];
+    return `${text} (${error.reason}${error.detail === null ? "" : `, ${error.detail}`})`;
+  }
+  const failure = describeDatabaseFailure(error);
+  return failure.reason === "unknown" ? null : `database ${formatDatabaseFailure(failure)}`;
+}
+
+/**
+ * `backup <dir>`: pg_dump of the application's schema into a new owner-only
+ * file (src/operations/backup.ts); prints its path and size as one JSON line.
+ */
+async function runBackup(
+  dir: string,
+  database: CliDatabase,
+  io: CliIo,
+  now: () => Date,
+): Promise<ExitCode> {
+  if (database.backup === undefined) throw new Error("database cannot back up");
+  const started = performance.now();
+  let result: BackupResult;
+  try {
+    result = await database.backup(dir, now(), { env: io.env });
+  } catch (error: unknown) {
+    const why = backupFailure(error);
+    if (why === null) throw error;
+    io.stderr(`Backup failed: ${why}.\n`);
+    return ExitCode.Failure;
+  }
+  io.stdout(
+    `${JSON.stringify({
+      status: "ok",
+      ...result,
+      durationMs: Math.round(performance.now() - started),
+    })}\n`,
+  );
+  io.stderr("The backup holds personal data: keep it owner-only and encrypted off this host.\n");
+  return ExitCode.Ok;
+}
+
+/**
+ * `restore <file>`: pg_restore into the empty schema of DATABASE_URL, then
+ * the readiness check and the row counts per table, as one JSON line.
+ */
+async function runRestore(file: string, database: CliDatabase, io: CliIo): Promise<ExitCode> {
+  if (database.restore === undefined) throw new Error("database cannot restore");
+  const started = performance.now();
+  let result: RestoreResult;
+  try {
+    result = await database.restore(file, { env: io.env });
+  } catch (error: unknown) {
+    const why = backupFailure(error);
+    if (why === null) throw error;
+    io.stderr(`Restore failed: ${why}.\n`);
+    return ExitCode.Failure;
+  }
+  const ready = result.pendingMigrations.length === 0;
+  io.stdout(
+    `${JSON.stringify({
+      status: ready ? "ok" : "not_migrated",
+      schema: result.schema,
+      tables: result.tables,
+      pendingMigrations: result.pendingMigrations,
+      durationMs: Math.round(performance.now() - started),
+    })}\n`,
+  );
+  if (!ready) {
+    io.stderr("Restored, but the database schema is not up to date; run `migrate`.\n");
+    return ExitCode.Failure;
+  }
   return ExitCode.Ok;
 }

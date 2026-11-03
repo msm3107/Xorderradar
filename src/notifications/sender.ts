@@ -10,13 +10,19 @@ export interface OutgoingEmail {
   readonly to: string;
   readonly subject: string;
   readonly text: string;
-  readonly html: string;
+  /** Absent: a plain-text e-mail (the operator alert of `status --notify`). */
+  readonly html?: string;
   /**
    * The one-click unsubscribe link of this e-mail (RFC 8058, D-024), when
    * PUBLIC_BASE_URL is set: put first into List-Unsubscribe, with
    * List-Unsubscribe-Post. A secret; never logged.
    */
   readonly unsubscribeUrl?: string;
+  /**
+   * false: no List-Unsubscribe headers at all (the operator alert is not a
+   * mailing a recipient subscribed to). Default true.
+   */
+  readonly listUnsubscribe?: boolean;
 }
 
 /** Delivers e-mails over one transport (D-010). Injected into the CLI, so tests never send. */
@@ -227,8 +233,9 @@ export function oneClickUnsubscribeUrl(value: string | undefined): string | null
  * both headers for providers to honour one-click (docs/SECURITY.md §10).
  */
 export function mailOptions(from: EmailAddress, email: OutgoingEmail) {
-  const mailto = unsubscribeMailto(from.address);
-  const oneClick = oneClickUnsubscribeUrl(email.unsubscribeUrl);
+  const listed = email.listUnsubscribe ?? true;
+  const mailto = listed ? unsubscribeMailto(from.address) : null;
+  const oneClick = listed ? oneClickUnsubscribeUrl(email.unsubscribeUrl) : null;
   const links = [
     ...(oneClick === null ? [] : [{ url: oneClick }]),
     ...(mailto === null ? [] : [{ url: mailto, comment: "Wypisz" }]),
@@ -239,7 +246,7 @@ export function mailOptions(from: EmailAddress, email: OutgoingEmail) {
     to: { name: "", address: email.to },
     subject: email.subject,
     text: email.text,
-    html: email.html,
+    ...(email.html === undefined ? {} : { html: email.html }),
     // A nested array: nodemailer joins its entries into one header.
     ...(links.length === 0 ? {} : { list: { unsubscribe: [links] } }),
     ...(oneClick === null
@@ -296,7 +303,7 @@ export function createOutboxSender(config: {
           to: email.to,
           subject: email.subject,
           text: redactTokenLinks(email.text),
-          html: redactTokenLinks(email.html),
+          html: email.html === undefined ? null : redactTokenLinks(email.html),
         };
         await writeAllOrNothing([
           { path: `${base}.eml`, data: info.message },

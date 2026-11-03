@@ -178,6 +178,24 @@ export async function findSessionProfile(
   return row?.profile_id ?? null;
 }
 
+/**
+ * The unexpired session's own id (the row's uuid, never the cookie value)
+ * and its profile, or null like findSessionProfile.
+ */
+export async function findSession(
+  db: Kysely<Database>,
+  sessionToken: string,
+): Promise<{ readonly sessionId: string; readonly profileId: string } | null> {
+  if (!isSecretToken(sessionToken)) return null;
+  const row = await db
+    .selectFrom("sessions")
+    .select(["id", "profile_id"])
+    .where("token_hash", "=", hashSecretToken(sessionToken))
+    .where("expires_at", ">", sql<Date>`now()`)
+    .executeTakeFirst();
+  return row === undefined ? null : { sessionId: row.id, profileId: row.profile_id };
+}
+
 /** Logout: deletes the session row (a no-op when it is gone already). */
 export async function deleteSession(db: Kysely<Database>, sessionToken: string): Promise<void> {
   if (!isSecretToken(sessionToken)) return;

@@ -69,6 +69,9 @@ Sprawdzenie `source:preview` (AC1): kod wyjścia 0, `normalized` > 0, a w logach
 | `serve`                                                                                     | Serwer web (PR-06A, PR-06B): strony logowania z linku, profilu, ustawień, dopasowań i wypisu na `WEB_HOST:WEB_PORT` (domyślnie `127.0.0.1:3000`), za reverse proxy z TLS. Wymaga `PUBLIC_BASE_URL` i aktualnego schematu bazy; działa do SIGINT/SIGTERM (łagodne zatrzymanie, kod `0`). Szczegóły — niżej, „Serwer web (`serve`)”.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `access:link <profileId>`                                                                   | Wydaje link logowania do profilu (jednorazowy, ważny 7 dni) i wypisuje `{"status":"ok","url":…,"expiresAt":…}` na stdout. **Link jest sekretem** — daje dostęp do profilu; przekazuj go tylko właścicielowi profilu. Wymaga `PUBLIC_BASE_URL`; nieznany profil → `1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `access:revoke <profileId>`                                                                 | Unieważnia naraz wszystkie linki (logowania i wypisu) i sesje profilu, w jednej transakcji — reakcja na przekazany dalej e-mail albo zgubione urządzenie. Wypisuje tylko liczby: `{"status":"ok","tokens":…,"sessions":…}`. Profil i powiadomienia bez zmian; nie wymaga `PUBLIC_BASE_URL`; nieznany profil → `1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `status [--notify]`                                                                         | Raport operatora (PR-07A, D-028) — jedna linia JSON na stdout: dla każdego włączonego źródła ostatni przebieg, ostatni sukces (`succeeded`/`incomplete`) i nieudane dni z ostatnich 36 h niepokryte później, oraz wysyłki `pending` (gdy nie trwa `digest`) i `failed` od wczorajszego dnia digestu. Problemy: `source_failed`, `source_stale` (brak sukcesu od 36 h), `source_never_run`, `no_enabled_sources`, `deliveries_pending`, `deliveries_failed`, `schema_not_ready`, `database_unavailable`, `status_internal_error` (nieoczekiwany błąd samego `status`, alert bez szczegółów). Tylko odczyt, bez blokady. Kod `0` — brak problemów, `1` — jest problem. `--notify`: przy problemie wysyła też jeden e-mail tekstowy (identyfikatory, kody, czasy, liczby — bez adresów i tytułów) na `OPERATOR_EMAIL` przez `EMAIL_MODE` (`test`: do `EMAIL_OUTBOX_DIR`); co uruchomienie, dopóki problem trwa; nieudana wysyłka → `1`. Co robić: [`docs/RUNBOOK.md`](docs/RUNBOOK.md) → „Alert statusu”.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `backup <dir>`                                                                              | Zrzut schematu aplikacji (`pg_dump` ≥ 16, format custom, bez właścicieli i uprawnień) do nowego pliku `<dir>/radar-<czas UTC>.dump` (`0600`, nigdy nie nadpisuje istniejącego) i `{"status":"ok","file":…,"bytes":…,"schema":…,"tables":…}` na stdout. **Plik zawiera dane osobowe** (adresy e-mail profili). Hasło z `DATABASE_URL` trafia do `pg_dump` tylko przez zmienną środowiskową procesu potomnego, nigdy przez argumenty. Błąd → `1`, bez pozostawionego pliku. Szczegóły — niżej, „Backup i odtworzenie”.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `restore <file>`                                                                            | Odtwarza backup (`pg_restore` ≥ 16, jedna transakcja — wszystko albo nic) do schematu z `DATABASE_URL`, tylko gdy ten schemat istnieje i jest **pusty** (nigdy na dane); potem sprawdza migracje jak `health` i wypisuje liczbę wierszy w każdej tabeli. Schemat niepusty, błąd odtwarzania albo oczekujące migracje → `1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 Kody wyjścia: `0` — OK, `1` — błąd konfiguracji/wykonania (np. baza niedostępna), `2` — błędne
 użycie (komenda i argumenty są sprawdzane przed konfiguracją, więc błędne użycie zawsze daje `2`;
@@ -114,7 +117,13 @@ zmienne środowiskowe ustawione w crontabie lub w skrypcie opakowującym, nie w 
 ```cron
 CRON_TZ=Europe/Warsaw
 0 6 * * * cd /opt/radar-zamowien && node dist/main.js ingest >>/var/log/radar/ingest.log 2>&1
+30 6 * * * cd /opt/radar-zamowien && node dist/main.js status --notify >>/var/log/radar/status.log 2>&1
 ```
+
+`status --notify` po `ingest` (i po `digest`, niżej) wysyła operatorowi alert na `OPERATOR_EMAIL`,
+gdy źródło się nie pobrało, jest nieaktualne albo wysyłki czekają na decyzję — co robić:
+[`docs/RUNBOOK.md`](docs/RUNBOOK.md) → „Alert statusu”. Alert powtarza się przy każdym
+uruchomieniu, dopóki problem trwa.
 
 **Pierwsze wdrożenie — jednorazowo, przed pierwszym cronem:**
 
@@ -231,6 +240,7 @@ crontab z `CRON_TZ=Europe/Warsaw`):
 
 ```cron
 30 7 * * * cd /opt/radar-zamowien && node dist/main.js digest >>/var/log/radar/digest.log 2>&1
+45 7 * * * cd /opt/radar-zamowien && node dist/main.js status --notify >>/var/log/radar/status.log 2>&1
 ```
 
 - **Tryb `test` (domyślny, `EMAIL_MODE=test`)** — nic nie wychodzi z maszyny: każdy e-mail to
@@ -409,6 +419,11 @@ Aplikacja czyta konfigurację **wyłącznie ze zmiennych środowiskowych** proce
   (ustawiony → linki w e-mailach). `WEB_HOST` (adres IP lub `localhost`, domyślnie
   `127.0.0.1`) i `WEB_PORT` (domyślnie `3000`) — czytane tylko przez `serve`. Błąd →
   `Invalid web configuration: <nazwy zmiennych>`.
+- **Alerty operatora (`status --notify`, PR-07A):** `OPERATOR_EMAIL` — adres operatora (nie
+  klienta), na który `status --notify` wysyła alert; czytany tylko przez `status --notify`
+  (wraz ze zmiennymi e-mail wyżej — ten sam transport co `digest`). Brak →
+  `OPERATOR_EMAIL is required for status --notify.`; błędny →
+  `Invalid e-mail configuration: OPERATOR_EMAIL` (bez wartości). Kod `1`.
 - **Produkcja / cron:** bezpośrednie `node dist/main.js …` **nie czyta** `.env`. Zmienne
   eksportuje środowisko uruchomieniowe (crontab, unit systemd, panel hostingu). Kto chce
   użyć pliku, podaje go jawnie: `node --env-file=/ścieżka/do/pliku dist/main.js health`.
@@ -450,6 +465,35 @@ Pula połączeń ma stałe limity (`src/infrastructure/db/database.ts`): max 5 p
 nawiązanie połączenia, `statement_timeout` 30 s, zamykanie bezczynnych połączeń po 10 s. Każda
 komenda zamyka pulę przed zakończeniem.
 
+### Backup i odtworzenie
+
+`backup <dir>` zrzuca schemat aplikacji (bieżący schemat połączenia z `DATABASE_URL`, z
+tabelą migracji) przez `pg_dump`; `restore <file>` odtwarza go przez `pg_restore` w jednej
+transakcji. Wymagany klient PostgreSQL **16 lub nowszy** (`pg_dump`, `pg_restore` w `PATH`;
+np. `apt install postgresql-client-16`) — nie starszy niż serwer.
+
+```bash
+install -d -m 0700 /var/backups/radar
+node dist/main.js backup /var/backups/radar    # {"status":"ok","file":"/var/backups/radar/radar-20261102T050000Z.dump",…}
+```
+
+- Plik `radar-<RRRRMMDDTGGMMSSZ>.dump` ma prawa `0600` i **zawiera dane osobowe** (adresy
+  e-mail i ustawienia profili, historia wysyłek) — trzymaj go tylko u właściciela i
+  zaszyfrowany poza tą maszyną (retencja i kopia poza hostem — PR-07B). Istniejący plik nigdy
+  nie jest nadpisywany; przy błędzie nic nie zostaje.
+- Hasło z `DATABASE_URL` nie trafia do argumentów ani na wyjście: narzędzia dostają adres bez
+  hasła, a hasło w zmiennej `PGPASSWORD` swojego procesu. Wszystkie ustawienia
+  połączenia muszą być w `DATABASE_URL`: przy niepustej zmiennej `PGHOST`, `PGHOSTADDR`,
+  `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGOPTIONS`, `PGSSLMODE` lub
+  `PGSSLNEGOTIATION` komenda odmawia (`unsupported_database_url`, z nazwą zmiennej). TLS narzędzi odpowiada TLS aplikacji i nigdy
+  nie jest słabszy (`pg` weryfikuje certyfikat już przy `sslmode=require`, więc narzędzia
+  dostają `verify-full`). Parametru, którego nie da się przekazać z tym samym znaczeniem,
+  komenda nie przyjmie (`unsupported_database_url`, z nazwą parametru).
+- `restore` działa tylko do **istniejącego, pustego schematu** (bez żadnej tabeli, widoku ani
+  sekwencji) — nigdy nie nadpisuje danych. Pełna procedura z próbą odtworzenia:
+  [`docs/RUNBOOK.md`](docs/RUNBOOK.md) → „Backup i odtworzenie”.
+- Limit czasu każdego narzędzia: 30 min (potem SIGTERM, po 5 s SIGKILL); połączenie: 10 s.
+
 ## Testy
 
 `pnpm check` uruchamia format, lint, typecheck i wszystkie testy (Vitest):
@@ -476,14 +520,15 @@ oznaczają „nie ustawiono”.
 
 ## Dokumentacja
 
-| Plik                                             | Zawartość                                     |
-| ------------------------------------------------ | --------------------------------------------- |
-| [`docs/MASTER_PROMPT.md`](docs/MASTER_PROMPT.md) | Konstytucja projektu — zacznij tutaj          |
-| [`docs/PRODUCT.md`](docs/PRODUCT.md)             | Produkt, użytkownik, MVP, non-goals           |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)   | Architektura, moduły, kontrakty, model danych |
-| [`docs/ROADMAP.md`](docs/ROADMAP.md)             | Fazy rozwoju                                  |
-| [`docs/PR_PLAN.md`](docs/PR_PLAN.md)             | Plan PR-ów z kryteriami akceptacji            |
-| [`docs/AGENTS.md`](docs/AGENTS.md)               | 3 role agentów i workflow review              |
-| [`docs/SECURITY.md`](docs/SECURITY.md)           | Zasady bezpieczeństwa i pozyskiwania danych   |
-| [`docs/DECISIONS.md`](docs/DECISIONS.md)         | Rejestr decyzji (ADR)                         |
-| [`docs/STATE.md`](docs/STATE.md)                 | Aktualny stan prac                            |
+| Plik                                             | Zawartość                                            |
+| ------------------------------------------------ | ---------------------------------------------------- |
+| [`docs/MASTER_PROMPT.md`](docs/MASTER_PROMPT.md) | Konstytucja projektu — zacznij tutaj                 |
+| [`docs/PRODUCT.md`](docs/PRODUCT.md)             | Produkt, użytkownik, MVP, non-goals                  |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)   | Architektura, moduły, kontrakty, model danych        |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md)             | Fazy rozwoju                                         |
+| [`docs/PR_PLAN.md`](docs/PR_PLAN.md)             | Plan PR-ów z kryteriami akceptacji                   |
+| [`docs/AGENTS.md`](docs/AGENTS.md)               | 3 role agentów i workflow review                     |
+| [`docs/SECURITY.md`](docs/SECURITY.md)           | Zasady bezpieczeństwa i pozyskiwania danych          |
+| [`docs/DECISIONS.md`](docs/DECISIONS.md)         | Rejestr decyzji (ADR)                                |
+| [`docs/STATE.md`](docs/STATE.md)                 | Aktualny stan prac                                   |
+| [`docs/RUNBOOK.md`](docs/RUNBOOK.md)             | Procedury operatora: alerty, źródła, wysyłki, backup |

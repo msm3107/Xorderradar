@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import { emailSchema } from "../domain/common.js";
+import { emailSchema, hasControlCharacter } from "../domain/common.js";
 import {
   companyProfileSettingsSchema,
   MAX_KEYWORD_TOKENS,
@@ -197,6 +197,22 @@ export function validateProfileForm(
       if (field === "counties" && typeof index === "number") countyIssues.add(index);
       add(field, issueMessage(field, issue, line));
     }
+  }
+  // Control characters (a pasted tab, NUL): refused here and by profile:create,
+  // never by the stored-row schema (D-028). Entries are trimmed like the schema does.
+  if (hasControlCharacter(values.name.trim())) {
+    add("name", "Nazwa firmy zawiera znaki sterujące (np. tabulator) — wpisz wartość ponownie.");
+  }
+  for (const field of ["counties", "includeKeywords", "excludeKeywords"] as const) {
+    lists[field].forEach((entry, index) => {
+      if (!hasControlCharacter(entry.value)) return;
+      add(
+        field,
+        `Wiersz ${String(entry.line)}: wpis zawiera znaki sterujące (np. tabulator) — wpisz wartość ponownie.`,
+      );
+      // One message per entry: no county check on top.
+      if (field === "counties") countyIssues.add(index);
+    });
   }
   // The rule of profile:create (src/profile-commands.ts): an entry that is no
   // county name at all ("powiat", "m. st.") could never match an offer.
