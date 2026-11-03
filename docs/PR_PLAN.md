@@ -436,3 +436,36 @@ bezpośredni wychodzący HTTPS — D-014).
   sprawdzający wiek najnowszego `radar-*.dump` w katalogu kopii z env (brakująca kopia
   przestaje być cicha), pierwsze wdrożenie i odtworzenie kopii na środowisku pilotażowym
   (kryteria akceptacji całego PR-07).
+
+  **Decyzja właściciela (2026-11-03):** VPS; `serve` jako unit systemd, komendy z crona na
+  hoście; PostgreSQL 16 na tym samym VPS; Caddy jako reverse proxy z TLS; heartbeat przez
+  URL pingu z env. VPS ma bezpośredni wychodzący HTTPS (bez proxy, D-014).
+
+  **Zakres PR-07B (repozytorium):**
+  - **artefakty w `deploy/`:** unit systemd dla `serve` (dedykowany użytkownik, hardening
+    systemd, `Restart=on-failure`), plik crona (`ingest`, `status --notify`, `digest`,
+    `backup`, retencja kopii), `Caddyfile` (TLS, nagłówki, limit rozmiaru żądania, timeouty,
+    log dostępu bez ścieżek `/dostep/…` i `/wypis/…`), logrotate dla `/var/log/radar`,
+    przykładowy plik env (`/etc/radar/radar.env`, `0640`, czytany przez systemd i
+    `node --env-file`), skrypt smoke testu po wdrożeniu;
+  - **`status`:** opcjonalny `BACKUP_DIR` → problem, gdy najnowszy `radar-*.dump` jest
+    starszy niż ustalone okno albo go brak; opcjonalny `HEARTBEAT_URL` → po `status` z kodem
+    `0` jeden ping (https, timeout, bez przekierowań, bez sekretów w logach); nieudany ping
+    nie zmienia kodu wyjścia, tylko log;
+  - **`docs/DEPLOY.md`:** instalacja od zera na VPS (Node 22, PostgreSQL 16 z PGDG, Caddy,
+    użytkownik i katalogi, build, `migrate`, systemd, cron, heartbeat, kopia poza hostem
+    zaszyfrowana `age`, aktualizacja wersji i powrót do poprzedniej), lista kontrolna
+    pierwszego wdrożenia, ćwiczenie odtworzenia na VPS, weryfikacja AC1 z PR-02;
+  - D-029 (hosting), aktualizacja RUNBOOK (ścieżki z `deploy/`, heartbeat, wiek kopii),
+    README, `.env.example`, SECURITY.
+
+  **Kryteria akceptacji PR-07B (repozytorium):** `status` zgłasza brak/przeterminowaną kopię i
+  pinguje heartbeat tylko przy kodzie `0` (testy); artefakty `deploy/` są spójne z RUNBOOK i
+  DEPLOY (ścieżki, użytkownik, zmienne); smoke test sprawdza `health`, `status` i stronę przez
+  proxy; nic nie loguje tokenów ani sekretów. **Po merge'u, ręcznie przez właściciela na VPS**
+  (wg `docs/DEPLOY.md`): pierwsze wdrożenie, smoke test, odtworzenie kopii, błąd źródła
+  widoczny w jednym cyklu (kryteria całego PR-07).
+
+  **Poza zakresem PR-07B:** kontenery, zarządzana baza, rate limiting w Caddy (wymaga
+  modułu spoza dystrybucji — limit `/dopasowania` na sesję zostaje w aplikacji), nowe
+  źródła, zmiany produktu.

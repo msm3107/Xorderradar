@@ -1,0 +1,35 @@
+# Radar Zamówień — scheduled commands (PR-07B, docs/DEPLOY.md, docs/RUNBOOK.md).
+# Install: /etc/cron.d/radar, owned by root, mode 0644 (cron ignores the file
+# otherwise). Format of /etc/cron.d: minute hour day month weekday USER command.
+#
+# Times are the HOST's local time, which must be Europe/Warsaw
+# (`timedatectl set-timezone Europe/Warsaw`, docs/DEPLOY.md): the cron of
+# Debian 12 and Ubuntu 24.04 (vixie cron 3.0pl1) does not support CRON_TZ.
+# The application computes Polish days itself (explicit zone); only these
+# start times depend on the host's zone. DST does not matter: no job runs
+# between 02:00 and 03:00.
+#
+# Every command reads its environment from /etc/radar/radar.env (Node's
+# --env-file), the same file and flags as the systemd unit of `serve`. Output
+# goes to /var/log/radar/<command>.log (rotated by deploy/logrotate/radar);
+# nothing is mailed by cron. The dead man's switch is the heartbeat that
+# `status` sends to HEARTBEAT_URL after a run without a problem.
+
+SHELL=/bin/sh
+PATH=/usr/local/bin:/usr/bin:/bin
+MAILTO=""
+
+# 05:30 backup into BACKUP_DIR (status checks its age: backup_stale after 26 h,
+# so one failed night shows at the 07:45 status; D-029).
+30 5 * * * radar cd /opt/radar-zamowien && /usr/bin/node --env-file=/etc/radar/radar.env dist/main.js backup /var/backups/radar >>/var/log/radar/backup.log 2>&1
+# 05:45 retention: keep the 14 newest backups, by name (= by time). A count,
+# not an age: when backups keep failing, the last good ones are never deleted.
+45 5 * * * radar find /var/backups/radar -maxdepth 1 -type f -name 'radar-[0-9]*T[0-9]*Z.dump' | sort | head -n -14 | xargs -r rm -f --
+# 06:00 ingest yesterday's notices (and catch up failed days).
+0 6 * * * radar cd /opt/radar-zamowien && /usr/bin/node --env-file=/etc/radar/radar.env dist/main.js ingest >>/var/log/radar/ingest.log 2>&1
+# 06:30 status after ingest: alert on a problem, heartbeat when there is none.
+30 6 * * * radar cd /opt/radar-zamowien && /usr/bin/node --env-file=/etc/radar/radar.env dist/main.js status --notify >>/var/log/radar/status.log 2>&1
+# 07:30 the daily digest.
+30 7 * * * radar cd /opt/radar-zamowien && /usr/bin/node --env-file=/etc/radar/radar.env dist/main.js digest >>/var/log/radar/digest.log 2>&1
+# 07:45 status after digest.
+45 7 * * * radar cd /opt/radar-zamowien && /usr/bin/node --env-file=/etc/radar/radar.env dist/main.js status --notify >>/var/log/radar/status.log 2>&1

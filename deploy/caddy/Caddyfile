@@ -1,0 +1,73 @@
+# Radar Zamówień — Caddy (>= 2.8, for log_skip) in front of `serve`, PR-07B.
+# Install: /etc/caddy/Caddyfile, replace radar.example.invalid with the real
+# domain (= PUBLIC_BASE_URL), then `caddy validate --config /etc/caddy/Caddyfile`
+# and `systemctl reload caddy`. See docs/DEPLOY.md.
+#
+# Caddy obtains and renews the certificate itself and redirects HTTP to HTTPS.
+# HSTS is set by the application (PUBLIC_BASE_URL is https): Caddy must not
+# add a second Strict-Transport-Security header.
+
+# Tokens in logs (docs/SECURITY.md §11): log_skip below only drops access-log
+# entries. Caddy's other logs (errors such as a 502 from reverse_proxy while
+# serve restarts, the HTTP -> HTTPS redirect server) may carry the request
+# too, so every log also rewrites /dostep/<token> and /wypis/<token> to
+# /dostep/REDACTED and /wypis/REDACTED — in the URI and in the Referer (the
+# application sends Referrer-Policy: strict-origin, so browsers send no path;
+# other clients may). Verify after every change: docs/DEPLOY.md, point 8.
+
+{
+	# The default logger (stderr -> journald, `journalctl -u caddy`).
+	log default {
+		output stderr
+		format filter {
+			request>uri regexp "(?i)/(dostep|wypis)/[^?#]*" "/${1}/REDACTED"
+			request>headers>Referer regexp "(?i)/(dostep|wypis)/[^?#]*" "/${1}/REDACTED"
+			wrap json
+		}
+	}
+
+	servers {
+		# Like serve's own limits (headers 10 s, request 15 s): slow clients
+		# are cut off at the proxy already.
+		timeouts {
+			read_header 10s
+			read_body 15s
+			write 60s
+			idle 2m
+		}
+	}
+}
+
+radar.example.invalid {
+	# The login and unsubscribe links carry a token in the path: those
+	# requests are never written to the access log (docs/RUNBOOK.md,
+	# "Reverse proxy: logi"). Cookie and Authorization headers are redacted by
+	# Caddy's default (log_credentials off).
+	@token path /dostep/* /wypis/*
+	log_skip @token
+
+	log {
+		output file /var/log/caddy/radar-access.log {
+			roll_size 10MiB
+			roll_keep 14
+			roll_keep_for 336h
+		}
+		# Second line of defence if a token path ever gets past log_skip
+		# (e.g. a changed matcher): the same rewrite as the default logger.
+		format filter {
+			request>uri regexp "(?i)/(dostep|wypis)/[^?#]*" "/${1}/REDACTED"
+			request>headers>Referer regexp "(?i)/(dostep|wypis)/[^?#]*" "/${1}/REDACTED"
+			wrap json
+		}
+	}
+
+	# The largest body the application accepts is the profile form (64 KiB).
+	request_body {
+		max_size 128KB
+	}
+
+	header -Server
+
+	# serve: WEB_HOST=127.0.0.1, WEB_PORT=3000.
+	reverse_proxy 127.0.0.1:3000
+}

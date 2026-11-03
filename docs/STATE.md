@@ -1,13 +1,12 @@
 # Current State
 
 Current phase: PHASE 4 — PILOT
-Current PR: PR-07A — Gotowość operacyjna (repozytorium)
-Status: PR-06B **MERGED in PR #11 (merge commit 2ef7c20)**. PR-07 split by the coordinator
-(`docs/PR_PLAN.md`): PR-07A (CI, `status [--notify]`, `backup`/`restore`, review hardening,
-timeout table, runbook) **PR READY for the owner's review** (PR #12, CI green on GitHub): Code &
-Safety Review PASS (round 3), Quality Review ACCEPT (round 2); owner review PASS with QoL notes,
-addressed in an owner-review round (C&S PASS round 3, Quality ACCEPT round 2); not merged.
-PR-07B (deployment) waits for the owner's hosting decision.
+Current PR: PR-07B — Wdrożenie na VPS (repozytorium)
+Status: PR-07A **MERGED in PR #12 (b622851)**. PR-07B (systemd + cron, PostgreSQL 16 on the same
+VPS, Caddy, heartbeat URL from env; the VPS has direct outbound HTTPS) **PR READY for the owner's
+review**: Code & Safety Review PASS (round 4 + polish confirmation), Quality Review ACCEPT
+(round 2); not merged. Deployment itself and the drills are the owner's manual steps on the VPS
+(`docs/DEPLOY.md` §13).
 
 ## Completed
 
@@ -562,14 +561,11 @@ recorded in `docs/PR_PLAN.md` → PR-03 „Podział”; acceptance criteria 1–
   - Owner decisions open: last write wins; `/dopasowania` shows already e-mailed offers; one
     `/dopasowania` slot per process shared by all customers (now with a bounded wait queue).
 
-## In progress
-
-**PR-07A — Gotowość operacyjna (repozytorium)** (`docs/PR_PLAN.md` → PR-07A) — PR READY for
-the owner's review (not merged). D-028 new. Reviews: C&S PASS WITH NOTES (M1 PG* variables,
-L1–L5) → fix round → C&S PASS → Quality ACCEPT WITH NOTES (alert-path proof and softened
-„no alert” sentence, 429 text after a refresh, UTC label in the alert, backup manual until
-PR-07B, consistent control-character messages) → copy round → C&S PASS → Quality ACCEPT.
-Working-tree fingerprint unchanged across every reviewer run.
+- **PR-07A — Gotowość operacyjna (repozytorium)** (MERGED in PR #12, b622851). D-028 new. Reviews: C&S PASS WITH NOTES (M1 PG* variables,
+  L1–L5) → fix round → C&S PASS → Quality ACCEPT WITH NOTES (alert-path proof and softened
+  „no alert” sentence, 429 text after a refresh, UTC label in the alert, backup manual until
+  PR-07B, consistent control-character messages) → copy round → C&S PASS → Quality ACCEPT.
+  Working-tree fingerprint unchanged across every reviewer run.
 
 Owner review (PR #12, PASS, no blockers; QoL notes) → owner-review round: CI `push` only on the
 default branch (`ccr-919f3e62-g6j3w9`, commented) + `pull_request` (one run per same-repo PR);
@@ -629,6 +625,46 @@ Round-1 fixes:
   same session now gets 429 first); its assertions are unchanged.
 - No new dependencies, tables or migrations.
 
+## In progress
+
+**PR-07B — Wdrożenie na VPS (repozytorium)** (`docs/PR_PLAN.md` → PR-07B) — PR READY for the
+owner's review (not merged). D-029 new. Owner decisions (2026-11-03): systemd + cron, PostgreSQL
+16 on the same VPS, Caddy, heartbeat URL from env; the VPS has direct outbound HTTPS (D-014
+unchanged, no proxy support needed).
+
+- `status` checks backups (`BACKUP_DIR`, absolute path): newest `radar-*.dump` older than 26 h →
+  `backup_stale`, none → `backup_missing`, unreadable directory → `backup_dir_unreadable`; JSON
+  gains `backup`, the alert a „Kopia zapasowa: …” line. Sources keep the 36 h window. One failed
+  backup night is caught by the 07:45 `status` the same morning (26 h 15 min; spring-DST note in
+  the code and D-029).
+- Heartbeat (`src/operations/heartbeat.ts`, `HEARTBEAT_URL`, https only, no userinfo/fragment):
+  one GET after `status` exits 0, `node:https` with `agent: false`, 10 s, no redirects, no body,
+  no retry; JSON `heartbeat` = `disabled`/`skipped`/`sent`/`failed` with fixed reason codes
+  (`timeout`, `http_<status>`, `network_<errno>`); the URL is never logged. Covers the cron
+  commands, not `serve` (DEPLOY recommends an external uptime check).
+- `deploy/`: `systemd/radar-serve.service` (hardened, `IPAddressAllow=localhost`),
+  `cron/radar` (cron.d, host TZ Europe/Warsaw: backup 05:30, ingest 06:00, status 06:30,
+  digest 07:30, status 07:45; 14 dumps kept), `caddy/Caddyfile` (access and default logs redact
+  `/dostep/…` and `/wypis/…` in the URI and Referer; `log_skip` for those paths; HSTS left to the
+  app), `logrotate/radar`, `radar.env.example`, `smoke.sh` (PASS/FAIL only).
+- Docs: `docs/DEPLOY.md` (new, Polish: first deploy, first data incl. AC1, Caddy redaction check,
+  heartbeat, encrypted off-host copy with append-only `rrsync`, §13 checklist with restore,
+  alert-path and source-error drills, updates); RUNBOOK, README (cron moved to
+  `deploy/cron/radar`), `.env.example`, SECURITY, ARCHITECTURE, D-029.
+- Tests: `tests/status-config.test.ts`, `tests/heartbeat.test.ts` (local TLS server; skipped only
+  without openssl and never in CI), `tests/deploy-artifacts.test.ts`; status/backup/CLI and
+  integration tests extended (cron schedule vs. 26 h window, DST). No new dependencies, tables
+  or migrations.
+- Reviews: C&S PASS WITH NOTES (M1 36 h window missed one failed night → 26 h; M2 Caddy's error
+  log could record tokens → filter in both logs + DEPLOY §8 check; L1–L4) → fix round → C&S
+  (L5 wrong spring-DST wording) → fix → C&S PASS → Quality (H1/H2 checklist and first-data gaps,
+  M1–M4 docs) → fix round → C&S PASS (round 4) → Quality ACCEPT (round 2) → docs polish of the
+  optional Lows → C&S PASS. One existing test changed deliberately: the env-example test expects
+  `heartbeatUrl: null` (the example ships `HEARTBEAT_URL=` empty) and gained an assertion that a
+  filled-in https URL is accepted (C&S: justified).
+- Not verifiable in the container (owner, on the VPS): `caddy validate` and the redaction check,
+  systemd/cron install, smoke test, restore/alert/source-error drills, AC1.
+
 ## Blockers
 
 - **AC1 (real notices via `source:preview`) cannot be verified in the session container:**
@@ -655,13 +691,13 @@ Round-1 fixes:
     with the page. Deadlines are printed in UTC (e.g. `08:00Z` = 09:00 CET on the page), so a
     1–2 h difference is not a bug.
 
-- Open owner question (affects the `ingest` cron and PR-07): will the production cron host have
-  direct outbound HTTPS? If production is proxy-only too, CONNECT-proxy support needs a D-014
-  revision. The same applies to running `ingest` against the live API.
+- (Answered 2026-11-03: the production VPS has direct outbound HTTPS, so SafeHttpClient runs
+  there unchanged and D-014 needs no proxy support. AC1 is now run on the VPS during the first
+  deploy, `docs/DEPLOY.md` §6 „Pierwsze dane”.)
 
 ## Decisions made
 
-See `docs/DECISIONS.md` (D-001 … D-028). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
+See `docs/DECISIONS.md` (D-001 … D-029). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
 on `node:https` with pinned lookup, no HTTP library) accepted in PR-02 Part A; D-015 (first
 source: BZP through the official API) in PR-02 Part B; PR-03 Part A: D-016 (fingerprint and
 `content_hash` format), D-017 (`unchanged` writes nothing, no `last_seen_at`), D-018 (ingest
@@ -680,23 +716,21 @@ nodemailer), D-024 (digest, `deliveries`, failure classes, `pending` procedure).
 D-024 amended (footer links, `List-Unsubscribe` https + mailto). PR-06B: D-027 (customer
 screens, e-mail change, matches list, login-CSRF); D-025 amended (`strict-origin`). PR-07A:
 D-028 (`status` rules and operator alert, backup/restore, per-session `/dopasowania` cap, HSTS,
-control characters at input, CI).
+control characters at input, CI). PR-07B: D-029 (VPS deployment: systemd + cron, Caddy with
+token redaction, backup-age check in `status`, heartbeat).
 
 ## Next action
 
-1. PR-07A: owner re-review of PR #12 after the owner-review round (not merged by the agents);
-   check CI on the new head (one `pull_request` run, `pnpm audit --prod` step). Still open from PR-06B: last write wins, already-sent offers on
-   `/dopasowania`, the shared `/dopasowania` slot. Still open from PR-06A: TTLs (7/60/30 days), a
-   self-service "e-mail me a link" form, §8.3 leniency on `/wypis`, forwarded digests.
-2. PR-07B (after the owner's hosting decision): hosting/container/proxy/systemd artefacts and
-   deployment; backup retention and an encrypted off-host copy (today manual, RUNBOOK);
-   a backup cron line and backup monitoring (gap until then: scheduled backup is a manual cron
-   entry from the RUNBOOK and `status` does not check backups — a failed or missing backup
-   raises no alert); rate limiting at the proxy (incl. `/dopasowania` across sessions);
-   proxy access logs without `/dostep/…` and `/wypis/…`; monitoring that `serve` is up
-   (`status` covers the cron commands only); external heartbeat / dead man's switch for
-   `status` (or a second mail channel) — until then the operator checks `status.log` and
-   `digest.log` by hand daily (RUNBOOK); `status` checks the age of the newest `radar-*.dump`.
+1. PR-07B: owner review of the PR (not merged by the agents); check CI on its head. After the
+   merge, the owner's manual steps on the VPS (`docs/DEPLOY.md` §13 checklist): first deploy,
+   smoke test, first data and AC1, Caddy redaction check, heartbeat set up, off-host copy,
+   restore drill, alert-path drill, source-error drill. Still open from PR-06B: last write wins,
+   already-sent offers on `/dopasowania`, the shared `/dopasowania` slot. Still open from
+   PR-06A: TTLs (7/60/30 days), a self-service "e-mail me a link" form, §8.3 leniency on
+   `/wypis`, forwarded digests.
+2. Left after PR-07B (owner to choose the PR): rate limiting at the proxy (incl.
+   `/dopasowania` across sessions, PR-06B C&S L-2); `serve` uptime is covered only by the
+   external uptime check recommended in DEPLOY §10 (the heartbeat covers the cron commands).
    Follow-ups from the PR-06B reviews (owner to choose the PR):
    - (Done in PR-07A: `\p{Cc}` refused at input — C&S L-c.)
    - Category labels: match reasons on `/dopasowania` and in the digest show raw keys
@@ -916,6 +950,15 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-03, PR-07B before the PR (Node 22, pnpm 10.28.0, PostgreSQL 16, pg_dump/pg_restore 16):
+`TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`
+— format, lint, typecheck clean; 1894 tests passed in 55 files, none skipped (PR-07A: 1793 in
+52); run by the coder, C&S round 5 and the coordinator. Full `pnpm audit`: unchanged (1
+moderate, dev-only minimatch via eslint). No dependency changes; no e-mail sent; no network
+calls to real heartbeat services (local TLS test server only). Caddy, systemd and cron files
+are checked by `tests/deploy-artifacts.test.ts` only; `caddy validate` and the drills run on
+the VPS (`docs/DEPLOY.md` §13). Working-tree fingerprint unchanged across every reviewer run.
 
 2026-11-03, PR-07A owner-review round (CI and docs only): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
 REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 1793 tests passed in 52 files,

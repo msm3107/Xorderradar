@@ -1,0 +1,20 @@
+# Radar Zamówień — logs of the cron jobs (deploy/cron/radar), PR-07B.
+# Install: /etc/logrotate.d/radar (root:root 0644). `serve` logs to journald.
+#
+# No copytruncate: every cron job opens its log anew (`>>`), so moving the
+# file away loses nothing; a job running during the rotation keeps writing to
+# the moved file, which delaycompress leaves uncompressed until the next day.
+# The logs hold ids, codes and counts, never e-mail addresses or tokens; they
+# are still kept for 14 days only.
+
+/var/log/radar/*.log {
+	daily
+	rotate 14
+	missingok
+	notifempty
+	compress
+	delaycompress
+	# /var/log/radar is radar:radar 0750: rotate as that user, new files 0640.
+	su radar radar
+	create 0640 radar radar
+}

@@ -83,10 +83,14 @@ src/
 │                           # candidates.ts: kandydaci i dopasowanie (digest + web) [PR-06B]
 ├── operations/             # status.ts (raport i alert operatora, czysty),      [PR-07A]
 │                           # backup.ts (pg_dump/pg_restore jako procesy potomne; D-028)
+│                           # heartbeat.ts (ping HEARTBEAT_URL po status; D-029) [PR-07B]
 └── web/                    # serve: node:http, strony SSR, sesja, CSRF, wypis  [PR-06A]
                             # server.ts, pages.ts, session.ts, links.ts, multipart.ts
                             # profile-form.ts: formularz profilu, polskie błędy  [PR-06B]
 .github/workflows/ci.yml   # CI: pnpm check z PostgreSQL 16 (wymagane testy z bazą) [PR-07A]
+deploy/                    # wdrożenie na VPS (docs/DEPLOY.md, D-029)               [PR-07B]
+                           # systemd/radar-serve.service, cron/radar, caddy/Caddyfile,
+                           # logrotate/radar, radar.env.example, smoke.sh
 tests/
 ├── *.test.ts               # unit / smoke                                           [PR-00]
 ├── fixtures/<source>/      # prawdziwe odpowiedzi źródeł + README (pseudonimizacja) [PR-02]
@@ -925,6 +929,15 @@ release failed`. `ingest` i `digest` nie blokują się wzajemnie.
   trwa (bez stanu „już zgłoszono”); nieudana wysyłka → kod 1 (`notification: "failed"`).
   Nieoczekiwany błąd samego `status` (błąd programu) → stały komunikat wewnętrzny i kod 1;
   z `--notify` najpierw alert z samym kodem `status_internal_error` (bez treści błędu).
+  PR-07B (D-029), konfiguracja `loadStatusConfig` (`Invalid status configuration`, kod 1):
+  z `BACKUP_DIR` (ścieżka bezwzględna) `status` czyta katalog (`readBackupDirectory`: tylko
+  zwykłe pliki o nazwie `radar-<RRRRMMDDTGGMMSSZ>.dump`, czas z nazwy, nazwy > 5 min w
+  przyszłości pomijane; także gdy baza jest niedostępna) i dodaje pole `backup` oraz problemy
+  `backup_dir_unreadable` (kod errno), `backup_missing`, `backup_stale` (najnowsza starsza niż 26 h, `BACKUP_STALE_AFTER_MS` — dobrane do crona: jedna nieudana noc wychodzi o 7:45, D-029). Z `HEARTBEAT_URL` (`https://`, bez danych logowania i
+  fragmentu) po ustaleniu kodu wyjścia: kod 0 → jeden ping (`sendHeartbeat`: `node:https` GET,
+  10 s na całość, bez przekierowań, bez czytania treści, bez ponowień; nie `SafeHttpClient`,
+  bo to adres z konfiguracji operatora, nie strona źródła), kod 1 → bez pingu. Pole
+  `heartbeat`: `disabled`/`skipped`/`sent`/`failed`; nieudany ping nie zmienia kodu wyjścia.
 - `backup <dir>`, `restore <file>` (PR-07A, D-028) — `pg_dump`/`pg_restore` (klient ≥ 16) jako
   procesy potomne bez powłoki (`execFile`-style: tablica argumentów), ze świeżym środowiskiem
   (`PATH`, `HOME`, `PGPASSWORD`, `PGCONNECT_TIMEOUT=10`, `PGAPPNAME`, `LC_ALL=C`) i limitem
@@ -942,28 +955,32 @@ release failed`. `ingest` i `digest` nie blokują się wzajemnie.
   tabel. stderr narzędzi nigdy nie jest wypisywany — mapowany na stały powód
   (`tool_not_found`, `version_mismatch`, `authentication_failed`, `unreachable`, `timeout`,
   `tool_failed`, …) i kod wyjścia.
-- Harmonogram (przykład w README i `docs/RUNBOOK.md`; repozytorium nie zawiera artefaktu
-  cron/wdrożenia): `ingest` raz dziennie ok. 06:00 Europe/Warsaw bez opcji dnia (nadrabianie:
-  zwykle tylko wczoraj UTC, dzień już zamknięty; po przerwie — pominięte dni);
-  `status --notify` po nim (np. 06:30); `digest` — rano, po `ingest` (np. 07:30);
-  `status --notify` po nim (np. 07:45).
+- Harmonogram (`deploy/cron/radar` → `/etc/cron.d/radar`, PR-07B, D-029; strefa hosta
+  `Europe/Warsaw`, bo cron Debiana/Ubuntu nie zna `CRON_TZ`): 05:30 `backup`, 05:45 retencja
+  (14 najnowszych kopii), 06:00 `ingest` bez opcji dnia (nadrabianie: zwykle tylko wczoraj
+  UTC, dzień już zamknięty; po przerwie — pominięte dni), 06:30 `status --notify`, 07:30
+  `digest`, 07:45 `status --notify`. Każde zadanie jako użytkownik `radar`,
+  `node --env-file=/etc/radar/radar.env`, log w `/var/log/radar/`. `serve` — unit systemd
+  `deploy/systemd/radar-serve.service` za Caddy (`deploy/caddy/Caddyfile`, TLS); instalacja
+  i aktualizacja — `docs/DEPLOY.md`.
 
 ### Limity czasu i ponowienia
 
 Wszystkie limity są stałymi w kodzie (nie w konfiguracji). Ponowienia są ograniczone; nic
 nie ponawia się w nieskończoność.
 
-| Miejsce                                       | Limit czasu                                                                                              | Ponowienia                                                                                                                                        |
-| --------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SafeHttpClient` (źródła)                     | połączenie + TLS 10 s, jedna wymiana (DNS, nagłówki, całe ciało) 30 s; ciało ≤ 5 MiB                     | najwyżej 2 (429/502/503/504, zerwane połączenie), backoff 1 s·2ⁿ z jitterem, `Retry-After` ≤ 60 s; ≥ 2 s między żądaniami hosta; budżet 10 błędów |
-| `source:preview`                              | 5 min na przebieg                                                                                        | — (tylko klient HTTP)                                                                                                                             |
-| `ingest`                                      | 10 min na źródło i dzień                                                                                 | nieudany dzień — następne uruchomienie (nadrabianie, D-021); po 2 nieudanych pierwszych dniach źródła reszta `notRun`                             |
-| Pula PostgreSQL (`database.ts`)               | połączenie 5 s, `statement_timeout` 30 s (+ 35 s po stronie klienta), bezczynne 10 s, keepalive TCP 10 s | brak (komenda kończy się kodem 1)                                                                                                                 |
-| Blokady ingest/digest                         | sprawdzanie połączenia co 5 s                                                                            | brak — utrata blokady przerywa przebieg                                                                                                           |
-| SMTP (`digest`, `status --notify`)            | połączenie 10 s, powitanie 10 s, gniazdo 30 s, DNS 10 s                                                  | chwilowe błędy: najwyżej 2 w przebiegu (po 2 s i 10 s); `failed` — kolejne uruchomienia do 3 prób na ofertę; `uncertain` nigdy                    |
-| `serve`                                       | nagłówki 10 s, żądanie 15 s, keep-alive 5 s, zamknięcie po SIGTERM ≤ 10 s                                | —                                                                                                                                                 |
-| `/dopasowania`                                | czekanie w kolejce ≤ 3 s (≤ 8 czekających) → 503; ≤ 2 żądania na sesję → 429                             | — (klient ponawia po `Retry-After: 5`)                                                                                                            |
-| `pg_dump` / `pg_restore` (`backup`/`restore`) | 30 min, potem SIGTERM, po 5 s SIGKILL; połączenie 10 s (`PGCONNECT_TIMEOUT`)                             | brak                                                                                                                                              |
+| Miejsce                                       | Limit czasu                                                                                                                                                                                           | Ponowienia                                                                                                                                        |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SafeHttpClient` (źródła)                     | połączenie + TLS 10 s, jedna wymiana (DNS, nagłówki, całe ciało) 30 s; ciało ≤ 5 MiB                                                                                                                  | najwyżej 2 (429/502/503/504, zerwane połączenie), backoff 1 s·2ⁿ z jitterem, `Retry-After` ≤ 60 s; ≥ 2 s między żądaniami hosta; budżet 10 błędów |
+| `source:preview`                              | 5 min na przebieg                                                                                                                                                                                     | — (tylko klient HTTP)                                                                                                                             |
+| `ingest`                                      | 10 min na źródło i dzień                                                                                                                                                                              | nieudany dzień — następne uruchomienie (nadrabianie, D-021); po 2 nieudanych pierwszych dniach źródła reszta `notRun`                             |
+| Pula PostgreSQL (`database.ts`)               | połączenie 5 s, `statement_timeout` 30 s (+ 35 s po stronie klienta), bezczynne 10 s, keepalive TCP 10 s                                                                                              | brak (komenda kończy się kodem 1)                                                                                                                 |
+| Blokady ingest/digest                         | sprawdzanie połączenia co 5 s                                                                                                                                                                         | brak — utrata blokady przerywa przebieg                                                                                                           |
+| SMTP (`digest`, `status --notify`)            | połączenie 10 s, powitanie 10 s, gniazdo 30 s, DNS 10 s                                                                                                                                               | chwilowe błędy: najwyżej 2 w przebiegu (po 2 s i 10 s); `failed` — kolejne uruchomienia do 3 prób na ofertę; `uncertain` nigdy                    |
+| `serve`                                       | nagłówki 10 s, żądanie 15 s, keep-alive 5 s, zamknięcie po SIGTERM ≤ 10 s                                                                                                                             | —                                                                                                                                                 |
+| `/dopasowania`                                | czekanie w kolejce ≤ 3 s (≤ 8 czekających) → 503; ≤ 2 żądania na sesję → 429                                                                                                                          | — (klient ponawia po `Retry-After: 5`)                                                                                                            |
+| `pg_dump` / `pg_restore` (`backup`/`restore`) | 30 min, potem SIGTERM, po 5 s SIGKILL; połączenie 10 s (`PGCONNECT_TIMEOUT`)                                                                                                                          | brak                                                                                                                                              |
+| Heartbeat (`status`, `HEARTBEAT_URL`)         | 10 s na całość (połączenie, TLS, żądanie, nagłówki odpowiedzi); ogranicza wynik, nie czas życia procesu (trwający `getaddrinfo` może go przedłużyć do limitu resolvera; kod wyjścia i logi bez zmian) | brak (kolejny `status` wyśle nowy ping)                                                                                                           |
 
 ## 7. Obserwowalność
 
@@ -997,10 +1014,15 @@ linii `http request`, bo odpowiedź nie powstała), start i zatrzymanie
 sprzątanie (`access cleanup` — liczby usuniętych wierszy, `access cleanup failed`) — nigdy
 URL-a (tokeny), ciasteczek, nagłówków, treści formularzy, adresu klienta ani danych profilu.
 `status` (PR-07A) loguje `status checked` (`status`, liczba problemów, `notification`,
-`errorCode` nieudanej wysyłki), a przy problemie pisze na stderr
+`errorCode` nieudanej wysyłki; od PR-07B `heartbeat`), nieudany ping jako `heartbeat failed`
+(`warn`, `errorCode: "heartbeat_failed"`, `reason` — nigdy URL), a przy problemie pisze na stderr
 `Status: problem (<kody>); see docs/RUNBOOK.md.`; jego wynik na stdout zawiera tylko id,
 statusy, kody, czasy i liczby. Alert operatora (`status --notify`) niesie to samo w tekście po
 polsku i odsyła do `docs/RUNBOOK.md` → „Alert statusu”. `backup`/`restore` wypisują ścieżkę
 pliku, rozmiar, schemat i liczby tabel/wierszy, a błąd jako stały powód + kod wyjścia
-narzędzia — nigdy stderr narzędzia, conninfo ani hasła. Wdrożenie (hosting, proxy, systemd):
-PR-07B.
+narzędzia — nigdy stderr narzędzia, conninfo ani hasła. Na pilocie (PR-07B, `docs/DEPLOY.md`)
+logi zadań crona trafiają do `/var/log/radar/<komenda>.log` (rotacja `deploy/logrotate/radar`,
+14 dni), `serve` — do journala (`journalctl -u radar-serve`), log dostępu Caddy bez ścieżek
+z tokenami. Brak pingu heartbeat alarmuje zewnętrzna usługa (dead man's switch); heartbeat
+obejmuje cron i `status`, nie `serve` — dostępność strony sprawdza zewnętrzny monitoring HTTPS
+`PUBLIC_BASE_URL` (`docs/DEPLOY.md` punkt 10).

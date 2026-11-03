@@ -1,17 +1,20 @@
-import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   assertNoPgConnectionEnv,
+  BACKUP_FUTURE_TOLERANCE_MS,
   backupFileName,
   BackupError,
   classifyToolFailure,
   dumpSchema,
   isPlainSchemaName,
+  parseBackupFileName,
   PG_CONNECTION_ENV_VARS,
   pgToolConnection,
   pgToolEnv,
+  readBackupDirectory,
   restoreSchema,
   runTool,
 } from "../src/operations/backup.js";
@@ -346,5 +349,119 @@ describe("dumpSchema and restoreSchema without the tools", () => {
       const error = await rejection(restoreSchema(url, "public", path, { env: { PATH: "" } }));
       expect(error.reason).toBe("not_a_file");
     }
+  });
+});
+
+describe("parseBackupFileName", () => {
+  it("reads back the time of every name backupFileName writes", () => {
+    for (const iso of ["2026-11-02T04:30:00.000Z", "2024-02-29T23:59:59.000Z"]) {
+      const at = new Date(iso);
+      expect(parseBackupFileName(backupFileName(at))).toEqual(at);
+    }
+    expect(parseBackupFileName("radar-20261102T043000Z.dump")).toEqual(
+      new Date("2026-11-02T04:30:00.000Z"),
+    );
+  });
+
+  it.each([
+    "radar-20261102T043000Z.dump.partial",
+    ".radar-20261102T043000Z.dump.00000000-0000-4000-8000-000000000001.partial",
+    "radar-20261102T043000.dump",
+    "radar-20261102T043000Z.sql",
+    "radar-2026110T043000Z.dump",
+    "copy of radar-20261102T043000Z.dump",
+    "radar-20261302T043000Z.dump",
+    "radar-20250229T043000Z.dump",
+    "radar-20261102T246000Z.dump",
+    "radar-20261102T043060Z.dump",
+    "radar-latest.dump",
+  ])("ignores %j", (name) => {
+    expect(parseBackupFileName(name)).toBeNull();
+  });
+});
+
+describe("readBackupDirectory", () => {
+  const NOW = new Date("2026-11-03T05:45:00.000Z");
+  let root: string;
+
+  beforeAll(async () => {
+    root = await mkdtemp(join(tmpdir(), "radar-backup-dir-test-"));
+  });
+
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  async function directory(name: string, entries: string[]): Promise<string> {
+    const dir = join(root, name);
+    await mkdir(dir);
+    for (const entry of entries) await writeFile(join(dir, entry), "", { mode: 0o600 });
+    return dir;
+  }
+
+  it("finds the newest backup by its name and counts the backups", async () => {
+    const dir = await directory("several", [
+      "radar-20261101T043000Z.dump",
+      "radar-20261103T043000Z.dump",
+      "radar-20261102T043000Z.dump",
+    ]);
+    expect(await readBackupDirectory(dir, NOW)).toEqual({
+      files: 3,
+      newestAt: new Date("2026-11-03T04:30:00.000Z"),
+      unreadableCode: null,
+    });
+  });
+
+  it("ignores other names, temporary files, directories and symlinks", async () => {
+    const dir = await directory("garbage", [
+      "radar-20261101T043000Z.dump",
+      ".radar-20261103T043000Z.dump.00000000-0000-4000-8000-000000000001.partial",
+      "radar-20261399T043000Z.dump",
+      "notes.txt",
+    ]);
+    await mkdir(join(dir, "radar-20261103T050000Z.dump"));
+    await symlink(
+      join(dir, "radar-20261101T043000Z.dump"),
+      join(dir, "radar-20261103T051000Z.dump"),
+    );
+    expect(await readBackupDirectory(dir, NOW)).toEqual({
+      files: 1,
+      newestAt: new Date("2026-11-01T04:30:00.000Z"),
+      unreadableCode: null,
+    });
+  });
+
+  it("ignores a name ahead of the clock beyond the tolerance (it would hide a stale backup)", async () => {
+    const ahead = (ms: number) => backupFileName(new Date(NOW.getTime() + ms));
+    const dir = await directory("future", [
+      "radar-20261101T043000Z.dump",
+      ahead(BACKUP_FUTURE_TOLERANCE_MS),
+      ahead(BACKUP_FUTURE_TOLERANCE_MS + 1_000),
+    ]);
+    expect(await readBackupDirectory(dir, NOW)).toEqual({
+      files: 2,
+      newestAt: new Date(NOW.getTime() + BACKUP_FUTURE_TOLERANCE_MS),
+      unreadableCode: null,
+    });
+  });
+
+  it("reports an empty directory as no backup", async () => {
+    const dir = await directory("empty", []);
+    expect(await readBackupDirectory(dir, NOW)).toEqual({
+      files: 0,
+      newestAt: null,
+      unreadableCode: null,
+    });
+  });
+
+  it("reports a directory it cannot read by the errno code, without throwing", async () => {
+    expect(await readBackupDirectory(join(root, "absent"), NOW)).toEqual({
+      files: null,
+      newestAt: null,
+      unreadableCode: "ENOENT",
+    });
+    const file = join(root, "a-file");
+    await writeFile(file, "");
+    expect((await readBackupDirectory(file, NOW)).unreadableCode).toBe("ENOTDIR");
   });
 });

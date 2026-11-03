@@ -11,7 +11,14 @@ dotyczą projektu).
   (ignorowany przez git), który skrypty `pnpm dev|health|start` wczytują wbudowaną flagą Node
   `--env-file-if-exists=.env`; zmienne ustawione w środowisku procesu mają pierwszeństwo przed
   plikiem. Na produkcji / w cronie zmienne eksportuje środowisko uruchomieniowe —
-  `node dist/main.js` uruchomione bezpośrednio nie czyta `.env`.
+  `node dist/main.js` uruchomione bezpośrednio nie czyta `.env`. Wdrożenie pilotażowe (PR-07B,
+  D-029, `docs/DEPLOY.md`): jeden plik `/etc/radar/radar.env` (`root:radar 0640`, katalog
+  `/etc/radar` `root:radar 0750`) czytany jawnie przez `node --env-file=…` w unicie systemd i
+  w cronie; aplikacja działa jako użytkownik `radar` bez powłoki, który nie może zmienić
+  pliku ani kodu (`/opt/radar-zamowien` należy do administratora).
+- `HEARTBEAT_URL` (PR-07B): usługi heartbeat mają token checka w ścieżce, więc kto zna URL,
+  może podrabiać pingi i wyciszyć alarm — dlatego jest sekretem. Nigdy nie jest logowany ani
+  wypisywany (także w powodzie błędu pingu).
 - `.env.example` zawiera tylko nazwy zmiennych i bezpieczne przykłady.
 - Konfiguracja jest walidowana schematem (`src/infrastructure/config.ts`); komunikat błędu
   podaje **nazwę** zmiennej, nigdy jej wartości.
@@ -37,10 +44,12 @@ dotyczą projektu).
 - **Pliki backupu zawierają dane osobowe** (adresy e-mail i ustawienia profili, historia
   doręczeń, skróty tokenów i sesji): tworzone z prawami `0600` w katalogu wskazanym przez
   operatora (zalecany `0700`), nigdy nie nadpisują istniejącego pliku, przy błędzie nic nie
-  zostaje. Kopia poza hostem musi być **zaszyfrowana**; retencja i automatyczna, szyfrowana
-  kopia poza hostem — PR-07B (do tego czasu procedura ręczna w `docs/RUNBOOK.md`). Backup jest
-  objęty prawem do usunięcia danych: usunięty profil zostaje w starszych plikach do końca
-  ich retencji.
+  zostaje. Kopia poza hostem musi być **zaszyfrowana**: na pilocie (PR-07B, D-029) kluczem
+  publicznym `age`, klucz prywatny tylko u właściciela, poza VPS (`docs/DEPLOY.md` punkt 11).
+  Retencja: 14 najnowszych kopii na hoście (`deploy/cron/radar`, katalog `/var/backups/radar`
+  `0700`); poza hostem 14 dni według wieku pliku, po stronie serwera kopii — wysyłka z VPS
+  nie może ich usuwać (`rrsync -wo -no-del`; z rsync ≥ 3.3.0 także nadpisywać, `-no-overwrite`). Backup jest objęty prawem do usunięcia danych: usunięty
+  profil zostaje w starszych plikach do końca ich retencji (najwyżej ok. 14 dni).
 
 ## 2. SSRF protection _(egzekwowane od PR-02)_
 
@@ -72,6 +81,12 @@ Cały ruch wychodzący adapterów idzie przez `SafeHttpClient`:
   ominąć przypinanie adresu i rate limit, dlatego kod w `src/` nie może ich przekazać — reguła
   ESLint (`no-restricted-syntax`) plus review;
 - brak możliwości przekazania dowolnego URL-a przez użytkownika do fetchera.
+
+Jedyny inny ruch wychodzący HTTP to ping heartbeat `status` (PR-07B, D-029): jeden `GET` na
+`HEARTBEAT_URL` z konfiguracji operatora (nie z danych źródeł ani od użytkowników), więc nie
+idzie przez `SafeHttpClient` (allowlista i rate limit dotyczą stron źródeł). Ograniczony
+osobno: tylko `https://` z weryfikacją certyfikatu, bez danych logowania w URL, 10 s na
+całość, bez przekierowań, bez czytania treści odpowiedzi, bez ponowień.
 
 ## 3. URL validation
 
@@ -318,12 +333,24 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   działa). Od PR-07A jedna sesja ma naraz najwyżej 2 żądania `/dopasowania` w toku lub w
   kolejce; trzecie → od razu 429 z `Retry-After` (licznik po id sesji z bazy, nigdy po wartości
   ciasteczka; D-028) — jeden klient nie zajmie całej kolejki, ale wiele sesji nadal może.
-  Dostępne tylko z sesją; limit dla tej trasy na proxy — PR-07B. Funkcja „wyślij mi link e-mailem”
+  Dostępne tylko z sesją. Limitu na proxy pilot nie ma (Caddy wymaga do tego zewnętrznego
+  modułu — poza zakresem PR-07B, D-029). Funkcja „wyślij mi link e-mailem”
   (otwarta decyzja właściciela) będzie wymagać limitu.
 - **Reverse proxy (PR-07):** `serve` słucha domyślnie na `127.0.0.1:3000` czystym HTTP; TLS,
   HSTS i przekierowanie z `http` robi proxy. Tokeny są w ścieżkach `/dostep/…` i `/wypis/…`
   — proxy **nie może** zapisywać tych ścieżek w logach dostępu (wyłączony log albo ścieżka
-  przycięta).
+  przycięta). Pilot (PR-07B): `deploy/caddy/Caddyfile` — `log_skip` dla obu ścieżek w logu
+  dostępu, a ponieważ `log_skip` nie obejmuje innych logów (log błędów w journalu, np. 502 z
+  `reverse_proxy` przy restarcie `serve`; serwer przekierowania HTTP → HTTPS), **każdy** log
+  Caddy (domyślny i dostępu) ma `format filter`, który w `request>uri` i
+  `request>headers>Referer` zamienia `/dostep/<token>` i `/wypis/<token>` na `…/REDACTED`
+  (obrona w głąb; aplikacja wysyła też `Referrer-Policy: strict-origin`, więc przeglądarki nie
+  podają ścieżki). Po instalacji i każdej zmianie Caddyfile obowiązkowa kontrola z
+  `docs/DEPLOY.md` punkt 8 (`grep -c` testowego tokenu w journalu i logu dostępu = 0). Nagłówki
+  `Cookie`/`Authorization` maskowane przez Caddy, limit ciała żądania 128 KB i timeouty
+  odczytu; HSTS tylko z aplikacji. `serve` jako unit systemd z hardeningiem (bez uprawnień,
+  tylko odczyt systemu plików, ruch sieciowy tylko z/do `localhost`). Firewall hosta: z
+  zewnątrz tylko 22/80/443; PostgreSQL tylko na `localhost`.
 - **Sprzątanie:** `serve` co godzinę usuwa wygasłe tokeny i sesje (po 1000 na przebieg).
 
 ## 12. Logging policy
@@ -367,7 +394,10 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
 - `status` (od PR-07A) wypisuje i loguje wyłącznie identyfikatory źródeł i przebiegów,
   statusy, kody błędów, czasy i liczby (wysyłki — tylko liczniki i kody, bez `profileId`);
   `backup`/`restore` — ścieżkę pliku, rozmiar, schemat, liczby tabel/wierszy i stały powód
-  błędu z kodem wyjścia narzędzia; nigdy conninfo, hasła ani stderr narzędzia.
+  błędu z kodem wyjścia narzędzia; nigdy conninfo, hasła ani stderr narzędzia. Od PR-07B
+  `status` dodaje stan kopii (status, czas najnowszej, liczba plików, kod errno — bez ścieżki
+  katalogu w alercie) i wynik heartbeatu (`sent`/`failed`/`skipped`/`disabled`, powód błędu
+  jak `timeout`, `http_503`, `network_enotfound`) — nigdy `HEARTBEAT_URL`.
 - Komunikaty błędów dla użytkownika są bezpieczne; szczegóły tylko w logu.
 - Błędy bazy danych (od PR-01): CLI pokazuje tylko stały powód + kod SQLSTATE/errno, nigdy
   komunikatu sterownika/serwera; repozytoria zamieniają naruszenia ograniczeń na

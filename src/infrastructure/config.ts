@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { isAbsolute } from "node:path";
 import { z } from "zod";
 
 /**
@@ -337,4 +338,65 @@ export function loadOperatorEmail(
     .safeParse(nonEmptyEnv(env));
   if (!result.success) throw configError("Invalid e-mail configuration", result.error);
   return result.data.OPERATOR_EMAIL ?? null;
+}
+
+/** The optional checks of `status` (PR-07B, D-029). */
+export interface StatusConfig {
+  /** BACKUP_DIR: where `backup` writes (absolute); null = no backup check. */
+  readonly backupDir: string | null;
+  /**
+   * HEARTBEAT_URL: pinged after a `status` without a problem; null = no ping.
+   * A secret (heartbeat services put a token in the path): never printed or logged.
+   */
+  readonly heartbeatUrl: string | null;
+}
+
+/**
+ * BACKUP_DIR: an absolute path (cron and systemd run from a fixed working
+ * directory, but the backup directory must not depend on it), without
+ * control characters.
+ */
+const backupDirSchema = z
+  .string()
+  .max(500)
+  .refine((value) => isAbsolute(value) && !/\p{Cc}/u.test(value));
+
+/**
+ * HEARTBEAT_URL: an `https:` URL with a host, without credentials or a
+ * fragment; path and query are kept (they usually carry the check's token).
+ * The raw value must already be clean (URL.parse would drop whitespace).
+ */
+const heartbeatUrlSchema = z
+  .string()
+  .max(2000)
+  .refine((value) => {
+    const url = URL.parse(value);
+    return (
+      url !== null &&
+      url.protocol === "https:" &&
+      url.hostname !== "" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.hash === "" &&
+      !/[\s\p{Cc}]/u.test(value)
+    );
+  });
+
+/**
+ * Parses BACKUP_DIR and HEARTBEAT_URL (only `status` reads them; both
+ * optional). Like loadConfig: empty values count as unset, and a ConfigError
+ * names the variables only — HEARTBEAT_URL is a secret.
+ */
+export function loadStatusConfig(env: Readonly<Record<string, string | undefined>>): StatusConfig {
+  const result = z
+    .object({
+      BACKUP_DIR: backupDirSchema.optional(),
+      HEARTBEAT_URL: heartbeatUrlSchema.optional(),
+    })
+    .safeParse(nonEmptyEnv(env));
+  if (!result.success) throw configError("Invalid status configuration", result.error);
+  return {
+    backupDir: result.data.BACKUP_DIR ?? null,
+    heartbeatUrl: result.data.HEARTBEAT_URL ?? null,
+  };
 }

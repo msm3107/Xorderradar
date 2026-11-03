@@ -11,9 +11,11 @@ import {
   loadEmailConfig,
   loadOperatorEmail,
   loadPublicBaseUrl,
+  loadStatusConfig,
   loadWebConfig,
   type AppConfig,
   type EmailConfig,
+  type StatusConfig,
   type WebConfig,
 } from "./infrastructure/config.js";
 import {
@@ -97,14 +99,18 @@ import {
   restoreDatabase,
   type BackupFailureReason,
   type BackupResult,
+  readBackupDirectory,
   type RestoreResult,
   type ToolOptions,
 } from "./operations/backup.js";
+import { sendHeartbeat, type HeartbeatResult } from "./operations/heartbeat.js";
 import {
+  BACKUP_STALE_AFTER_MS,
   collectStatus,
   failedStatus,
   formatOperatorAlert,
   STATUS_STALE_AFTER_MS,
+  withBackupCheck,
   type StatusReport,
 } from "./operations/status.js";
 import { previewSource, type SourcePreview } from "./sources/preview.js";
@@ -221,6 +227,12 @@ export interface CliWebDeps {
   readonly waitForShutdown: () => Promise<void>;
 }
 
+/** What `status` sends besides the alert; injected so tests never ping the network. */
+export interface CliStatusDeps {
+  /** One heartbeat ping of HEARTBEAT_URL (src/operations/heartbeat.ts); never throws. */
+  readonly ping: (url: string) => Promise<HeartbeatResult>;
+}
+
 /** External dependencies, injected so the CLI can be unit-tested without PostgreSQL. */
 export interface CliDeps {
   /** Must not connect yet; connecting happens on the first operation. */
@@ -231,6 +243,8 @@ export interface CliDeps {
   readonly digest?: CliDigestDeps;
   /** Defaults to defaultWebDeps (process signals); tests inject a promise they resolve. */
   readonly web?: CliWebDeps;
+  /** Defaults to defaultStatusDeps (a real HTTPS ping); tests inject a fake. */
+  readonly status?: CliStatusDeps;
 }
 
 /**
@@ -269,6 +283,11 @@ export const defaultDigestDeps: CliDigestDeps = {
   sleep: async (ms) => {
     await sleep(ms);
   },
+};
+
+/** Production `status` wiring: the heartbeat over node:https. */
+export const defaultStatusDeps: CliStatusDeps = {
+  ping: (url) => sendHeartbeat(url),
 };
 
 /**
@@ -445,8 +464,12 @@ Commands:
             (last ${String(STATUS_STALE_AFTER_MS / 3_600_000)} h), and the pending and recently failed deliveries. Problems:
             source_failed, source_stale (no success in ${String(STATUS_STALE_AFTER_MS / 3_600_000)} h), source_never_run,
             no_enabled_sources, deliveries_pending, deliveries_failed, schema_not_ready,
-            database_unavailable. Read-only; run it after ingest and after digest (cron).
-            Exit 0 when there is no problem, 1 otherwise.
+            database_unavailable; with BACKUP_DIR set also backup_dir_unreadable, backup_missing
+            and backup_stale (newest radar-<UTC time>.dump older than ${String(BACKUP_STALE_AFTER_MS / 3_600_000)} h).
+            Read-only; run it after ingest and after digest (cron). Exit 0 when there is no
+            problem, 1 otherwise. With HEARTBEAT_URL set (https), an exit-0 run then sends one
+            GET to it (dead man's switch; with or without --notify); a failed ping is logged
+            and reported as heartbeat "failed" but keeps exit 0.
             --notify  when there is a problem, also send one plain-text alert (ids, codes,
                       timestamps and counts only) to OPERATOR_EMAIL over EMAIL_MODE (test:
                       the outbox); exit 1 also when it cannot be sent. An unexpected error
@@ -834,13 +857,16 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
   let emailConfig: EmailConfig | null = null;
   let webConfig: WebConfig | null = null;
   let publicBaseUrl: string | null = null;
-  // Only `status --notify` reads OPERATOR_EMAIL (and then the e-mail variables).
+  // Only `status --notify` reads OPERATOR_EMAIL (and then the e-mail variables),
+  // only `status` BACKUP_DIR and HEARTBEAT_URL.
   let operatorEmail: string | null = null;
+  let statusConfig: StatusConfig | null = null;
   const notify = invocation.command === "status" && invocation.notify;
   try {
     config = loadConfig(io.env);
     if (invocation.command === "digest" || notify) emailConfig = loadEmailConfig(io.env);
     if (notify) operatorEmail = loadOperatorEmail(io.env);
+    if (invocation.command === "status") statusConfig = loadStatusConfig(io.env);
     if (invocation.command === "serve") webConfig = loadWebConfig(io.env);
     if (invocation.command === "digest" || invocation.command === "access:link") {
       publicBaseUrl = loadPublicBaseUrl(io.env);
@@ -905,12 +931,21 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
       case "access:revoke":
         return await runAccessRevoke(invocation.profileId, database, io);
       case "status": {
+        if (statusConfig === null) throw new Error("status configuration was not loaded");
         const digestDeps = deps.digest ?? defaultDigestDeps;
         const alert =
           emailConfig === null || operatorEmail === null
             ? null
             : { emailConfig, to: operatorEmail, deps: digestDeps };
-        return await runStatus(config, database, io, digestDeps.now, alert);
+        return await runStatus(
+          config,
+          statusConfig,
+          database,
+          io,
+          digestDeps.now,
+          alert,
+          deps.status ?? defaultStatusDeps,
+        );
       }
       case "backup":
         return await runBackup(
@@ -1643,13 +1678,22 @@ async function alertInternalError(checkedAt: Date, alert: OperatorAlert, io: Cli
  * when the alert could not be sent. With `--notify` and a problem, one alert
  * goes to OPERATOR_EMAIL; it is sent again by every run while the problem
  * lasts.
+ *
+ * With BACKUP_DIR the age of the newest backup is checked too (also when the
+ * database cannot be read). With HEARTBEAT_URL a run that exits 0 then pings
+ * it once, with or without `--notify`: the dead man's switch alerts when the
+ * pings stop (D-029). A failed ping keeps exit 0 — the system is fine, the
+ * missing ping alerts anyway — and is logged as `heartbeat_failed` with a
+ * fixed reason; the URL is never printed or logged.
  */
 async function runStatus(
   config: AppConfig,
+  statusConfig: StatusConfig,
   database: CliDatabase,
   io: CliIo,
   now: () => Date,
   alert: OperatorAlert | null,
+  statusDeps: CliStatusDeps,
 ): Promise<ExitCode> {
   if (database.collectStatus === undefined || database.pendingMigrations === undefined) {
     throw new Error("database cannot report status");
@@ -1672,6 +1716,9 @@ async function runStatus(
     }
     report = failedStatus(checkedAt, "database_unavailable", failure);
   }
+  if (statusConfig.backupDir !== null) {
+    report = withBackupCheck(report, await readBackupDirectory(statusConfig.backupDir, checkedAt));
+  }
 
   let notification: "sent" | "failed" | "not_needed" | null = null;
   let sendError: string | null = null;
@@ -1684,18 +1731,41 @@ async function runStatus(
       sendError = result.ok ? null : result.error.code;
     }
   }
-  io.stdout(`${JSON.stringify({ ...report, notification })}\n`);
+  const exitCode =
+    report.status === "ok" && notification !== "failed" ? ExitCode.Ok : ExitCode.Failure;
+
+  // Only a run that exits 0 pings: a missing ping is the alert.
+  let heartbeat: "sent" | "failed" | "disabled" | "skipped" = "disabled";
+  let heartbeatError: string | null = null;
+  if (statusConfig.heartbeatUrl !== null) {
+    if (exitCode !== ExitCode.Ok) {
+      heartbeat = "skipped";
+    } else {
+      const result = await statusDeps.ping(statusConfig.heartbeatUrl);
+      heartbeat = result.ok ? "sent" : "failed";
+      heartbeatError = result.ok ? null : result.reason;
+    }
+  }
+
+  io.stdout(
+    `${JSON.stringify({ ...report, backup: report.backup ?? null, notification, heartbeat })}\n`,
+  );
   logger.info("status checked", {
     status: report.status,
     problems: report.problems.length,
     notification,
+    heartbeat,
     ...(sendError === null ? {} : { errorCode: sendError }),
   });
+  if (heartbeatError !== null) {
+    logger.warn("heartbeat failed", { errorCode: "heartbeat_failed", reason: heartbeatError });
+  }
   if (report.status === "problem") {
     io.stderr(`Status: problem (${report.problems.join(", ")}); see docs/RUNBOOK.md.\n`);
   }
   if (sendError !== null) io.stderr(`Operator alert not sent (${sendError}).\n`);
-  return report.status === "ok" && notification !== "failed" ? ExitCode.Ok : ExitCode.Failure;
+  if (heartbeatError !== null) io.stderr(`Heartbeat ping failed (${heartbeatError}).\n`);
+  return exitCode;
 }
 
 const BACKUP_FAILURE_TEXT: Readonly<Record<BackupFailureReason, string>> = {
