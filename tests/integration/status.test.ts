@@ -1,4 +1,6 @@
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer, request as httpRequest } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sql } from "kysely";
@@ -11,6 +13,8 @@ import { recordIngestionRun } from "../../src/infrastructure/db/ingestion-runs-r
 import { upsertOpportunity } from "../../src/infrastructure/db/opportunities-repository.js";
 import { upsertSource } from "../../src/infrastructure/db/sources-repository.js";
 import { countDeliveries } from "../../src/infrastructure/db/status-repository.js";
+import { backupFileName } from "../../src/operations/backup.js";
+import { sendHeartbeat } from "../../src/operations/heartbeat.js";
 import { collectStatus } from "../../src/operations/status.js";
 import { createTestSchema, skipWithoutDatabase, type TestSchema } from "./test-database.js";
 
@@ -273,3 +277,98 @@ describe.skipIf(skipWithoutDatabase)("status (PostgreSQL)", () => {
     }
   });
 });
+
+/*
+ * PR-07B with PostgreSQL: a healthy schema, a recent backup in BACKUP_DIR and
+ * the heartbeat to a local HTTP server (the URL says https; the injected
+ * request speaks plain HTTP to 127.0.0.1 only).
+ */
+describe.skipIf(skipWithoutDatabase)(
+  "status with BACKUP_DIR and HEARTBEAT_URL (PostgreSQL)",
+  () => {
+    let schema: TestSchema;
+    let dir = "";
+
+    beforeAll(async () => {
+      schema = await createTestSchema();
+      await migrateToLatest(schema.db);
+      // `bzp`, seeded by the migrations, is the only enabled source.
+      await recordIngestionRun(schema.db, runSummary("bzp", "2026-11-01", "succeeded", 2));
+      dir = await mkdtemp(join(tmpdir(), "radar-status-backup-it-"));
+    });
+
+    afterAll(async () => {
+      await schema.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    async function status(): Promise<{
+      code: number;
+      stdout: string;
+      stderr: string;
+      seen: string[];
+    }> {
+      const seen: string[] = [];
+      const server = createServer((request, response) => {
+        seen.push(request.url ?? "");
+        response.writeHead(200).end("OK");
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const port = (server.address() as AddressInfo).port;
+      let stdout = "";
+      let stderr = "";
+      try {
+        const code = await runCli(
+          ["status"],
+          {
+            env: {
+              DATABASE_URL: schema.url,
+              LOG_LEVEL: "error",
+              BACKUP_DIR: dir,
+              HEARTBEAT_URL: `https://127.0.0.1:${String(port)}/ping/not-a-real-token`,
+            },
+            stdout: (text) => (stdout += text),
+            stderr: (text) => (stderr += text),
+          },
+          {
+            ...defaultCliDeps,
+            digest: { ...defaultDigestDeps, now: () => NOW },
+            status: { ping: (url) => sendHeartbeat(url, { request: httpRequest }) },
+          },
+        );
+        return { code, stdout, stderr, seen };
+      } finally {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => {
+          server.close(() => {
+            resolve();
+          });
+        });
+      }
+    }
+
+    it("skips the ping while there is no backup, then pings once a recent backup is there", async () => {
+      const missing = await status();
+      expect(missing.code).toBe(ExitCode.Failure);
+      expect(JSON.parse(missing.stdout)).toMatchObject({
+        status: "problem",
+        problems: ["backup_missing"],
+        heartbeat: "skipped",
+      });
+      expect(missing.seen).toEqual([]);
+
+      await writeFile(join(dir, backupFileName(at(2))), "");
+      const ok = await status();
+      expect(ok.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(ok.stdout)).toMatchObject({
+        status: "ok",
+        problems: [],
+        backup: { status: "ok", newestAt: at(2).toISOString(), files: 1, code: null },
+        heartbeat: "sent",
+      });
+      expect(ok.seen).toEqual(["/ping/not-a-real-token"]);
+      expect(ok.stdout + ok.stderr).not.toContain("not-a-real-token");
+      expect(ok.stdout + ok.stderr).not.toContain(dir);
+    });
+  },
+);

@@ -530,13 +530,13 @@ describe("web server without a session", () => {
       ].join("\r\n"),
     );
     // Let the server start reading the body, then drop the connection.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     socket.destroy();
     for (let i = 0; i < 100 && lines.length === 0; i++) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     // Room for a wrong second line (an access line with status 500) to appear.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     const entries = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
@@ -573,5 +573,146 @@ describe("web server for an http PUBLIC_BASE_URL (local development)", () => {
       await server.close();
       await db.destroy();
     }
+  });
+});
+
+describe("GET /zdrowie (D-029)", () => {
+  const db = createDatabase("postgres://radar:not-a-real-password@127.0.0.1:1/radar");
+  afterAll(async () => {
+    await db.destroy();
+  });
+
+  /** A server with the given probe (default: the real `select 1` over a closed port). */
+  async function withServer(
+    options: { healthProbe?: () => Promise<void>; healthTimeoutMs?: number },
+    run: (url: string, lines: string[]) => Promise<void>,
+  ) {
+    const lines: string[] = [];
+    const server = await startWebServer({
+      db,
+      publicBaseUrl: BASE,
+      logger: createLogger("debug", (line) => lines.push(line)),
+      host: "127.0.0.1",
+      port: 0,
+      cleanupIntervalMs: null,
+      ...options,
+    });
+    try {
+      await run(`http://127.0.0.1:${String(server.port)}`, lines);
+    } finally {
+      await server.close();
+    }
+  }
+
+  function expectPlainNoStore(response: Response) {
+    expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
+    expect(response.headers.get("strict-transport-security")).toBe("max-age=31536000");
+    expect(response.headers.get("set-cookie")).toBeNull();
+  }
+
+  it("answers 200 ok when the database answers, also to HEAD", async () => {
+    let probes = 0;
+    const healthProbe = () => {
+      probes++;
+      return Promise.resolve();
+    };
+    await withServer({ healthProbe }, async (url) => {
+      const response = await fetch(`${url}/zdrowie`);
+      expect(response.status).toBe(200);
+      expectPlainNoStore(response);
+      expect(await response.text()).toBe("ok\n");
+
+      const head = await fetch(`${url}/zdrowie?x=1`, { method: "HEAD" });
+      expect(head.status).toBe(200);
+      expectPlainNoStore(head);
+      expect(await head.text()).toBe("");
+      expect(probes).toBe(2);
+    });
+  });
+
+  it("answers 503 without any detail when the database is unreachable", async () => {
+    await withServer({}, async (url, lines) => {
+      const response = await fetch(`${url}/zdrowie`);
+      expect(response.status).toBe(503);
+      expectPlainNoStore(response);
+      expect(await response.text()).toBe("niedostępne\n");
+      const failure = lines
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .find((entry) => entry.message === "health check failed");
+      expect(failure).toMatchObject({
+        level: "warn",
+        errorCode: "health_check_failed",
+        reason: "unreachable",
+        code: "ECONNREFUSED",
+      });
+      expect(lines.join("")).not.toContain("not-a-real-password");
+    });
+  });
+
+  it("logs fixed codes only, never the error's message", async () => {
+    const secret = "Zx9-health-secret";
+    const healthProbe = () => Promise.reject(new Error(`connect failed for ${secret}`));
+    await withServer({ healthProbe }, async (url, lines) => {
+      const response = await fetch(`${url}/zdrowie`);
+      expect(response.status).toBe(503);
+      const text = await response.text();
+      expect(text).toBe("niedostępne\n");
+      expect(lines.join("")).not.toContain(secret);
+      expect(lines.join("")).toContain('"errorCode":"health_check_failed"');
+    });
+  });
+
+  it("answers 503 in time when the database hangs, and never starts a second probe meanwhile", async () => {
+    let probes = 0;
+    let finish = (): void => undefined;
+    const healthProbe = () => {
+      probes++;
+      return new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+    };
+    await withServer({ healthProbe, healthTimeoutMs: 100 }, async (url, lines) => {
+      const started = performance.now();
+      const replies = await Promise.all(Array.from({ length: 20 }, () => fetch(`${url}/zdrowie`)));
+      expect(performance.now() - started).toBeLessThan(2000);
+      expect(replies.map((reply) => reply.status)).toEqual(Array<number>(20).fill(503));
+      // A later request while the hung probe still runs shares it too.
+      expect((await fetch(`${url}/zdrowie`)).status).toBe(503);
+      expect(probes).toBe(1);
+      const timeouts = lines.filter((line) => line.includes('"reason":"timeout"'));
+      expect(timeouts).toHaveLength(1);
+
+      // Once it settles, the next request starts a new probe.
+      finish();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const after = await fetch(`${url}/zdrowie`);
+      expect(probes).toBe(2);
+      expect(after.status).toBe(503); // the new probe hangs as well
+      finish();
+    });
+  });
+
+  it("shares one probe between concurrent requests", async () => {
+    let probes = 0;
+    const healthProbe = async () => {
+      probes++;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    };
+    await withServer({ healthProbe }, async (url) => {
+      const replies = await Promise.all(Array.from({ length: 10 }, () => fetch(`${url}/zdrowie`)));
+      expect(replies.map((reply) => reply.status)).toEqual(Array<number>(10).fill(200));
+      expect(probes).toBe(1);
+    });
+  });
+
+  it.each(["POST", "PUT", "DELETE"])("answers %s with 405 and Allow: GET, HEAD", async (method) => {
+    await withServer({ healthProbe: () => Promise.resolve() }, async (url) => {
+      const response = await fetch(`${url}/zdrowie`, { method });
+      expect(response.status).toBe(405);
+      expect(response.headers.get("allow")).toBe("GET, HEAD");
+    });
   });
 });

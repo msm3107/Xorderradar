@@ -106,6 +106,17 @@ describe.skipIf(skipWithoutDatabase)("web access (PostgreSQL)", () => {
     return response.text();
   }
 
+  it("answers GET and HEAD /zdrowie with 200 ok over the real database (D-029)", async () => {
+    const response = await fetch(`${url}/zdrowie`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.text()).toBe("ok\n");
+    const head = await fetch(`${url}/zdrowie`, { method: "HEAD" });
+    expect(head.status).toBe(200);
+    expect(await head.text()).toBe("");
+  });
+
   describe("login link", () => {
     it("shows a confirmation on GET without using the link up", async () => {
       const issued = await issueAccessToken(schema.db, profile.id, "login");

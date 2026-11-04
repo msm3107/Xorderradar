@@ -1,4 +1,5 @@
 import type { Kysely } from "kysely";
+import type { BackupDirectoryState } from "./backup.js";
 import type { Database } from "../infrastructure/db/schema.js";
 import {
   countDeliveries,
@@ -26,6 +27,29 @@ import { warsawDay } from "../sources/normalize/warsaw-time.js";
  */
 export const STATUS_STALE_AFTER_MS = 36 * 60 * 60_000;
 
+/**
+ * The newest backup (BACKUP_DIR, PR-07B, D-029) may be this old. Tied to the
+ * schedule of deploy/cron/radar (Polish time): `backup` at 05:30, `status` at
+ * 06:30 and 07:45; the age is taken from the time in the file name (the start
+ * of the dump).
+ *
+ * - One failed night is caught by the 07:45 `status`: the newest backup is then
+ *   the previous day's 05:30, 26 h 15 min old. At 06:30 it is 25 h old, still
+ *   ok — the first alert comes at 07:45.
+ * - Without a failure no `status` sees more than about 24-25 h (a manual one
+ *   just before the next 05:30, a slow or late dump; 25 h on the autumn DST
+ *   day), so there is no false alarm.
+ * - Known gap: on the spring DST day (a 23 h day) the 07:45 `status` sees only
+ *   25 h 15 min. If only that night's backup fails and the next one succeeds,
+ *   the failure is never reported; a second failed night in a row is caught
+ *   at 06:30 the next day (48 h).
+ * - Two failed nights in a row are caught already at 06:30 (49 h).
+ *
+ * Not the sources' 36 h (STATUS_STALE_AFTER_MS): 36 h would let one failed
+ * night pass without an alert.
+ */
+export const BACKUP_STALE_AFTER_MS = 26 * 60 * 60_000;
+
 export type StatusProblem =
   /** The source's last run failed, or a recent failed day is still not covered. */
   | "source_failed"
@@ -47,7 +71,26 @@ export type StatusProblem =
    * `status` failed unexpectedly (a bug); alerted with `--notify` with this
    * code only, never the error's text (it may carry configuration).
    */
-  | "status_internal_error";
+  | "status_internal_error"
+  /** BACKUP_DIR could not be read (missing, not a directory, no permission). */
+  | "backup_dir_unreadable"
+  /** BACKUP_DIR holds no backup file. */
+  | "backup_missing"
+  /** The newest backup file is older than BACKUP_STALE_AFTER_MS. */
+  | "backup_stale";
+
+/**
+ * The backup check: never the directory's path (it is the operator's
+ * configuration), only the outcome, the newest file's time and the count.
+ */
+export interface BackupStatus {
+  readonly status: "ok" | "missing" | "stale" | "unreadable";
+  readonly newestAt: Date | null;
+  /** Null when the directory could not be read. */
+  readonly files: number | null;
+  /** The errno code of an unreadable directory. */
+  readonly code: string | null;
+}
 
 export interface SourceStatus {
   readonly sourceId: string;
@@ -67,6 +110,8 @@ export interface StatusReport {
   readonly deliveries: (DeliveryCounts & { readonly failedSince: string }) | null;
   /** Of the database failure: a fixed reason and the SQLSTATE/errno code. */
   readonly database: { readonly reason: string; readonly code: string | null } | null;
+  /** Absent when BACKUP_DIR is not set (no backup check). */
+  readonly backup?: BackupStatus;
 }
 
 const PROBLEM_ORDER: readonly StatusProblem[] = [
@@ -79,6 +124,9 @@ const PROBLEM_ORDER: readonly StatusProblem[] = [
   "source_stale",
   "deliveries_pending",
   "deliveries_failed",
+  "backup_dir_unreadable",
+  "backup_missing",
+  "backup_stale",
 ];
 
 function ordered(problems: Iterable<StatusProblem>): StatusProblem[] {
@@ -182,6 +230,42 @@ export function failedStatus(
   };
 }
 
+/** The report with the backup check of BACKUP_DIR added. */
+export function withBackupCheck(
+  report: StatusReport,
+  directory: BackupDirectoryState,
+): StatusReport {
+  const backup: BackupStatus =
+    directory.unreadableCode !== null
+      ? { status: "unreadable", newestAt: null, files: null, code: directory.unreadableCode }
+      : directory.newestAt === null
+        ? { status: "missing", newestAt: null, files: directory.files, code: null }
+        : {
+            status:
+              report.checkedAt.getTime() - directory.newestAt.getTime() > BACKUP_STALE_AFTER_MS
+                ? "stale"
+                : "ok",
+            newestAt: directory.newestAt,
+            files: directory.files,
+            code: null,
+          };
+  const problem: StatusProblem | null =
+    backup.status === "unreadable"
+      ? "backup_dir_unreadable"
+      : backup.status === "missing"
+        ? "backup_missing"
+        : backup.status === "stale"
+          ? "backup_stale"
+          : null;
+  const problems = ordered(problem === null ? report.problems : [...report.problems, problem]);
+  return {
+    ...report,
+    status: problems.length === 0 ? "ok" : "problem",
+    problems,
+    backup,
+  };
+}
+
 function iso(value: Date | null): string {
   return value === null ? "brak" : value.toISOString();
 }
@@ -239,6 +323,16 @@ export function formatOperatorAlert(report: StatusReport): {
         (deliveries.failedErrorCodes.length === 0
           ? ""
           : `, kody: ${deliveries.failedErrorCodes.join(", ")}`),
+      "",
+    );
+  }
+  const { backup } = report;
+  if (backup !== undefined) {
+    lines.push(
+      backup.status === "unreadable"
+        ? `Kopia zapasowa: unreadable, katalog nieczytelny (${backup.code ?? "brak"})`
+        : `Kopia zapasowa: ${backup.status}, najnowsza ${iso(backup.newestAt)}, ` +
+            `plików ${String(backup.files ?? 0)}`,
       "",
     );
   }

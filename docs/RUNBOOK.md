@@ -1,45 +1,69 @@
 # Runbook operatora — Radar Zamówień
 
 Procedury na co dzień i na awarie (PR-07A, D-028). Komendy uruchamiane na hoście aplikacji z
-katalogu wdrożenia, ze zmiennymi środowiskowymi produkcji (jak w cronie):
+katalogu wdrożenia, ze zmiennymi środowiskowymi produkcji (jak w cronie). Instalacja i
+aktualizacja — [`DEPLOY.md`](DEPLOY.md) (PR-07B, D-029); tam aplikacja działa jako użytkownik
+`radar` z konfiguracją w `/etc/radar/radar.env`, więc `node dist/main.js` w przykładach niżej
+oznacza (jako root):
 
 ```sh
 cd /opt/radar-zamowien
-node dist/main.js <komenda>
+runuser -u radar -- /usr/bin/node --env-file=/etc/radar/radar.env dist/main.js <komenda>
 ```
 
-SQL — w `psql` połączonym z bazą aplikacji tym samym użytkownikiem co aplikacja (np.
-`psql "$DATABASE_URL"` — nie wpisuj hasła w linii poleceń ani do historii). W przykładach
-`<profileId>`, `<sourceId>`, `<runId>`, `<adres>` to miejsca do uzupełnienia. **Nie wklejaj
-adresów e-mail klientów ani linków z tokenami do zgłoszeń, czatów i commitów** — tylko
+SQL — jako root w `psql` przez lokalne konto `postgres` (bez hasła w linii poleceń i w
+historii), a pierwszym poleceniem przejdź na rolę aplikacji — zapytania i zmiany mają wtedy jej
+uprawnienia, nie superużytkownika:
+
+```sh
+sudo -u postgres psql -d radar            # potem: SET ROLE radar;
+```
+
+W przykładach `<profileId>`, `<sourceId>`, `<runId>`, `<adres>` to miejsca do uzupełnienia.
+**Nie wklejaj adresów e-mail klientów ani linków z tokenami do zgłoszeń, czatów i commitów** — tylko
 identyfikatory.
 
 ## Harmonogram (cron)
 
-```cron
-CRON_TZ=Europe/Warsaw
-0 6 * * *  cd /opt/radar-zamowien && node dist/main.js ingest >>/var/log/radar/ingest.log 2>&1
-30 6 * * * cd /opt/radar-zamowien && node dist/main.js status --notify >>/var/log/radar/status.log 2>&1
-30 7 * * * cd /opt/radar-zamowien && node dist/main.js digest >>/var/log/radar/digest.log 2>&1
-45 7 * * * cd /opt/radar-zamowien && node dist/main.js status --notify >>/var/log/radar/status.log 2>&1
-```
+Plik `deploy/cron/radar` (instalowany jako `/etc/cron.d/radar`, `DEPLOY.md` punkt 9). Godziny to
+czas lokalny hosta — strefa hosta `Europe/Warsaw` (`timedatectl`; cron Debiana/Ubuntu nie zna
+`CRON_TZ`):
+
+| Godzina | Zadanie                                | Log                         |
+| ------- | -------------------------------------- | --------------------------- |
+| 5:30    | `backup /var/backups/radar`            | `/var/log/radar/backup.log` |
+| 5:45    | retencja: zostaje 14 najnowszych kopii | —                           |
+| 6:00    | `ingest`                               | `/var/log/radar/ingest.log` |
+| 6:30    | `status --notify` (+ heartbeat)        | `/var/log/radar/status.log` |
+| 7:30    | `digest`                               | `/var/log/radar/digest.log` |
+| 7:45    | `status --notify` (+ heartbeat)        | `/var/log/radar/status.log` |
+
+Logi rotuje `deploy/logrotate/radar` (codziennie, 14 dni). `serve` nie jest w cronie — to unit
+systemd `radar-serve` (`journalctl -u radar-serve`).
 
 `status --notify` wymaga `OPERATOR_EMAIL` (adres operatora) i tych samych zmiennych e-mail co
 `digest` (`EMAIL_MODE=smtp`, `EMAIL_FROM`, `SMTP_URL`; w trybie `test` alert trafia tylko do
 `EMAIL_OUTBOX_DIR`). Po zmianie konfiguracji sprawdź ręcznie: `node dist/main.js status` (kod
 `0` — wszystko w porządku).
 
-Ścieżkę alertu sprawdź raz po skonfigurowaniu SMTP (`EMAIL_MODE=smtp`): np. pierwsze
-`node dist/main.js status --notify` przed pierwszym `ingest` zgłasza `source_never_run` — ten
-e-mail musi dojść do skrzynki operatora. Pamiętaj: `EMAIL_MODE=test` zapisuje alert tylko do
-outboxu, nikt go nie dostanie.
+Ścieżkę alertu sprawdź raz po skonfigurowaniu SMTP (`EMAIL_MODE=smtp`) celowym, nieszkodliwym
+problemem — nieistniejący `BACKUP_DIR` w linii poleceń (ma pierwszeństwo przed `--env-file`):
+
+```sh
+cd /opt/radar-zamowien && runuser -u radar -- env BACKUP_DIR=/nonexistent /usr/bin/node --env-file=/etc/radar/radar.env dist/main.js status --notify
+```
+
+Oczekiwane: kod `1`, `backup_dir_unreadable` w `problems`, `"heartbeat":"skipped"`, a e-mail z
+`backup_dir_unreadable` w temacie dochodzi do skrzynki operatora
+(`DEPLOY.md` punkt 13, „Próba ścieżki alertu”). Pamiętaj: `EMAIL_MODE=test` zapisuje alert
+tylko do outboxu, nikt go nie dostanie.
 
 ## Alert statusu
 
 Alert (temat `Radar Zamówień: problem (<kody>)`) przychodzi przy **każdym** uruchomieniu
 `status --notify`, dopóki problem trwa. Brak alertu **nie** dowodzi, że wszystko działa:
 problem mógł minąć, ale alert mógł się też nie wysłać albo `status` w ogóle się nie uruchomić
-(niżej, „Znane ograniczenie”) — sprawdź `/var/log/radar/status.log`. Bieżący stan zawsze pokaże:
+(niżej, „Heartbeat”) — sprawdź `/var/log/radar/status.log`. Bieżący stan zawsze pokaże:
 
 ```sh
 node dist/main.js status | jq .
@@ -58,6 +82,9 @@ Kody problemów i co zrobić (kilka kodów naraz — zacznij od pierwszego):
 | `source_stale`          | Od 36 h żaden przebieg źródła nie zakończył się `succeeded`/`incomplete`.                                                  | Sprawdź, czy cron uruchamia `ingest` (log crona, `/var/log/radar/ingest.log` — ostatnia linia z dzisiejszą datą). Uruchom `node dist/main.js ingest` ręcznie i obserwuj kod wyjścia.                                                                                |
 | `deliveries_pending`    | Wysyłki z niepewnym wynikiem czekają na decyzję operatora (a żaden `digest` nie trwa).                                     | Procedura „Wysyłki niepewne” niżej. Bez decyzji te oferty nie trafią do profilu, a profil z dzisiejszym `pending` nic dziś nie dostanie.                                                                                                                            |
 | `deliveries_failed`     | Wysyłki z dniem digestu od wczoraj się nie udały: „do ponowienia” (kolejny `digest` spróbuje sam) i „bez dalszych prób”.   | Kody `smtp_…` w alercie. Błąd konfiguracji (logowanie, TLS) — popraw `SMTP_URL`/`EMAIL_FROM`, kolejny `digest` wyśle. Odrzucony adres (np. `smtp_550`) — sprawdź adres profilu z klientem. Alert znika, gdy wysyłka się uda albo gdy błąd jest starszy niż wczoraj. |
+| `backup_dir_unreadable` | `BACKUP_DIR` nie da się odczytać (kod w alercie, np. `ENOENT` — brak katalogu, `EACCES` — brak uprawnień).                 | Sprawdź katalog i prawa: `ls -ld /var/backups/radar` (`radar:radar 0700`), wartość `BACKUP_DIR` w `/etc/radar/radar.env`.                                                                                                                                           |
+| `backup_missing`        | W `BACKUP_DIR` nie ma żadnej kopii `radar-<RRRRMMDDTGGMMSSZ>.dump`.                                                        | Pierwsze wdrożenie: `node dist/main.js backup /var/backups/radar`. Inaczej — `/var/log/radar/backup.log` i niżej, „Backup i odtworzenie”.                                                                                                                           |
+| `backup_stale`          | Najnowsza kopia (czas z nazwy pliku) jest starsza niż 26 h — nocny backup nie zadziałał (wychodzi w `status` z 7:45).      | Ostatnia linia `/var/log/radar/backup.log` (powód, np. `unreachable`, `version_mismatch`, `write_failed`), po naprawie `node dist/main.js backup /var/backups/radar` ręcznie.                                                                                       |
 
 Nieudany dzień jest w `source_failed` tylko, dopóki jego nieudany przebieg ma mniej niż 36 h;
 starszy przestaje być wymieniany. Trwająca awaria nie znika jednak z alertu: kolejne nieudane
@@ -68,7 +95,9 @@ przebiegi dają dalej `source_failed` (ostatni przebieg nieudany), a brak sukces
 Kody błędów przebiegu źródła (`error_code` w `ingestion_runs`): `http_status` (źródło odpowiedziało
 błędem — kod HTTP w `ingest.log`), `timeout`, `network`, `dns_failed`, `budget_exhausted`
 (za dużo błędów w przebiegu), `source_timeout` (10 min na dzień), `invalid_document` (źródło
-zmieniło format — wymaga poprawki adaptera, zgłoś jako nowy PR), `database_error`, `lock_lost`.
+zmieniło format — wymaga poprawki adaptera, zgłoś jako nowy PR), `database_error`, `lock_lost`,
+`blocked_address` (host źródła wskazuje na adres prywatny — sprawdź DNS i `/etc/hosts`, np.
+wpis pozostały po próbie z `DEPLOY.md` punkt 13).
 Przy `http_status` 403/429 **nie obchodzimy blokady** (brak CAPTCHA/anti-bot bypass,
 `docs/SECURITY.md` §7): poczekaj na kolejny cykl, a gdy trwa dłużej — wyłącz źródło i skontaktuj
 się z jego właścicielem.
@@ -85,23 +114,62 @@ Sam alert nie przyszedł, a powinien: sprawdź `/var/log/radar/status.log` (lini
 `"notification":"failed"` i komunikat `Operator alert not sent (<kod>)`) oraz skrzynkę
 spamu operatora.
 
-**Znane ograniczenie — brak „dead man's switch” (do PR-07B).** `status --notify` wysyła
-alert tym samym SMTP i z tego samego crona co reszta systemu. Gdy leży host, cron albo SMTP
-(np. `Operator alert not sent (smtp_535)` — odrzucone logowanie, `(smtp_econnrefused)` —
-serwer nieosiągalny), operator nie dostaje żadnego e-maila — cisza **nie** oznacza, że
-wszystko w porządku. Do czasu PR-07B sprawdzaj ręcznie codziennie (np. rano po 7:45):
+Kody `backup_…` pojawiają się tylko z ustawionym `BACKUP_DIR` (wdrożenie z `DEPLOY.md`:
+`/var/backups/radar`); wiersz `Kopia zapasowa: …` w alercie podaje stan, czas najnowszej kopii
+i liczbę plików.
+
+### Heartbeat („dead man's switch”)
+
+`status --notify` wysyła alert tym samym SMTP i z tego samego crona co reszta systemu. Gdy leży
+host, cron albo SMTP (np. `Operator alert not sent (smtp_535)` — odrzucone logowanie,
+`(smtp_econnrefused)` — serwer nieosiągalny), żaden e-mail nie dojdzie. Dlatego z ustawionym
+`HEARTBEAT_URL` każdy `status` z kodem `0` wysyła jeden ping do zewnętrznej usługi (konfiguracja:
+`DEPLOY.md` punkt 10), a ta alarmuje innym kanałem, gdy ping nie przyjdzie. **Alarm z usługi
+heartbeat** oznacza: `status` znalazł problem (wtedy był też alert e-mail — chyba że nie
+doszedł), nie uruchomił się (host, cron) albo ping się nie udał. Zacznij od:
 
 ```sh
+node dist/main.js status | jq .
 grep '"checkedAt"' /var/log/radar/status.log | tail -n 2  # raporty z 6:30 i 7:45
-grep '"digestDate"' /var/log/radar/digest.log | tail -n 1 # wynik dzisiejszego digest
+journalctl -u cron --since today | grep radar             # czy cron uruchomił zadania
 ```
 
-Obie linie `status` mają dzisiejszy `checkedAt` (UTC; 6:30 i 7:45 w Polsce to ta sama data) i
-nie mają `"notification":"failed"`; linia `digest` ma dzisiejszy `digestDate` i
-`"status":"ok"`. Brak linii, stara data albo `"failed"` — zacznij od
-`node dist/main.js status` i logu crona. PR-07B doda zewnętrzny heartbeat (ping do
-zewnętrznego endpointu po `status` z kodem `0`, alarm przy braku pingu) albo drugi kanał (np.
-`MAILTO` crona przez inny serwer pocztowy).
+W linii JSON `status` pole `heartbeat`: `sent` (ping przyjęty), `skipped` (kod `1` — był
+problem, pingu nie ma celowo), `failed` (ping nieudany; w logu `Heartbeat ping failed (<powód>)`,
+np. `timeout`, `http_404` — zły URL, `network_enotfound`), `disabled` (brak `HEARTBEAT_URL`).
+Nieudany ping nie zmienia kodu wyjścia ani nie jest ponawiany — kolejny `status` wyśle nowy.
+Ręczne `status` z kodem `0` też pinguje i przesuwa termin w usłudze heartbeat (liczony od
+ostatniego pingu) — alarm za brak porannych pingów przyjdzie wtedy później.
+
+Heartbeat **nie** obejmuje `serve` (strony): pingi wysyła `status` z crona. Dostępność strony
+sprawdza zewnętrzny monitoring `https://<domena>/zdrowie` (`DEPLOY.md` punkt 10). Alarm
+monitoringu:
+
+- **`503` z treścią `niedostępne`** — `serve` działa i odpowiada przez Caddy, ale nie dostał
+  odpowiedzi bazy na `select 1` w 2 s (baza nie działa, odrzuca połączenie z sandboksu
+  `serve` albo jest przeciążona). Kolejno:
+  1. `systemctl status postgresql` — baza działa?
+  2. `$RADAR health` (jako `radar`, poza sandboksem `serve`; `$RADAR` — `DEPLOY.md`
+     punkt 6) wypisuje JSON. `"database":{"status":"ok"}` tutaj (przy migracjach
+     zastosowanych całość to `"status":"ok"`, kod `0`), a `503` z `serve` → problem leży po
+     stronie unitu (`IPAddressAllow`, host w `DATABASE_URL` inny niż `localhost`/`127.0.0.1`)
+     albo w puli `serve` — `systemctl restart radar-serve`. `"database":{"status":"error",…}`
+     tutaj (`reason`/`code`) → to problem bazy, nie `serve`.
+  3. `journalctl -u radar-serve -n 200 | grep health_check_failed` — stały powód
+     (`reason`/`code`, np. `unreachable`/`ECONNREFUSED`, `authentication_failed`, `timeout`);
+     treści błędów ani danych w logu nie ma.
+- **brak odpowiedzi, timeout albo `502`** — nie działa `serve` lub Caddy: zacznij od
+  `systemctl status radar-serve`, `journalctl -u radar-serve -n 50` i
+  `journalctl -u caddy -n 50`.
+
+Bez `HEARTBEAT_URL` sprawdzaj ręcznie codziennie (np. rano po 7:45): obie linie `status` mają
+dzisiejszy `checkedAt` (UTC; 6:30 i 7:45 w Polsce to ta sama data) i nie mają
+`"notification":"failed"`; ostatnia linia `digest.log` ma dzisiejszy `digestDate` i
+`"status":"ok"`:
+
+```sh
+grep '"digestDate"' /var/log/radar/digest.log | tail -n 1 # wynik dzisiejszego digest
+```
 
 ## Źródła: włączanie i wyłączanie
 
@@ -204,7 +272,7 @@ node dist/main.js access:link <profileId>     # link jest sekretem — tylko wł
 Wymagany klient PostgreSQL ≥ 16 (`pg_dump --version`, `pg_restore --version`).
 
 ```sh
-install -d -m 0700 /var/backups/radar
+install -d -m 0700 -o radar -g radar /var/backups/radar   # DEPLOY.md punkt 5
 node dist/main.js backup /var/backups/radar
 # {"status":"ok","file":"/var/backups/radar/radar-<RRRRMMDDTGGMMSSZ>.dump","bytes":…,"schema":"public","tables":…}
 ```
@@ -220,18 +288,21 @@ node dist/main.js backup /var/backups/radar
   nadpisywania. Bez twardych dowiązań (np. część udziałów sieciowych, FAT/exFAT) → `write_failed`.
 - Plik ma prawa `0600` i **zawiera dane osobowe**. Kopia poza hostem — tylko zaszyfrowana
   (np. `age`/`gpg` przed wysłaniem) i w miejscu z ograniczonym dostępem.
-- **Do PR-07B backup i jego pilnowanie są ręczne.** `status` nie sprawdza backupów (PR-07B
-  doda kontrolę wieku najnowszego `radar-*.dump`): nieudany albo nieuruchomiony backup nie da
-  alertu. Dopisz backup do crona sam (codziennie przed `ingest`), sprawdzaj jego log i kod
-  wyjścia (np. przy cotygodniowym przeglądzie: dzisiejszy plik w `/var/backups/radar` i
-  `"status":"ok"` w ostatniej linii logu), kasuj ręcznie pliki starsze niż uzgodniona retencja
-  i rób ręcznie zaszyfrowaną kopię poza hostem. Przykładowa linia crona (ścieżki i plik logu
-  — przykład; w tej samej tabeli z `CRON_TZ=Europe/Warsaw`):
-
-  ```cron
-  30 5 * * * cd /opt/radar-zamowien && node dist/main.js backup /var/backups/radar >>/var/log/radar/backup.log 2>&1
-  ```
-
+- Automatycznie (`deploy/cron/radar`): backup codziennie o 5:30, o 5:45 retencja — zostaje 14
+  najnowszych plików `radar-*.dump`, starsze są usuwane. `status` (z `BACKUP_DIR`) zgłasza
+  `backup_missing` (brak kopii) albo `backup_stale` (najnowsza kopia starsza niż 26 h), więc
+  nieudany backup daje alert rano: jedna nieudana noc wychodzi w `status` z 7:45. Wyjątek:
+  nieudana tylko noc wiosennej zmiany czasu, po której następny backup się udał, nie jest
+  zgłaszana wcale; druga nieudana noc z rzędu wychodzi następnego dnia o 6:30. Przed
+  aktualizacją zrób backup ręcznie (`DEPLOY.md` punkt 15). Wynik każdego backupu: ostatnia
+  linia `/var/log/radar/backup.log`.
+- Kopia poza hostem — zaszyfrowana kluczem publicznym `age` (`DEPLOY.md` punkt 11); klucz
+  prywatny tylko u właściciela, poza VPS. Wysyłka bez usuwania (`rrsync -no-del`); retencję
+  (14 dni, według wieku pliku) robi serwer kopii.
+  `status` jej **nie** sprawdza — **co tydzień** ręcznie: najnowszy plik off-host ma < 48 h
+  (polecenie na serwerze kopii — `DEPLOY.md` punkt 11), a `/var/log/radar/offsite.log` nie
+  ma błędów (`tail -n 20 /var/log/radar/offsite.log`). Opcjonalny drugi check heartbeat
+  z serwera kopii — tamże.
 - Błąd → kod `1` i stały powód, np. `tool_not_found` (brak klienta 16+), `version_mismatch`
   (klient starszy niż serwer), `authentication_failed`, `unreachable`, `file_exists`
   (backup z tej samej sekundy już jest). Nic nie zostaje na dysku.
@@ -250,25 +321,39 @@ Jako administrator PostgreSQL:
 sudo -u postgres createdb --owner=radar radar_restore_drill
 ```
 
-Potem, jako aplikacja, z plikiem środowiska dla bazy próbnej (prawa `0600`, poza
-repozytorium), np. `/etc/radar/restore-drill.env` z jedną linią
+Potem, jako aplikacja, z plikiem środowiska dla bazy próbnej (poza repozytorium; czytelny
+tylko dla aplikacji — przy wdrożeniu z `DEPLOY.md` `root:radar 0640`), np.
+`/etc/radar/restore-drill.env` z jedną linią
 `DATABASE_URL=postgres://radar:<hasło>@<host>:5432/radar_restore_drill` (ta sama rola, inna
 baza; hasło nie trafia do linii poleceń). `env -i` uruchamia bez zmiennych produkcji, które
 inaczej miałyby pierwszeństwo przed plikiem:
 
 ```sh
-DRILL='env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/nonexistent node --env-file=/etc/radar/restore-drill.env dist/main.js'
+DRILL='runuser -u radar -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/nonexistent /usr/bin/node --env-file=/etc/radar/restore-drill.env dist/main.js'
 $DRILL restore /var/backups/radar/radar-<czas>.dump
 # {"status":"ok","schema":"public","tables":{"company_profiles":…,"opportunities":…,…},"pendingMigrations":[],…}
 $DRILL health
 ```
 
-Porównaj liczby wierszy z produkcją
-(`SELECT count(*) FROM company_profiles;` itd.; produkcja mogła się w międzyczasie zmienić
-o dzisiejsze przebiegi). Potem usuń bazę próbną — zawiera dane osobowe:
+Porównaj liczby wierszy z `tables` z wyniku `restore` z produkcją (produkcja mogła się w
+międzyczasie zmienić o dzisiejsze przebiegi i wysyłki). **Liczby wierszy** produkcji
+(`sudo -u postgres psql -d radar`):
+
+```sql
+SELECT 'sources' AS tabela, count(*) FROM sources
+UNION ALL SELECT 'ingestion_runs', count(*) FROM ingestion_runs
+UNION ALL SELECT 'opportunities', count(*) FROM opportunities
+UNION ALL SELECT 'company_profiles', count(*) FROM company_profiles
+UNION ALL SELECT 'deliveries', count(*) FROM deliveries
+UNION ALL SELECT 'access_tokens', count(*) FROM access_tokens
+UNION ALL SELECT 'sessions', count(*) FROM sessions;
+```
+
+Potem usuń bazę próbną — zawiera dane osobowe — i plik środowiska:
 
 ```sh
 sudo -u postgres dropdb radar_restore_drill
+rm /etc/radar/restore-drill.env
 ```
 
 `restore` odmawia (`target_not_empty`), gdy w schemacie docelowym jest jakakolwiek tabela,
@@ -277,19 +362,21 @@ pusty. Kod `1` z `not_migrated` — backup sprzed nowszej wersji aplikacji: uruc
 
 ### Awaria: odtworzenie produkcji
 
-1. Zatrzymaj cron i `serve` (nic nie może pisać do bazy).
-2. Utwórz nową, pustą bazę (`createdb --owner=radar radar_new`) i odtwórz do niej najnowszy
-   backup jak w próbie wyżej; sprawdź `health` i liczby wierszy.
-3. Przełącz `DATABASE_URL` aplikacji na nową bazę, uruchom `serve`, potem cron. Pierwszy
-   `ingest` nadrobi brakujące dni (do 31).
+1. Zatrzymaj cron i `serve` (nic nie może pisać do bazy):
+   `mv /etc/cron.d/radar /root/radar.cron.disabled`, `systemctl stop radar-serve`.
+2. Utwórz nową, pustą bazę (`sudo -u postgres createdb --owner=radar radar_new`) i odtwórz do niej najnowszy
+   backup jak w próbie wyżej; sprawdź `health` i liczby wierszy (`tables` z `restore`).
+3. Przełącz `DATABASE_URL` w `/etc/radar/radar.env` na nową bazę, uruchom `serve`
+   (`systemctl start radar-serve`), potem cron (plik z powrotem do `/etc/cron.d/radar`) i smoke
+   test (`DEPLOY.md` punkt 12). Pierwszy `ingest` nadrobi brakujące dni (do 31).
 4. Wysyłki od czasu backupu nie są zapisane: klient może dostać część ofert drugi raz.
 5. Starej bazy nie usuwaj bez potwierdzenia właściciela projektu (`docs/SECURITY.md` §14).
 
 ## Reverse proxy: logi
 
 Ścieżki `/dostep/…` (logowanie) i `/wypis/…` (wypis) zawierają tokeny dające dostęp do
-profilu. **Proxy nie może zapisywać tych ścieżek w logach dostępu** — wyłącz log dla tych
-ścieżek albo zapisuj ścieżkę przyciętą (np. tylko `/dostep`). To samo dotyczy narzędzi
-monitoringu i APM przed aplikacją. HSTS ustawia sama aplikacja (`max-age=31536000`, bez
-`includeSubDomains`) — proxy nie dodaje drugiego nagłówka. Konfiguracja proxy i hostingu —
-PR-07B.
+profilu. **Proxy nie może zapisywać tych ścieżek w logach dostępu.** `deploy/caddy/Caddyfile`
+pomija je w logu dostępu (`log_skip`), a nagłówki `Cookie`/`Authorization` Caddy domyślnie
+maskuje. Przy zmianie konfiguracji proxy zachowaj oba; to samo dotyczy narzędzi monitoringu i
+APM przed aplikacją. HSTS ustawia sama aplikacja (`max-age=31536000`, bez `includeSubDomains`)
+— proxy nie dodaje drugiego nagłówka (smoke test sprawdza dokładnie jeden).

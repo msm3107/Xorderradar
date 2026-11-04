@@ -8,17 +8,18 @@ i informuje firmę tylko o tych, które faktycznie do niej pasują.
 źródła → pobranie → normalizacja → deduplikacja → dopasowanie → alert
 ```
 
-> Status: **PR-06B (ekrany klienta) — w toku**. Repozytorium zawiera szkielet
+> Status: **PR-07B (wdrożenie pilotażowe) — w toku**. Repozytorium zawiera szkielet
 > projektu, model domenowy (`Source`, `Opportunity`, `CompanyProfile`), schemat PostgreSQL z
 > migracjami, repozytoria, bezpieczny klient HTTP, pierwszy adapter źródła (BZP przez oficjalne
 > API platformy e-Zamówienia), zapis ogłoszeń z deduplikacją i wykrywaniem zmian, zmiany
 > terminów z ogłoszeń o zmianie, nadrabianie pominiętych dni, opis, kontakt i wartość ofert
 > BZP odczytane z treści ogłoszenia, deterministyczny matching ofert do profilu firmy z
 > wyjaśnieniem, dzienny digest e-mail, dostęp do profilu z linku w e-mailu (serwer web,
-> sesja, wypis jednym kliknięciem), ekrany klienta (formularz profilu, lista dopasowań) oraz
-> komendy CLI `health`, `migrate`, `source:preview`, `ingest`, `profile:create`,
-> `profile:show`, `match:preview`, `digest`, `serve`, `access:link` i `access:revoke`.
-> Wdrożenie powstaje w kolejnym PR-ze — patrz
+> sesja, wypis jednym kliknięciem), ekrany klienta (formularz profilu, lista dopasowań),
+> raport i alerty operatora, backup i odtworzenie, komendy CLI `health`, `migrate`,
+> `source:preview`, `ingest`, `profile:create`, `profile:show`, `match:preview`, `digest`,
+> `serve`, `access:link`, `access:revoke`, `status`, `backup` i `restore` oraz artefakty
+> wdrożenia na VPS (`deploy/`, [`docs/DEPLOY.md`](docs/DEPLOY.md)) — patrz
 > [`docs/PR_PLAN.md`](docs/PR_PLAN.md) i [`docs/STATE.md`](docs/STATE.md).
 
 ## Wymagania
@@ -69,7 +70,7 @@ Sprawdzenie `source:preview` (AC1): kod wyjścia 0, `normalized` > 0, a w logach
 | `serve`                                                                                     | Serwer web (PR-06A, PR-06B): strony logowania z linku, profilu, ustawień, dopasowań i wypisu na `WEB_HOST:WEB_PORT` (domyślnie `127.0.0.1:3000`), za reverse proxy z TLS. Wymaga `PUBLIC_BASE_URL` i aktualnego schematu bazy; działa do SIGINT/SIGTERM (łagodne zatrzymanie, kod `0`). Szczegóły — niżej, „Serwer web (`serve`)”.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `access:link <profileId>`                                                                   | Wydaje link logowania do profilu (jednorazowy, ważny 7 dni) i wypisuje `{"status":"ok","url":…,"expiresAt":…}` na stdout. **Link jest sekretem** — daje dostęp do profilu; przekazuj go tylko właścicielowi profilu. Wymaga `PUBLIC_BASE_URL`; nieznany profil → `1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `access:revoke <profileId>`                                                                 | Unieważnia naraz wszystkie linki (logowania i wypisu) i sesje profilu, w jednej transakcji — reakcja na przekazany dalej e-mail albo zgubione urządzenie. Wypisuje tylko liczby: `{"status":"ok","tokens":…,"sessions":…}`. Profil i powiadomienia bez zmian; nie wymaga `PUBLIC_BASE_URL`; nieznany profil → `1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `status [--notify]`                                                                         | Raport operatora (PR-07A, D-028) — jedna linia JSON na stdout: dla każdego włączonego źródła ostatni przebieg, ostatni sukces (`succeeded`/`incomplete`) i nieudane dni z ostatnich 36 h niepokryte później, oraz wysyłki `pending` (gdy nie trwa `digest`) i `failed` od wczorajszego dnia digestu. Problemy: `source_failed`, `source_stale` (brak sukcesu od 36 h), `source_never_run`, `no_enabled_sources`, `deliveries_pending`, `deliveries_failed`, `schema_not_ready`, `database_unavailable`, `status_internal_error` (nieoczekiwany błąd samego `status`, alert bez szczegółów). Tylko odczyt, bez blokady. Kod `0` — brak problemów, `1` — jest problem. `--notify`: przy problemie wysyła też jeden e-mail tekstowy (identyfikatory, kody, czasy, liczby — bez adresów i tytułów) na `OPERATOR_EMAIL` przez `EMAIL_MODE` (`test`: do `EMAIL_OUTBOX_DIR`); co uruchomienie, dopóki problem trwa; nieudana wysyłka → `1`. Co robić: [`docs/RUNBOOK.md`](docs/RUNBOOK.md) → „Alert statusu”.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `status [--notify]`                                                                         | Raport operatora (PR-07A, D-028) — jedna linia JSON na stdout: dla każdego włączonego źródła ostatni przebieg, ostatni sukces (`succeeded`/`incomplete`) i nieudane dni z ostatnich 36 h niepokryte później, oraz wysyłki `pending` (gdy nie trwa `digest`) i `failed` od wczorajszego dnia digestu. Problemy: `source_failed`, `source_stale` (brak sukcesu od 36 h), `source_never_run`, `no_enabled_sources`, `deliveries_pending`, `deliveries_failed`, `schema_not_ready`, `database_unavailable`, `status_internal_error` (nieoczekiwany błąd samego `status`, alert bez szczegółów), a z `BACKUP_DIR` (PR-07B) także `backup_dir_unreadable`, `backup_missing`, `backup_stale` (najnowsza kopia `radar-*.dump` starsza niż 26 h; pole `backup`). Tylko odczyt, bez blokady. Kod `0` — brak problemów, `1` — jest problem. `--notify`: przy problemie wysyła też jeden e-mail tekstowy (identyfikatory, kody, czasy, liczby — bez adresów i tytułów) na `OPERATOR_EMAIL` przez `EMAIL_MODE` (`test`: do `EMAIL_OUTBOX_DIR`); co uruchomienie, dopóki problem trwa; nieudana wysyłka → `1`. Z `HEARTBEAT_URL` (PR-07B): przy kodzie `0` jeden `GET` na ten adres (10 s, bez przekierowań i ponowień; pole `heartbeat`: `sent`/`failed`/`skipped`/`disabled`); nieudany ping nie zmienia kodu wyjścia. Co robić: [`docs/RUNBOOK.md`](docs/RUNBOOK.md) → „Alert statusu”.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `backup <dir>`                                                                              | Zrzut schematu aplikacji (`pg_dump` ≥ 16, format custom, bez właścicieli i uprawnień) do nowego pliku `<dir>/radar-<czas UTC>.dump` (`0600`, nigdy nie nadpisuje istniejącego) i `{"status":"ok","file":…,"bytes":…,"schema":…,"tables":…}` na stdout. **Plik zawiera dane osobowe** (adresy e-mail profili). Hasło z `DATABASE_URL` trafia do `pg_dump` tylko przez zmienną środowiskową procesu potomnego, nigdy przez argumenty. Błąd → `1`, bez pozostawionego pliku. Szczegóły — niżej, „Backup i odtworzenie”.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `restore <file>`                                                                            | Odtwarza backup (`pg_restore` ≥ 16, jedna transakcja — wszystko albo nic) do schematu z `DATABASE_URL`, tylko gdy ten schemat istnieje i jest **pusty** (nigdy na dane); potem sprawdza migracje jak `health` i wypisuje liczbę wierszy w każdej tabeli. Schemat niepusty, błąd odtwarzania albo oczekujące migracje → `1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
@@ -111,13 +112,15 @@ kod wyjścia zostaje `0`. Nieprawidłowy profil w bazie kończy komendę kodem `
 ### Cron
 
 `ingest` uruchamiamy raz dziennie ok. **06:00 czasu polskiego** bez opcji dnia — nadrabianie
-pobiera zwykle tylko wczoraj (UTC, dzień już zamknięty), a po przerwie także pominięte dni. Przykład (crontab z obsługą `CRON_TZ`, np. cronie;
-zmienne środowiskowe ustawione w crontabie lub w skrypcie opakowującym, nie w `.env`):
+pobiera zwykle tylko wczoraj (UTC, dzień już zamknięty), a po przerwie także pominięte dni.
+Gotowy harmonogram to [`deploy/cron/radar`](deploy/cron/radar) (`/etc/cron.d/radar`,
+[`docs/DEPLOY.md`](docs/DEPLOY.md)): backup 5:30, retencja 5:45, `ingest` 6:00,
+`status --notify` 6:30, `digest` 7:30, `status --notify` 7:45 — czas lokalny hosta, więc strefa
+hosta to `Europe/Warsaw` (cron Debiana/Ubuntu nie obsługuje `CRON_TZ`). Konfiguracja z
+`/etc/radar/radar.env` przez `node --env-file=…`, nie z `.env` w katalogu kodu:
 
 ```cron
-CRON_TZ=Europe/Warsaw
-0 6 * * * cd /opt/radar-zamowien && node dist/main.js ingest >>/var/log/radar/ingest.log 2>&1
-30 6 * * * cd /opt/radar-zamowien && node dist/main.js status --notify >>/var/log/radar/status.log 2>&1
+0 6 * * * radar cd /opt/radar-zamowien && /usr/bin/node --env-file=/etc/radar/radar.env dist/main.js ingest >>/var/log/radar/ingest.log 2>&1
 ```
 
 `status --notify` po `ingest` (i po `digest`, niżej) wysyła operatorowi alert na `OPERATOR_EMAIL`,
@@ -235,13 +238,9 @@ Nieoczekiwany błąd wewnętrzny kończy komendę kodem `1` ze stałym komunikat
 
 ### Digest (e-mail)
 
-`digest` uruchamiamy raz dziennie **po `ingest`**, np. o 07:30 czasu polskiego (ten sam
-crontab z `CRON_TZ=Europe/Warsaw`):
-
-```cron
-30 7 * * * cd /opt/radar-zamowien && node dist/main.js digest >>/var/log/radar/digest.log 2>&1
-45 7 * * * cd /opt/radar-zamowien && node dist/main.js status --notify >>/var/log/radar/status.log 2>&1
-```
+`digest` uruchamiamy raz dziennie **po `ingest`** — w
+[`deploy/cron/radar`](deploy/cron/radar) o 7:30 czasu polskiego, a o 7:45 drugi
+`status --notify` sprawdza jego wysyłki.
 
 - **Tryb `test` (domyślny, `EMAIL_MODE=test`)** — nic nie wychodzi z maszyny: każdy e-mail to
   plik `.eml` (gotowa wiadomość MIME) i `.json` (temat, tekst, HTML) w `EMAIL_OUTBOX_DIR`
@@ -307,8 +306,10 @@ crontab z `CRON_TZ=Europe/Warsaw`):
 ### Serwer web (`serve`)
 
 `serve` to jedyny długo działający proces (PR-06A, PR-06B, D-025–D-027): `node:http` bez
-frameworka, strony HTML bez JavaScriptu. Uruchamiany jako usługa (np. unit systemd z
-`Restart=on-failure`), nie z crona; wymaga wykonanego `migrate`.
+frameworka, strony HTML bez JavaScriptu. Uruchamiany jako usługa (unit systemd
+[`deploy/systemd/radar-serve.service`](deploy/systemd/radar-serve.service) z
+`Restart=on-failure`, za Caddy z TLS — [`deploy/caddy/Caddyfile`](deploy/caddy/Caddyfile)),
+nie z crona; wymaga wykonanego `migrate`.
 
 ```sh
 PUBLIC_BASE_URL=https://radar.example.invalid node dist/main.js serve
@@ -380,6 +381,9 @@ PUBLIC_BASE_URL=https://radar.example.invalid node dist/main.js serve
   `/dopasowania` (także innego klienta) czeka w kolejce (najwyżej 8 wejść, najwyżej 3 s); przy
   pełnej kolejce albo po 3 s dostaje 503 z `Retry-After: 5` i prośbą o ponowienie za kilka
   sekund. Na proxy ustaw limit żądań dla tej ścieżki (PR-07).
+- **Zdrowie (PR-07B, D-029):** `GET`/`HEAD /zdrowie` — `200` z treścią `ok`, gdy `serve`
+  dostał odpowiedź z bazy (`select 1`) w 2 s, inaczej `503` (`niedostępne`); zwykły tekst,
+  `no-store`, bez sesji i bez szczegółów błędu. Dla monitoringu dostępności i smoke testu.
 - **Sprzątanie:** `serve` co godzinę usuwa wygasłe tokeny i sesje (bez osobnego crona).
 - **Logi:** jedna linia na żądanie (metoda, nazwa trasy, status, czas) — bez URL-i, tokenów,
   ciasteczek i adresów.
@@ -424,9 +428,17 @@ Aplikacja czyta konfigurację **wyłącznie ze zmiennych środowiskowych** proce
   (wraz ze zmiennymi e-mail wyżej — ten sam transport co `digest`). Brak →
   `OPERATOR_EMAIL is required for status --notify.`; błędny →
   `Invalid e-mail configuration: OPERATOR_EMAIL` (bez wartości). Kod `1`.
+- **Kopia i heartbeat (`status`, PR-07B):** `BACKUP_DIR` — ścieżka bezwzględna katalogu
+  backupów; ustawiona → `status` sprawdza wiek najnowszej kopii. `HEARTBEAT_URL` — adres
+  `https://` (bez danych logowania i `#`) pingowany po `status` z kodem `0`; zawiera token, więc
+  jest sekretem i nigdy nie jest wypisywany. Obie opcjonalne, czytane tylko przez `status`.
+  Błąd → `Invalid status configuration: <nazwy zmiennych>`, kod `1`.
 - **Produkcja / cron:** bezpośrednie `node dist/main.js …` **nie czyta** `.env`. Zmienne
   eksportuje środowisko uruchomieniowe (crontab, unit systemd, panel hostingu). Kto chce
   użyć pliku, podaje go jawnie: `node --env-file=/ścieżka/do/pliku dist/main.js health`.
+  Wdrożenie z [`docs/DEPLOY.md`](docs/DEPLOY.md) robi tak wszędzie (unit systemd, cron):
+  `/etc/radar/radar.env` (`root:radar 0640`, wzór [`deploy/radar.env.example`](deploy/radar.env.example)
+  — bez cudzysłowów, `#` i `$` w wartościach).
 - Testy (`pnpm test`) nie czytają `.env` — przekazują jawne, minimalne środowisko.
 
 ## Baza danych
@@ -473,13 +485,14 @@ transakcji. Wymagany klient PostgreSQL **16 lub nowszy** (`pg_dump`, `pg_restore
 np. `apt install postgresql-client-16`) — nie starszy niż serwer.
 
 ```bash
-install -d -m 0700 /var/backups/radar
+install -d -m 0700 -o radar -g radar /var/backups/radar
 node dist/main.js backup /var/backups/radar    # {"status":"ok","file":"/var/backups/radar/radar-20261102T050000Z.dump",…}
 ```
 
 - Plik `radar-<RRRRMMDDTGGMMSSZ>.dump` ma prawa `0600` i **zawiera dane osobowe** (adresy
   e-mail i ustawienia profili, historia wysyłek) — trzymaj go tylko u właściciela i
-  zaszyfrowany poza tą maszyną (retencja i kopia poza hostem — PR-07B). Istniejący plik nigdy
+  zaszyfrowany poza tą maszyną (retencja 14 kopii i zaszyfrowana kopia poza hostem:
+  [`docs/DEPLOY.md`](docs/DEPLOY.md), `deploy/cron/radar`). Istniejący plik nigdy
   nie jest nadpisywany; przy błędzie nic nie zostaje.
 - Hasło z `DATABASE_URL` nie trafia do argumentów ani na wyjście: narzędzia dostają adres bez
   hasła, a hasło w zmiennej `PGPASSWORD` swojego procesu. Wszystkie ustawienia
@@ -532,3 +545,4 @@ oznaczają „nie ustawiono”.
 | [`docs/DECISIONS.md`](docs/DECISIONS.md)         | Rejestr decyzji (ADR)                                |
 | [`docs/STATE.md`](docs/STATE.md)                 | Aktualny stan prac                                   |
 | [`docs/RUNBOOK.md`](docs/RUNBOOK.md)             | Procedury operatora: alerty, źródła, wysyłki, backup |
+| [`docs/DEPLOY.md`](docs/DEPLOY.md)               | Wdrożenie na VPS: instalacja, aktualizacja, powrót   |

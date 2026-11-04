@@ -1487,3 +1487,96 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
   ≠ wszystko w porządku; ręczna kontrola — `docs/RUNBOOK.md`). Dwa żądania `/dopasowania`
   jednej sesji to nadal dwa miejsca w kolejce. Profil zapisany wcześniej ze znakiem sterującym
   trzeba poprawić przy następnym zapisie formularza (formularz pokaże błąd przy polu).
+
+## D-029 — Hosting pilotażu: VPS, systemd, cron, Caddy; wiek kopii i heartbeat w `status`
+
+- **Status:** Accepted (PR-07B; decyzja właściciela z 2026-11-03)
+- **Kontekst:** pilot potrzebuje powtarzalnego wdrożenia na jednym hoście, a D-028 zostawił
+  dwie luki: nieudany albo nieuruchomiony backup nie dawał alertu, a przy martwym hoście,
+  cronie lub SMTP operator nie dostawał nic (cisza ≠ wszystko w porządku).
+- **Decyzja:**
+  - **Hosting:** jeden VPS (Debian 12 albo Ubuntu 24.04), PostgreSQL 16 z PGDG na tym samym
+    hoście (tylko `localhost`), Node 22 (NodeSource), Caddy z repozytorium Caddy jako reverse
+    proxy z TLS (automatyczne certyfikaty i przekierowanie HTTP → HTTPS). `serve` — unit
+    systemd `deploy/systemd/radar-serve.service` (użytkownik `radar`, hardening, bez zapisu na
+    dysk, ruch IP tylko z/do loopbacka, `Restart=on-failure`); pozostałe komendy — cron hosta
+    `deploy/cron/radar` (format `/etc/cron.d`, użytkownik `radar`). Konfiguracja w jednym
+    pliku `/etc/radar/radar.env` (`root:radar 0640`), czytanym przez `node --env-file` w unicie
+    i w cronie — ta sama ścieżka i te same flagi wszędzie; plik zgodny też z `EnvironmentFile=`
+    systemd (bez cudzysłowów, `#`, `$`, `\` w wartościach — `deploy/radar.env.example`).
+    Kod w `/opt/radar-zamowien` należy do konta administratora, nie do `radar`: proces nie może
+    zmienić własnego kodu.
+  - **Strefa czasowa crona:** cron Debiana/Ubuntu (vixie cron 3.0pl1) nie obsługuje `CRON_TZ`
+    (przykład w RUNBOOK z PR-07A działałby w strefie hosta). Host ma strefę `Europe/Warsaw`
+    (`timedatectl`), a godziny w pliku crona są czasem lokalnym. Aplikacja liczy dni Polski
+    sama (jawna strefa) — od strefy hosta zależą tylko godziny startu. Żadne zadanie nie
+    startuje między 2:00 a 3:00, więc zmiana czasu nic nie pomija ani nie powtarza.
+  - **Retencja kopii:** linia crona zostawia **14 najnowszych** plików `radar-<czas>.dump`
+    (po nazwie = po czasie), zamiast kasować starsze niż N dni (`find -mtime`): gdy backup
+    przestaje działać, ostatnie dobre kopie nigdy nie znikają.
+  - **Wiek kopii w `status`:** opcjonalny `BACKUP_DIR` (ścieżka bezwzględna). Jeden `readdir`
+    i filtr nazw — liczą się tylko zwykłe pliki o nazwie dokładnie takiej, jaką daje
+    `backup` (`radar-RRRRMMDDTGGMMSSZ.dump`, ścisłe parsowanie z kontrolą w obie strony; pliki
+    `.partial`, kopie, katalogi, dowiązania i niemożliwe daty są pomijane), a czas pochodzi z
+    nazwy, nie z `mtime` (kopiowanie i odtwarzanie katalogu zmienia `mtime`; bez `stat`
+    każdego pliku). Nazwy ponad 5 min w przyszłości są pomijane (ukryłyby starą kopię).
+    Problemy (na końcu stałej kolejności): `backup_dir_unreadable` (kod errno, np. `ENOENT`,
+    `EACCES` — nigdy ścieżka), `backup_missing`, `backup_stale` — najnowsza kopia starsza niż
+    26 h (`BACKUP_STALE_AFTER_MS`), dobrane do harmonogramu (backup 5:30, `status` 6:30 i
+    7:45, czas polski): jedna nieudana noc wychodzi w `status` z 7:45 (najnowsza kopia ma wtedy
+    26 h 15 min; o 6:30 — 25 h, jeszcze bez alertu); bez awarii żaden `status`, także ręczny
+    tuż przed kolejnym 5:30 albo w dniu jesiennej zmiany czasu, nie widzi więcej niż ok.
+    24–25 h, więc nie ma fałszywego alarmu; dwie nieudane noce — już o 6:30 (49 h). Znana luka:
+    w dniu wiosennej zmiany czasu (doba 23 h) `status` z 7:45 widzi 25 h 15 min, więc gdy nie uda
+    się tylko backup z tej nocy, a następny się uda, awaria **nie zostanie zgłoszona wcale**;
+    dopiero druga nieudana noc z rzędu wychodzi następnego dnia o 6:30 (48 h). Nie 36 h jak dla źródeł — 36 h przepuściłoby
+    jedną nieudaną noc bez alertu. Przy codziennych kopiach utrata danych to zwykle najwyżej
+    ok. 1 dzień (ok. 2 dni, gdy w dniu wiosennej zmiany czasu nie udadzą się dwie noce z rzędu). Sprawdzane także przy nieczytelnej bazie; bez
+    `BACKUP_DIR` zachowanie bez zmian (`backup: null`).
+  - **Heartbeat („dead man's switch”):** opcjonalny `HEARTBEAT_URL` (tylko `https:`, z hostem,
+    bez danych logowania i fragmentu; **sekret** — usługi trzymają token w ścieżce, więc nigdy
+    nie trafia do logu, stdout ani komunikatu błędu konfiguracji). Po `status` z kodem `0`
+    (bez problemu i bez nieudanego alertu) jeden `GET` — także bez `--notify`: brak pingu jest
+    alarmem, a ping zależy od wyniku, nie od flagi. Kod `1` → brak pingu (`heartbeat:
+"skipped"`). GET, bo przyjmuje go każda usługa heartbeat i nie ma treści do wysłania.
+    `node:https` bezpośrednio (`src/operations/heartbeat.ts`), **nie SafeHttpClient** — D-014
+    dotyczy stron źródeł (allowlista hostów, limity tempa, budżet błędów); tu jest jedno żądanie
+    do jednego adresu podanego przez operatora, ograniczone w miejscu: 10 s na całość
+    (`HEARTBEAT_TIMEOUT_MS`; ogranicza wynik, nie czas życia procesu — trwającego zapytania DNS
+    `getaddrinfo` nie da się przerwać, więc proces może poczekać do limitu resolvera; kod
+    wyjścia i logi są wtedy już ustalone), żadne przekierowanie nie jest śledzone (3xx = `http_3xx`),
+    treść odpowiedzi nie jest czytana, nowe połączenie bez keep-alive, **bez ponowienia** —
+    `status` biegnie dwa razy rano, a okres karencji usługi pokrywa jeden zgubiony ping;
+    ponowienie wydłużałoby `status` bez zysku. Nieudany ping nie zmienia kodu wyjścia
+    (system działa, a brak pingu i tak zaalarmuje): log `warn` z `errorCode:
+"heartbeat_failed"` i stałym powodem (`timeout`, `http_<status>`, `network[_<errno>]`),
+    linia na stderr, `heartbeat: "failed"` w JSON. Pole `heartbeat`: `sent`, `failed`,
+    `disabled` (bez URL), `skipped`.
+  - **`GET`/`HEAD /zdrowie` w `serve`:** `200 ok` tylko, gdy proces `serve` — w swoim
+    sandboxie systemd — dostał odpowiedź z bazy (`select 1` przez istniejącą pulę) w 2 s,
+    inaczej `503`; zwykły tekst, `no-store`, bez sesji, bez danych i treści błędu (w logu
+    stały kod `health_check_failed` i powód). Jedno zapytanie naraz, wspólne dla równoległych
+    żądań — zalew `/zdrowie` zajmuje najwyżej jedno połączenie z puli, także przy zawieszonej
+    bazie. Cel: zewnętrzny monitoring dostępności i smoke test — heartbeat `status` nie
+    obejmuje `serve`. Ograniczanie liczby żądań na proxy — poza PR-07B.
+  - **Kopia poza hostem:** zaszyfrowana `age` kluczem publicznym (klucz prywatny poza VPS)
+    i wysyłana zadaniem crona użytkownika `radar` w osobnym pliku `/etc/cron.d/radar-offsite`
+    (aktualizacja zastępuje `/etc/cron.d/radar`) — przykład w `docs/DEPLOY.md`, bez kodu w
+    aplikacji. Wysyłka bez `--delete`, na serwerze kopii `rrsync -wo -no-del`, retencja według
+    wieku po stronie serwera kopii: przejęty VPS nie usunie kopii poza hostem.
+- **Odrzucone alternatywy:** kontenery i zarządzana baza (poza zakresem, więcej elementów
+  przy 10–100 klientach); `CRON_TZ` (nieobsługiwany przez cron Debiana); systemd timers
+  zamiast crona (decyzja właściciela: cron; RUNBOOK już go opisuje); `EnvironmentFile=` w
+  unicie (dwie drogi wczytania tego samego pliku — cron i tak używa `--env-file`);
+  `copytruncate` w logrotate (zbędne: każde zadanie otwiera log od nowa); wiek kopii z
+  `mtime`; heartbeat przez SafeHttpClient (allowlista i limity źródeł nie pasują do jednego
+  adresu operatora, a jego seamy testowe są zakazane w `src/`); ponowienie pingu (wyżej);
+  ping także przy problemie z innym statusem (usługi `/fail`) — alert e-mail już to robi, a
+  brak pingu wystarcza; `MAILTO` crona jako drugi kanał (wymaga drugiego serwera poczty);
+  rate limiting w Caddy (moduł spoza dystrybucji — limit `/dopasowania` zostaje w aplikacji).
+- **Konsekwencje:** brak albo stara kopia daje alert jak każdy problem (także kod `1`
+  i brak heartbeatu). Heartbeat alarmuje, gdy host, cron, baza albo `status` nie działa,
+  także przy martwym SMTP — o ile operator skonfiguruje usługę (okres 1 dzień, karencja ok.
+  1 h). Pierwszy `status` przed pierwszym backupem zgłasza `backup_missing`. Ręczne
+  `status` z ustawionym `HEARTBEAT_URL` też pinguje. Pierwsze wdrożenie, smoke test i
+  odtworzenie kopii na VPS robi właściciel ręcznie według `docs/DEPLOY.md`.

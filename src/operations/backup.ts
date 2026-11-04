@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { link, open, rm, stat } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { link, open, readdir, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { Kysely } from "kysely";
 import { pendingMigrations } from "../infrastructure/db/database.js";
@@ -332,6 +333,68 @@ export function backupFileName(now: Date): string {
     .replace(/[-:]/g, "")
     .replace(/\.\d{3}Z$/, "Z");
   return `radar-${stamp}.dump`;
+}
+
+const BACKUP_FILE_NAME = /^radar-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z\.dump$/;
+
+/**
+ * The time in a name written by backupFileName, or null for any other name
+ * (temporary `.partial` files, copies, impossible dates such as month 13: the
+ * name must be exactly what backupFileName gives for that time).
+ */
+export function parseBackupFileName(name: string): Date | null {
+  const match = BACKUP_FILE_NAME.exec(name);
+  if (match === null) return null;
+  const [, year, month, day, hour, minute, second] = match.map(Number);
+  const at = new Date(
+    Date.UTC(year ?? 0, (month ?? 0) - 1, day ?? 0, hour ?? 0, minute ?? 0, second ?? 0),
+  );
+  return backupFileName(at) === name ? at : null;
+}
+
+/** Names this far ahead of the clock are ignored: they would hide a stale backup. */
+export const BACKUP_FUTURE_TOLERANCE_MS = 5 * 60_000;
+
+export interface BackupDirectoryState {
+  /** The backup files found (regular files named by backupFileName); null when unreadable. */
+  readonly files: number | null;
+  /** The time in the newest name; null when there is none or the directory is unreadable. */
+  readonly newestAt: Date | null;
+  /** The errno code (ENOENT, EACCES, ENOTDIR, …) when the directory could not be read. */
+  readonly unreadableCode: string | null;
+}
+
+/**
+ * What `status` checks of BACKUP_DIR (PR-07B, D-029): one readdir and a name
+ * filter — no stat or open of the files. The time comes from the name, not
+ * the mtime: a copy or a restore of the directory resets mtimes, and the name
+ * is when the dump started. Never throws.
+ */
+export async function readBackupDirectory(
+  directory: string,
+  now: Date,
+): Promise<BackupDirectoryState> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    return {
+      files: null,
+      newestAt: null,
+      unreadableCode: typeof code === "string" && /^E[A-Z0-9]+$/.test(code) ? code : "unknown",
+    };
+  }
+  let files = 0;
+  let newestAt: Date | null = null;
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const at = parseBackupFileName(entry.name);
+    if (at === null || at.getTime() > now.getTime() + BACKUP_FUTURE_TOLERANCE_MS) continue;
+    files += 1;
+    if (newestAt === null || at > newestAt) newestAt = at;
+  }
+  return { files, newestAt, unreadableCode: null };
 }
 
 export interface ToolOptions {

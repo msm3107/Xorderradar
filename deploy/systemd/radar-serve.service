@@ -1,0 +1,69 @@
+# Radar Zamówień — the web server (`serve`), PR-07B, docs/DEPLOY.md.
+# Install: /etc/systemd/system/radar-serve.service, then
+#   systemctl daemon-reload && systemctl enable --now radar-serve
+#
+# `serve` listens on 127.0.0.1:3000 (WEB_HOST/WEB_PORT) behind Caddy, which
+# terminates TLS. Its logs (JSON lines on stderr) go to journald:
+#   journalctl -u radar-serve
+# The other commands (ingest, digest, status, backup) run from cron, not here.
+
+[Unit]
+Description=Radar Zamówień web server
+Documentation=file:///opt/radar-zamowien/docs/DEPLOY.md
+# PostgreSQL 16 runs on the same host (docs/DEPLOY.md).
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=radar
+Group=radar
+WorkingDirectory=/opt/radar-zamowien
+# The environment comes from Node's own --env-file, the same file and flag as
+# in deploy/cron/radar; deploy/radar.env.example keeps it readable by
+# systemd's EnvironmentFile= too. The file is root:radar 0640.
+ExecStart=/usr/bin/node --env-file=/etc/radar/radar.env dist/main.js serve
+# SIGTERM starts the graceful shutdown (open requests finish, the pool closes).
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=5
+
+# --- Hardening (systemd-analyze security radar-serve) ---
+# `serve` writes nothing to disk (no outbox, no backup, logs to journald), so
+# the whole file system is read-only for it and no ReadWritePaths= is needed.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+# No capability at all: port 3000 needs none.
+CapabilityBoundingSet=
+AmbientCapabilities=
+# TCP to PostgreSQL and from Caddy; AF_UNIX for a local PostgreSQL socket.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Only the loopback: Caddy connects from it and PostgreSQL is reached over it.
+# `serve` makes no outbound request. With a database on another host, add its
+# address to IPAddressAllow=.
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+# MemoryDenyWriteExecute= is deliberately NOT set: V8's JIT compiler needs
+# memory that is writable and executable, and Node aborts without it.
+
+[Install]
+WantedBy=multi-user.target

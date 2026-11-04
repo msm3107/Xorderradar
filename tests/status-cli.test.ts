@@ -1,7 +1,7 @@
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ExitCode,
   INTERNAL_ERROR_MESSAGE,
@@ -9,7 +9,13 @@ import {
   type CliDatabase,
   type CliDigestDeps,
 } from "../src/cli.js";
-import { BackupError, type BackupResult, type RestoreResult } from "../src/operations/backup.js";
+import {
+  BackupError,
+  backupFileName,
+  type BackupResult,
+  type RestoreResult,
+} from "../src/operations/backup.js";
+import type { HeartbeatResult } from "../src/operations/heartbeat.js";
 import { evaluateStatus, type StatusReport } from "../src/operations/status.js";
 import {
   createEmailSender,
@@ -67,6 +73,8 @@ interface Options {
   restore?: RestoreResult | Error;
   /** The real sender (EMAIL_MODE=test: the outbox) instead of the fake one. */
   realSender?: boolean;
+  /** Results of the heartbeat pings, in order (default: sent). */
+  pings?: HeartbeatResult[];
 }
 
 /**
@@ -84,8 +92,10 @@ async function run(args: string[], options: Options = {}) {
     toolEnv: null as Readonly<Record<string, string | undefined>> | null,
     backupDir: null as string | null,
     restoreFile: null as string | null,
+    pinged: [] as string[],
   };
   const sends = [...(options.sends ?? [])];
+  const pings = [...(options.pings ?? [])];
   const database: CliDatabase = {
     ping: () => Promise.resolve(),
     migrate: () => Promise.resolve([]),
@@ -148,6 +158,13 @@ async function run(args: string[], options: Options = {}) {
         return database;
       },
       digest,
+      // A fake heartbeat: nothing reaches the network.
+      status: {
+        ping: (url) => {
+          calls.pinged.push(url);
+          return Promise.resolve(pings.shift() ?? { ok: true });
+        },
+      },
     },
   );
   return { code, stdout, stderr, calls };
@@ -383,6 +400,226 @@ describe("status --notify", () => {
     expect(json(result.stdout)).toMatchObject({ status: "problem", notification: "failed" });
     expect(result.stderr).toContain("Operator alert not sent (smtp_rejected).\n");
     expect(result.calls.senderClosed).toBe(1);
+  });
+});
+
+describe("status with BACKUP_DIR (PR-07B)", () => {
+  let root: string;
+  let count = 0;
+
+  beforeAll(async () => {
+    root = await mkdtemp(join(tmpdir(), "radar-status-backups-"));
+  });
+
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  /** A fresh directory holding (empty) files of these names. */
+  async function backups(...names: string[]): Promise<string> {
+    count++;
+    const dir = join(root, `case-${String(count)}`);
+    await mkdir(dir);
+    for (const name of names) await writeFile(join(dir, name), "");
+    return dir;
+  }
+
+  const HOUR = 60 * 60_000;
+  const hoursAgo = (hours: number) => backupFileName(new Date(NOW.getTime() - hours * HOUR));
+
+  it("is null in the report without BACKUP_DIR", async () => {
+    const result = await run(["status"]);
+    expect(json(result.stdout)).toMatchObject({ status: "ok", backup: null });
+  });
+
+  it("stays ok with a recent backup and reports its time and the count", async () => {
+    const dir = await backups(hoursAgo(26), hoursAgo(2), "notes.txt");
+    const result = await run(["status"], { env: { BACKUP_DIR: dir } });
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(json(result.stdout)).toMatchObject({
+      status: "ok",
+      problems: [],
+      backup: {
+        status: "ok",
+        newestAt: new Date(NOW.getTime() - 2 * HOUR).toISOString(),
+        files: 2,
+        code: null,
+      },
+    });
+    expect(result.stderr).toBe("");
+  });
+
+  it("exits 1 on a stale backup", async () => {
+    const dir = await backups(hoursAgo(37));
+    const result = await run(["status"], { env: { BACKUP_DIR: dir } });
+    expect(result.code).toBe(ExitCode.Failure);
+    expect(json(result.stdout)).toMatchObject({
+      status: "problem",
+      problems: ["backup_stale"],
+      backup: { status: "stale", files: 1 },
+    });
+    expect(result.stderr).toBe("Status: problem (backup_stale); see docs/RUNBOOK.md.\n");
+  });
+
+  it("exits 1 when only other names are there", async () => {
+    const dir = await backups(
+      `.${hoursAgo(1)}.00000000-0000-4000-8000-000000000001.partial`,
+      "radar-20261399T043000Z.dump",
+      "radar.dump",
+    );
+    const result = await run(["status"], { env: { BACKUP_DIR: dir } });
+    expect(result.code).toBe(ExitCode.Failure);
+    expect(json(result.stdout)).toMatchObject({
+      problems: ["backup_missing"],
+      backup: { status: "missing", newestAt: null, files: 0 },
+    });
+  });
+
+  it("reports a directory it cannot read by its code, never by its path", async () => {
+    const dir = join(root, "Pq7-absent-backup-dir");
+    const result = await run(["status", "--notify"], {
+      env: { BACKUP_DIR: dir, OPERATOR_EMAIL: OPERATOR, LOG_LEVEL: "debug" },
+    });
+    expect(result.code).toBe(ExitCode.Failure);
+    expect(json(result.stdout)).toMatchObject({
+      problems: ["backup_dir_unreadable"],
+      backup: { status: "unreadable", newestAt: null, files: null, code: "ENOENT" },
+    });
+    const [email] = result.calls.sent;
+    expect(email?.subject).toBe("Radar Zamówień: problem (backup_dir_unreadable)");
+    expect(email?.text).toContain("Kopia zapasowa: unreadable, katalog nieczytelny (ENOENT)\n");
+    for (const output of [result.stdout, result.stderr, email?.text ?? ""]) {
+      expect(output).not.toContain("Pq7-absent-backup-dir");
+    }
+  });
+
+  it("is checked also when the database cannot be read", async () => {
+    const dir = await backups(hoursAgo(1));
+    const result = await run(["status"], {
+      env: { BACKUP_DIR: dir },
+      collectError: Object.assign(new Error("refused"), { code: "ECONNREFUSED" }),
+    });
+    expect(json(result.stdout)).toMatchObject({
+      problems: ["database_unavailable"],
+      backup: { status: "ok", files: 1 },
+    });
+  });
+
+  it("refuses a relative BACKUP_DIR before the database is opened", async () => {
+    const result = await run(["status"], { env: { BACKUP_DIR: "backups" } });
+    expect(result.code).toBe(ExitCode.Failure);
+    expect(result.stderr).toBe("Invalid status configuration: BACKUP_DIR\n");
+    expect(result.calls.opened).toBe(0);
+  });
+});
+
+describe("status with HEARTBEAT_URL (PR-07B)", () => {
+  const TOKEN = "Kq3-not-a-real-heartbeat-token";
+  const HEARTBEAT_URL = `https://hc.example.invalid/ping/${TOKEN}`;
+  // Every log line too: the URL must not be in any of them.
+  const env = { HEARTBEAT_URL, LOG_LEVEL: "debug" };
+
+  function expectNoUrl(result: { stdout: string; stderr: string }): void {
+    expect(result.stdout + result.stderr).not.toContain(TOKEN);
+    expect(result.stdout + result.stderr).not.toContain("hc.example.invalid");
+  }
+
+  it("is disabled without HEARTBEAT_URL", async () => {
+    const result = await run(["status"]);
+    expect(json(result.stdout)).toMatchObject({ heartbeat: "disabled" });
+    expect(result.calls.pinged).toEqual([]);
+  });
+
+  it("pings once after a run without a problem", async () => {
+    const result = await run(["status"], { env });
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(result.calls.pinged).toEqual([HEARTBEAT_URL]);
+    expect(json(result.stdout)).toMatchObject({
+      status: "ok",
+      heartbeat: "sent",
+    });
+    expect(result.stderr).toContain('"message":"status checked"');
+    expect(result.stderr).toContain('"heartbeat":"sent"');
+    expectNoUrl(result);
+  });
+
+  it("pings with --notify too, when nothing was to be sent", async () => {
+    const result = await run(["status", "--notify"], { env: { ...env, OPERATOR_EMAIL: OPERATOR } });
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(json(result.stdout)).toMatchObject({ notification: "not_needed", heartbeat: "sent" });
+    expect(result.calls.pinged).toHaveLength(1);
+  });
+
+  it.each([
+    ["a problem", { report: PROBLEM_REPORT }],
+    [
+      "a database that cannot be read",
+      { collectError: Object.assign(new Error("x"), { code: "ECONNREFUSED" }) },
+    ],
+    ["a schema that is not migrated", { pending: ["0001_init"] }],
+  ])("skips the ping on %s (exit 1)", async (_label, options: Options) => {
+    const result = await run(["status"], { env, ...options });
+    expect(result.code).toBe(ExitCode.Failure);
+    expect(json(result.stdout)).toMatchObject({ status: "problem", heartbeat: "skipped" });
+    expect(result.calls.pinged).toEqual([]);
+  });
+
+  it("skips the ping on a problem even when its alert was sent", async () => {
+    const result = await run(["status", "--notify"], {
+      env: { ...env, OPERATOR_EMAIL: OPERATOR },
+      report: PROBLEM_REPORT,
+    });
+    expect(json(result.stdout)).toMatchObject({ notification: "sent", heartbeat: "skipped" });
+    expect(result.calls.pinged).toEqual([]);
+  });
+
+  it("does not ping after an unexpected error", async () => {
+    const result = await run(["status"], { env, collectError: new Error("bug") });
+    expect(result.stderr.endsWith(INTERNAL_ERROR_MESSAGE)).toBe(true);
+    expect(result.calls.pinged).toEqual([]);
+  });
+
+  it.each(["timeout", "http_404", "http_302", "network_econnrefused"])(
+    "keeps exit 0 when the ping fails (%s), logging heartbeat_failed and the reason only",
+    async (reason) => {
+      const result = await run(["status"], { env, pings: [{ ok: false, reason }] });
+      expect(result.code).toBe(ExitCode.Ok);
+      expect(result.calls.pinged).toHaveLength(1);
+      expect(json(result.stdout)).toMatchObject({ status: "ok", heartbeat: "failed" });
+      const logs = result.stderr
+        .split("\n")
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(logs).toContainEqual(
+        expect.objectContaining({
+          level: "warn",
+          message: "heartbeat failed",
+          errorCode: "heartbeat_failed",
+          reason,
+        }),
+      );
+      expect(result.stderr.endsWith(`Heartbeat ping failed (${reason}).\n`)).toBe(true);
+      expectNoUrl(result);
+    },
+  );
+
+  it("refuses a HEARTBEAT_URL that is not https, without echoing it", async () => {
+    const result = await run(["status"], {
+      env: { HEARTBEAT_URL: `http://hc.example.invalid/ping/${TOKEN}` },
+    });
+    expect(result.code).toBe(ExitCode.Failure);
+    expect(result.stderr).toBe("Invalid status configuration: HEARTBEAT_URL\n");
+    expect(result.calls.opened).toBe(0);
+    expectNoUrl(result);
+  });
+
+  it("is not read by the other commands", async () => {
+    const result = await run(["backup", "/var/backups/radar"], {
+      env: { HEARTBEAT_URL: "not-a-url", BACKUP_DIR: "relative" },
+      backup: { file: "/var/backups/radar/x.dump", bytes: 1, schema: "public", tables: 1 },
+    });
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(result.calls.pinged).toEqual([]);
   });
 });
 
