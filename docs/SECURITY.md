@@ -351,6 +351,11 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   odczytu; HSTS tylko z aplikacji. `serve` jako unit systemd z hardeningiem (bez uprawnień,
   tylko odczyt systemu plików, ruch sieciowy tylko z/do `localhost`). Firewall hosta: z
   zewnątrz tylko 22/80/443; PostgreSQL tylko na `localhost`.
+- **`/zdrowie` (PR-07B, D-029):** bez uwierzytelnienia — `GET`/`HEAD`,
+  stała treść (`ok` / `niedostępne`), bez danych, bez sesji i CSRF, `no-store`. Jedno sprawdzenie
+  bazy naraz, wspólne dla równoległych żądań (zalew zajmuje najwyżej jedno połączenie z puli);
+  zawieszone zostaje wspólne do ok. 40 s (5 s na połączenie z puli + 35 s `query_timeout`),
+  a żądania dostają w tym czasie `503` po 2 s. Limit żądań na proxy — poza PR-07B.
 - **Sprzątanie:** `serve` co godzinę usuwa wygasłe tokeny i sesje (po 1000 na przebieg).
 
 ## 12. Logging policy

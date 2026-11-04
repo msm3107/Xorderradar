@@ -6,7 +6,8 @@
 #
 # Without an argument the origin is PUBLIC_BASE_URL from the env file.
 # Checks: `health` and `status` as the radar user, the radar-serve unit, the
-# public front page (200 with exactly one HSTS header) and the HTTP -> HTTPS
+# public front page (200 with exactly one HSTS header), /zdrowie (200 "ok":
+# serve itself, inside its sandbox, reaches PostgreSQL) and the HTTP -> HTTPS
 # redirect. Prints one PASS/FAIL line per check and nothing else: no command
 # output (it may carry configuration) and no value from the env file except
 # the origin, which is public. Exit 0 only when every check passed.
@@ -74,6 +75,11 @@ code=$(printf '%s\n' "$headers" | sed -n '1s/^HTTP\/[0-9.]* \([0-9][0-9][0-9]\).
 hsts=$(printf '%s\n' "$headers" | grep -ci '^strict-transport-security:' || true)
 if [ "$code" = 200 ]; then pass "front page 200"; else fail "front page 200"; fi
 if [ "$hsts" = 1 ]; then pass "one HSTS header"; else fail "one HSTS header"; fi
+
+# serve's own database check through the proxy: 200 with the body "ok"
+# (--fail: a 503 gives no body).
+zdrowie=$(curl -fsS --max-time 10 --proto '=https' "$origin/zdrowie" 2>/dev/null || true)
+if [ "$zdrowie" = ok ]; then pass "/zdrowie ok"; else fail "/zdrowie ok"; fi
 
 # Plain HTTP is redirected to HTTPS by Caddy.
 redirect=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code} %{redirect_url}' "http://$host/" 2>/dev/null || true)

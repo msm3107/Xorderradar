@@ -4,8 +4,9 @@ Current phase: PHASE 4 — PILOT
 Current PR: PR-07B — Wdrożenie na VPS (repozytorium)
 Status: PR-07A **MERGED in PR #12 (b622851)**. PR-07B (systemd + cron, PostgreSQL 16 on the same
 VPS, Caddy, heartbeat URL from env; the VPS has direct outbound HTTPS) **PR READY for the owner's
-review**: Code & Safety Review PASS (round 4 + polish confirmation), Quality Review ACCEPT
-(round 2); not merged. Deployment itself and the drills are the owner's manual steps on the VPS
+re-review** (PR #13): owner review of 4d85cab PASS with QoL asks, addressed in an owner-review
+round (`/zdrowie`, off-host age check): Code & Safety Review PASS (round 6, confirmations 6b/7), Quality
+Review ACCEPT (round 3); not merged. Deployment itself and the drills are the owner's manual steps on the VPS
 (`docs/DEPLOY.md` §13).
 
 ## Completed
@@ -662,6 +663,24 @@ unchanged, no proxy support needed).
   optional Lows → C&S PASS. One existing test changed deliberately: the env-example test expects
   `heartbeatUrl: null` (the example ships `HEARTBEAT_URL=` empty) and gained an assertion that a
   filled-in https URL is accepted (C&S: justified).
+- Owner review of 4d85cab (PR #13): PASS, no blockers (`systemd-analyze security` exposure 1.4
+  „OK”, cron, smoke, heartbeat and backup check verified; Caddyfile not validated locally). QoL
+  asks → owner-review round:
+  - `GET`/`HEAD /zdrowie` in `serve` (`src/web/server.ts`): `select 1` through the existing pool,
+    one shared in-flight probe (a flood holds at most one connection), each request waits ≤ 2 s
+    → 503; a hung probe stays shared until the pool ends it (~40 s: 5 s acquire + 35 s
+    `query_timeout`); 200 `ok` / 503 `niedostępne`, `text/plain`, `no-store`, same security
+    headers, 405 + `Allow: GET, HEAD` for other methods, fixed log code `health_check_failed`.
+    `deploy/smoke.sh` and the external uptime check (DEPLOY §10) target it, so a sandbox or DB
+    failure of `serve` is no longer silent.
+  - Off-host copy: weekly check on the backup server that the newest file is < 48 h, what to do
+    on `BRAK`, optional second heartbeat from the backup user's crontab (URL in a 0600 file read
+    with `curl -K`, never in cron lines, argv or logs). RUNBOOK: `/zdrowie` 503 triage.
+  - Proxy rate limiting stays out of PR-07B (Next action).
+  - Reviews: C&S PASS (round 6; L-1 an existing test's sleeps 50 → 300 ms against flakiness,
+    assertions unchanged; L-2 ~40 s wording; L-3 SECURITY line → added, C&S PASS 6b) → Quality
+    ACCEPT (round 3; Lows: next step on `BRAK`, GET with keyword vs. status only, `health` JSON
+    wording) → copy round → C&S PASS. 1904 tests (+10).
 - Not verifiable in the container (owner, on the VPS): `caddy validate` and the redaction check,
   systemd/cron install, smoke test, restore/alert/source-error drills, AC1.
 
@@ -721,7 +740,8 @@ token redaction, backup-age check in `status`, heartbeat).
 
 ## Next action
 
-1. PR-07B: owner review of the PR (not merged by the agents); check CI on its head. After the
+1. PR-07B: owner re-review of PR #13 after the owner-review round (not merged by the agents);
+   check CI on its head. After the
    merge, the owner's manual steps on the VPS (`docs/DEPLOY.md` §13 checklist): first deploy,
    smoke test, first data and AC1, Caddy redaction check, heartbeat set up, off-host copy,
    restore drill, alert-path drill, source-error drill. Still open from PR-06B: last write wins,
@@ -950,6 +970,12 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-04, PR-07B owner-review round (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 1904 tests passed in 55 files,
+none skipped (run by the coder, C&S round 6 and Quality round 3). Full `pnpm audit`: unchanged
+(1 moderate, dev-only minimatch via eslint). No dependency changes; no e-mail sent.
+Working-tree fingerprint unchanged across every reviewer run.
 
 2026-11-03, PR-07B before the PR (Node 22, pnpm 10.28.0, PostgreSQL 16, pg_dump/pg_restore 16):
 `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test REQUIRE_DB_TESTS=1 pnpm check`

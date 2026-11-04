@@ -20,6 +20,7 @@ import {
   getProfileSettings,
   updateProfileSettings,
 } from "../infrastructure/db/company-profiles-repository.js";
+import { pingDatabase } from "../infrastructure/db/database.js";
 import { describeDatabaseFailure } from "../infrastructure/db/errors.js";
 import type { Database } from "../infrastructure/db/schema.js";
 import type { Logger } from "../infrastructure/logger.js";
@@ -109,6 +110,11 @@ export const MATCHES_MAX_WAITERS = 8;
 export const MATCHES_MAX_PER_SESSION = 2;
 /** HSTS for an https PUBLIC_BASE_URL: one year, this host only (D-028). */
 const STRICT_TRANSPORT_SECURITY = "max-age=31536000";
+/**
+ * Longest wait of GET /zdrowie for the database before the 503 (D-029): a hung
+ * database answers 503 quickly instead of a hanging request.
+ */
+export const HEALTH_TIMEOUT_MS = 2000;
 /** How often `serve` deletes expired tokens and sessions (bounded batches). */
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 /** How long `close()` waits for open requests before cutting the connections. */
@@ -122,6 +128,7 @@ type Method = "GET" | "HEAD" | "POST";
 
 type RouteName =
   | "home"
+  | "health"
   | "stylesheet"
   | "login_link"
   | "login"
@@ -150,6 +157,8 @@ function matchRoute(path: string): RouteMatch | null {
       return { name: "home", allow: PAGE };
     case "/styl.css":
       return { name: "stylesheet", allow: PAGE };
+    case "/zdrowie":
+      return { name: "health", allow: PAGE };
     case "/dostep":
       return { name: "login", allow: FORM };
     case "/profil":
@@ -388,6 +397,10 @@ export interface WebServerOptions {
   readonly matchesMaxWaitMs?: number;
   /** Most requests waiting for the /dopasowania slot (tests). Default: MATCHES_MAX_WAITERS. */
   readonly matchesMaxWaiters?: number;
+  /** Longest wait of /zdrowie for the database (tests). Default: HEALTH_TIMEOUT_MS. */
+  readonly healthTimeoutMs?: number;
+  /** The database check of /zdrowie (tests). Default: `select 1` over `db`. */
+  readonly healthProbe?: () => Promise<void>;
 }
 
 export interface WebServer {
@@ -414,6 +427,63 @@ interface ServerState {
    * never the cookie value); an entry is removed when its count drops to 0.
    */
   readonly matchesPerSession: Map<string, number>;
+  /** GET /zdrowie: true when the database answered in time (createHealthCheck). */
+  readonly health: () => Promise<boolean>;
+}
+
+/**
+ * The database check of GET /zdrowie (D-029). One probe at a time, shared by
+ * all concurrent requests: a flood of checks holds at most one pooled
+ * connection. A probe still running when a request's wait runs out (a hung
+ * database) stays shared until it settles — the pool's query timeout ends it —
+ * so a hung database never gets a second one. Failures are logged once per
+ * probe, as fixed codes only.
+ */
+function createHealthCheck(
+  probe: () => Promise<void>,
+  timeoutMs: number,
+  logger: Logger,
+): () => Promise<boolean> {
+  let inFlight: { readonly done: Promise<boolean>; timeoutLogged: boolean } | null = null;
+  return async () => {
+    if (inFlight === null) {
+      const current = {
+        done: probe().then(
+          () => true,
+          (error: unknown) => {
+            logger.warn("health check failed", {
+              errorCode: "health_check_failed",
+              ...describeDatabaseFailure(error),
+            });
+            return false;
+          },
+        ),
+        timeoutLogged: false,
+      };
+      inFlight = current;
+      void current.done.finally(() => {
+        if (inFlight === current) inFlight = null;
+      });
+    }
+    const check = inFlight;
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => {
+        resolve("timeout");
+      }, timeoutMs);
+    });
+    try {
+      const result = await Promise.race([check.done, timedOut]);
+      if (result !== "timeout") return result;
+      if (!check.timeoutLogged) {
+        check.timeoutLogged = true;
+        logger.warn("health check failed", { errorCode: "health_check_failed", reason: "timeout" });
+      }
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 }
 
 /**
@@ -434,6 +504,15 @@ async function handle(
     switch (route.name) {
       case "home":
         return pageReply(homePage());
+      case "health": {
+        // Plain text without any detail: only whether this process reaches the database.
+        const healthy = await state.health();
+        return {
+          status: healthy ? 200 : 503,
+          body: healthy ? "ok\n" : "niedostępne\n",
+          contentType: "text/plain; charset=utf-8",
+        };
+      }
       case "stylesheet":
         return {
           status: 200,
@@ -599,6 +678,7 @@ async function handle(
       return redirectToProfile(unsubscribe ? "wypisano" : "wlaczono");
     }
     case "home":
+    case "health":
     case "stylesheet":
     case "login_link":
     case "profile":
@@ -750,6 +830,11 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       maxWaiters: options.matchesMaxWaiters ?? MATCHES_MAX_WAITERS,
     }),
     matchesPerSession: new Map(),
+    health: createHealthCheck(
+      options.healthProbe ?? (() => pingDatabase(options.db)),
+      options.healthTimeoutMs ?? HEALTH_TIMEOUT_MS,
+      logger,
+    ),
   };
   const https = options.publicBaseUrl.startsWith("https:");
 

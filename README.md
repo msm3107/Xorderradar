@@ -381,6 +381,9 @@ PUBLIC_BASE_URL=https://radar.example.invalid node dist/main.js serve
   `/dopasowania` (także innego klienta) czeka w kolejce (najwyżej 8 wejść, najwyżej 3 s); przy
   pełnej kolejce albo po 3 s dostaje 503 z `Retry-After: 5` i prośbą o ponowienie za kilka
   sekund. Na proxy ustaw limit żądań dla tej ścieżki (PR-07).
+- **Zdrowie (PR-07B, D-029):** `GET`/`HEAD /zdrowie` — `200` z treścią `ok`, gdy `serve`
+  dostał odpowiedź z bazy (`select 1`) w 2 s, inaczej `503` (`niedostępne`); zwykły tekst,
+  `no-store`, bez sesji i bez szczegółów błędu. Dla monitoringu dostępności i smoke testu.
 - **Sprzątanie:** `serve` co godzinę usuwa wygasłe tokeny i sesje (bez osobnego crona).
 - **Logi:** jedna linia na żądanie (metoda, nazwa trasy, status, czas) — bez URL-i, tokenów,
   ciasteczek i adresów.

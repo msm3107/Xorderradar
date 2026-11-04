@@ -244,6 +244,8 @@ describe("deploy/caddy/Caddyfile", () => {
       "https://radar.example.invalid/dostep/REDACTED",
     );
     expect(redact("/profil")).toBe("/profil");
+    // /zdrowie is logged as is (DEPLOY §10): neither redacted nor matched by @token.
+    expect(redact("/zdrowie")).toBe("/zdrowie");
   });
 });
 
@@ -300,6 +302,7 @@ describe("deploy/smoke.sh", () => {
       curl: [
         "for arg; do url=$arg; done",
         "case $url in",
+        'https://*/zdrowie) [ "${FAKE_ZDROWIE:-200}" = 200 ] || exit 22; printf "ok\\n" ;;',
         'https://*) printf "HTTP/2 %s\\r\\n" "${FAKE_CODE:-200}"; [ "${FAKE_HSTS:-1}" -ge 1 ] && printf "strict-transport-security: max-age=31536000\\r\\n"; [ "${FAKE_HSTS:-1}" -ge 2 ] && printf "Strict-Transport-Security: max-age=1\\r\\n"; printf "\\r\\n" ;;',
         'http://*) printf "%s" "${FAKE_REDIRECT:-308 https://radar.example.invalid/}" ;;',
         "esac",
@@ -340,6 +343,7 @@ describe("deploy/smoke.sh", () => {
         "PASS radar-serve is active",
         "PASS front page 200",
         "PASS one HSTS header",
+        "PASS /zdrowie ok",
         "PASS http redirects to https",
         "Smoke test passed",
         "",
@@ -355,13 +359,14 @@ describe("deploy/smoke.sh", () => {
     [{ FAKE_CODE: "502" }, "FAIL front page 200"],
     [{ FAKE_HSTS: "0" }, "FAIL one HSTS header"],
     [{ FAKE_HSTS: "2" }, "FAIL one HSTS header"],
+    [{ FAKE_ZDROWIE: "503" }, "FAIL /zdrowie ok"],
     [{ FAKE_REDIRECT: "200 " }, "FAIL http redirects to https"],
     [{ FAKE_REDIRECT: "308 https://elsewhere.example.invalid/" }, "FAIL http redirects to https"],
   ])("fails on %j and still runs the other checks", (fake, line) => {
     const result = smoke(fake);
     expect(result.code).toBe(1);
     expect(result.stdout.split("\n")).toContain(line);
-    expect(result.stdout.split("\n").filter((l) => l.startsWith("PASS"))).toHaveLength(5);
+    expect(result.stdout.split("\n").filter((l) => l.startsWith("PASS"))).toHaveLength(6);
     expect(result.stdout.endsWith("Smoke test FAILED\n")).toBe(true);
   });
 

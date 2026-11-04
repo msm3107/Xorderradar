@@ -142,9 +142,25 @@ Ręczne `status` z kodem `0` też pinguje i przesuwa termin w usłudze heartbeat
 ostatniego pingu) — alarm za brak porannych pingów przyjdzie wtedy później.
 
 Heartbeat **nie** obejmuje `serve` (strony): pingi wysyła `status` z crona. Dostępność strony
-sprawdza zewnętrzny monitoring HTTPS strony głównej `PUBLIC_BASE_URL` (`DEPLOY.md` punkt 10);
-jego alarm — zacznij od `systemctl status radar-serve`, `journalctl -u radar-serve -n 50` i
-`journalctl -u caddy -n 50`.
+sprawdza zewnętrzny monitoring `https://<domena>/zdrowie` (`DEPLOY.md` punkt 10). Alarm
+monitoringu:
+
+- **`503` z treścią `niedostępne`** — `serve` działa i odpowiada przez Caddy, ale nie dostał
+  odpowiedzi bazy na `select 1` w 2 s (baza nie działa, odrzuca połączenie z sandboksu
+  `serve` albo jest przeciążona). Kolejno:
+  1. `systemctl status postgresql` — baza działa?
+  2. `$RADAR health` (jako `radar`, poza sandboksem `serve`; `$RADAR` — `DEPLOY.md`
+     punkt 6) wypisuje JSON. `"database":{"status":"ok"}` tutaj (przy migracjach
+     zastosowanych całość to `"status":"ok"`, kod `0`), a `503` z `serve` → problem leży po
+     stronie unitu (`IPAddressAllow`, host w `DATABASE_URL` inny niż `localhost`/`127.0.0.1`)
+     albo w puli `serve` — `systemctl restart radar-serve`. `"database":{"status":"error",…}`
+     tutaj (`reason`/`code`) → to problem bazy, nie `serve`.
+  3. `journalctl -u radar-serve -n 200 | grep health_check_failed` — stały powód
+     (`reason`/`code`, np. `unreachable`/`ECONNREFUSED`, `authentication_failed`, `timeout`);
+     treści błędów ani danych w logu nie ma.
+- **brak odpowiedzi, timeout albo `502`** — nie działa `serve` lub Caddy: zacznij od
+  `systemctl status radar-serve`, `journalctl -u radar-serve -n 50` i
+  `journalctl -u caddy -n 50`.
 
 Bez `HEARTBEAT_URL` sprawdzaj ręcznie codziennie (np. rano po 7:45): obie linie `status` mają
 dzisiejszy `checkedAt` (UTC; 6:30 i 7:45 w Polsce to ta sama data) i nie mają
@@ -283,9 +299,10 @@ node dist/main.js backup /var/backups/radar
 - Kopia poza hostem — zaszyfrowana kluczem publicznym `age` (`DEPLOY.md` punkt 11); klucz
   prywatny tylko u właściciela, poza VPS. Wysyłka bez usuwania (`rrsync -no-del`); retencję
   (14 dni, według wieku pliku) robi serwer kopii.
-  `status` jej **nie** sprawdza — **co tydzień** ręcznie: na serwerze kopii jest plik
-  `radar-<dzisiejsza data>…dump.age`, a `/var/log/radar/offsite.log` nie ma błędów
-  (`tail -n 20 /var/log/radar/offsite.log`).
+  `status` jej **nie** sprawdza — **co tydzień** ręcznie: najnowszy plik off-host ma < 48 h
+  (polecenie na serwerze kopii — `DEPLOY.md` punkt 11), a `/var/log/radar/offsite.log` nie
+  ma błędów (`tail -n 20 /var/log/radar/offsite.log`). Opcjonalny drugi check heartbeat
+  z serwera kopii — tamże.
 - Błąd → kod `1` i stały powód, np. `tool_not_found` (brak klienta 16+), `version_mismatch`
   (klient starszy niż serwer), `authentication_failed`, `unreachable`, `file_exists`
   (backup z tej samej sekundy już jest). Nic nie zostaje na dysku.

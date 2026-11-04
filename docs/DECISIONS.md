@@ -1552,6 +1552,13 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
 "heartbeat_failed"` i stałym powodem (`timeout`, `http_<status>`, `network[_<errno>]`),
     linia na stderr, `heartbeat: "failed"` w JSON. Pole `heartbeat`: `sent`, `failed`,
     `disabled` (bez URL), `skipped`.
+  - **`GET`/`HEAD /zdrowie` w `serve`:** `200 ok` tylko, gdy proces `serve` — w swoim
+    sandboxie systemd — dostał odpowiedź z bazy (`select 1` przez istniejącą pulę) w 2 s,
+    inaczej `503`; zwykły tekst, `no-store`, bez sesji, bez danych i treści błędu (w logu
+    stały kod `health_check_failed` i powód). Jedno zapytanie naraz, wspólne dla równoległych
+    żądań — zalew `/zdrowie` zajmuje najwyżej jedno połączenie z puli, także przy zawieszonej
+    bazie. Cel: zewnętrzny monitoring dostępności i smoke test — heartbeat `status` nie
+    obejmuje `serve`. Ograniczanie liczby żądań na proxy — poza PR-07B.
   - **Kopia poza hostem:** zaszyfrowana `age` kluczem publicznym (klucz prywatny poza VPS)
     i wysyłana zadaniem crona użytkownika `radar` w osobnym pliku `/etc/cron.d/radar-offsite`
     (aktualizacja zastępuje `/etc/cron.d/radar`) — przykład w `docs/DEPLOY.md`, bez kodu w

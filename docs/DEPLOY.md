@@ -277,9 +277,16 @@ zaalarmuje dopiero ok. 13:00, a nie przed 9:00.
 
 **Heartbeat nie obejmuje `serve`** — pingi wysyła `status` z crona, więc strona może nie
 działać, a pingi przychodzą dalej. Dlatego dodaj w zewnętrznej usłudze monitoringu
-dostępności (wiele ma bezpłatny plan) sprawdzanie HTTPS strony głównej z `PUBLIC_BASE_URL`
-(oczekiwany kod `200`, co kilka minut) z powiadomieniem na ten sam kanał co heartbeat.
-Monitoruj tylko stronę główną — nigdy ścieżek z tokenami (`/dostep/…`, `/wypis/…`).
+dostępności (wiele ma bezpłatny plan) sprawdzanie `https://<domena>/zdrowie` (domena
+z `PUBLIC_BASE_URL`, co kilka minut) z powiadomieniem na ten sam kanał co heartbeat.
+Jeśli usługa to umożliwia, ustaw `GET` z oczekiwanym słowem kluczowym `ok` w treści; jeśli nie,
+wystarczy sam kod `200` — błąd bazy daje `503`, więc kod sam go wykrywa. `/zdrowie`, a nie strona główna, bo strona główna nie dotyka
+bazy: odpowiada nawet wtedy, gdy `serve` w swoim sandboksie systemd nie łączy się
+z PostgreSQL. `/zdrowie` wykonuje `select 1` przez pulę `serve` i bez odpowiedzi bazy w 2 s
+zwraca `503` (`docs/RUNBOOK.md`, „Heartbeat”). Nie zwraca danych ani treści błędów, nie
+wymaga sesji. Caddy loguje `/zdrowie` jak zwykłą ścieżkę: `log_skip` i redakcja z punktu 8
+dotyczą tylko `/dostep/…` i `/wypis/…`. Monitoruj tylko `/zdrowie` — nigdy ścieżek
+z tokenami.
 
 ## 11. Kopia poza hostem (zaszyfrowana `age`)
 
@@ -347,9 +354,42 @@ Przed pierwszym użyciem jednorazowo
 `radar`), aby zapisać klucz hosta w `/var/lib/radar/.ssh/known_hosts` (sesję serwer odrzuci —
 `rrsync` przyjmuje tylko rsync; to oczekiwane).
 
-**Co tydzień** sprawdź kopię poza hostem: na serwerze kopii jest plik
-`radar-<dzisiejsza data>…dump.age`, a `/var/log/radar/offsite.log` nie ma błędów
-(`tail -n 20`). **Raz w miesiącu** odszyfruj jeden plik u właściciela (próba odszyfrowania;
+**Co tydzień** sprawdź kopię poza hostem: najnowszy plik off-host ma < 48 h — na serwerze
+kopii, jako `backup`:
+
+```sh
+find /home/backup/radar -maxdepth 1 -type f -name 'radar-*.dump.age' -mmin -2880 | grep -q . && echo ok || echo BRAK
+```
+
+(`ok` — jest plik młodszy niż 48 h; `BRAK` — wysyłka nie działa od co najmniej dwóch nocy),
+a `/var/log/radar/offsite.log` na VPS nie ma błędów (`tail -n 20`).
+
+Przy `BRAK` na VPS, jako root: `tail -n 50 /var/log/radar/offsite.log`, potem
+`ls -l /var/backups/radar-offsite` (jest świeży plik `.age`? — nie ma: zawiodło szyfrowanie,
+linia `50 5` z `/etc/cron.d/radar-offsite`). Następnie uruchom wysyłkę ręcznie jako `radar` —
+polecenie z linii `55 5` bez przekierowania do logu, więc błąd (np. klucz hosta, odmowa
+`rrsync`, brak sieci) widać na ekranie:
+
+```sh
+runuser -u radar -- rsync -a -e 'ssh -i /var/lib/radar/.ssh/offsite -o BatchMode=yes' /var/backups/radar-offsite/ backup@offsite.example.invalid:radar/
+```
+
+Po naprawie powtórz kontrolę na serwerze kopii (`ok`).
+
+Opcjonalnie drugi check heartbeat (osobny check w usłudze z punktu 10, okres np. 1 dzień +
+zapas 12 h) pingowany **z serwera kopii**, tylko gdy ten sam warunek < 48 h jest spełniony —
+alarm przyjdzie bez pamiętania o kontroli. URL pingu to sekret: na serwerze kopii, jako `backup`,
+`install -m 0600 /dev/null ~/.radar-offsite-hb`, potem `editor ~/.radar-offsite-hb` — jedna
+linia `url = "https://…"` (plik `0600`, czytelny tylko dla `backup`). `curl -K` czyta URL
+z tego pliku, więc nie ma go w linii crona, argumentach procesu ani logach (wpis do crontabu
+konta `backup`):
+
+```cron
+15 13 * * * find /home/backup/radar -maxdepth 1 -type f -name 'radar-*.dump.age' -mmin -2880 | grep -q . && curl -fsS --max-time 10 -o /dev/null -K "$HOME/.radar-offsite-hb" >/dev/null 2>&1
+```
+
+Pingowanie z serwera kopii (nie z zadania off-host na VPS) sprawdza to, co faktycznie dotarło,
+i nie daje przejętemu VPS-owi dostępu do tego URL-a. **Raz w miesiącu** odszyfruj jeden plik u właściciela (próba odszyfrowania;
 pełne odtworzenie kopii spoza hosta — jednorazowo po pierwszym wdrożeniu, punkt 14). Odszyfrowanie
 (tylko na maszynie z kluczem prywatnym): `age -d -i radar-backup.key -o radar-….dump radar-….dump.age`.
 
@@ -364,7 +404,8 @@ sh /opt/radar-zamowien/deploy/smoke.sh https://radar.example.invalid
 ```
 
 Sprawdza: `health` i `status` jako `radar`, `systemctl is-active radar-serve`, stronę główną
-przez proxy (`200` i dokładnie jeden nagłówek HSTS) oraz przekierowanie HTTP → HTTPS. Wypisuje
+przez proxy (`200` i dokładnie jeden nagłówek HSTS), `/zdrowie` przez proxy (`200` i `ok` —
+`serve` łączy się z bazą) oraz przekierowanie HTTP → HTTPS. Wypisuje
 tylko linie `PASS`/`FAIL`; kod `0` tylko, gdy wszystko przeszło. `status` daje `FAIL` przed
 pierwszym `ingest` (`source_never_run`) i przed pierwszym backupem (`backup_missing`) —
 szczegóły: `$RADAR status | jq .`.
@@ -387,11 +428,12 @@ szczegóły: `$RADAR status | jq .`.
 11. [ ] Cron i logrotate zainstalowane; następnego ranka logi w `/var/log/radar/*.log`.
 12. [ ] Heartbeat: check w usłudze, `HEARTBEAT_URL`, ping widoczny po `$RADAR status`;
         powiadomienie testowe z usługi dotarło do właściciela; monitoring dostępności
-        `PUBLIC_BASE_URL` (punkt 10).
+        `https://<domena>/zdrowie` (punkt 10).
 13. [ ] Ścieżka alertu: po przełączeniu na `EMAIL_MODE=smtp` (za zgodą właściciela) alert
         testowy dochodzi do operatora — „Próba ścieżki alertu” niżej.
 14. [ ] Kopia poza hostem: pierwsza zaszyfrowana kopia na serwerze kopii, próbne odszyfrowanie
-        u właściciela; cotygodniowa kontrola (punkt 11) w kalendarzu operatora.
+        u właściciela; cotygodniowa kontrola (punkt 11: najnowszy plik off-host ma < 48 h)
+        w kalendarzu operatora.
 15. [ ] Smoke test: wszystko `PASS`.
 16. [ ] Ćwiczenie odtworzenia na VPS (punkt 14) — zakończone, baza próbna usunięta.
 17. [ ] Błąd źródła widoczny w jednym cyklu (kryterium PR-07) — „Próba błędu źródła” niżej.

@@ -516,13 +516,14 @@ Szczegóły i uzasadnienie: D-010 (SMTP, biblioteka) i D-024 (wybór ofert, idem
 Szczegóły i uzasadnienie: D-025 (`node:http`, limity), D-026 (tokeny, sesja, CSRF, wypis) i
 D-027 (ekrany klienta, zmiana e-maila, login-CSRF).
 
-- `startWebServer({ db, publicBaseUrl, logger, host, port, cleanupIntervalMs })`
+- `startWebServer({ db, publicBaseUrl, logger, host, port, cleanupIntervalMs, … })`
   (`server.ts`) → `{ host, port, close() }`. Stała tabela tras:
 
   | Trasa (nazwa w logu)                      | Metody          | Działanie                                            |
   | ----------------------------------------- | --------------- | ---------------------------------------------------- |
   | `/` (`home`)                              | GET, HEAD       | strona główna                                        |
   | `/styl.css` (`stylesheet`)                | GET, HEAD       | arkusz stylów (jedyna odpowiedź z cache, 1 h)        |
+  | `/zdrowie` (`health`)                     | GET, HEAD       | `select 1` ≤ 2 s → 200 `ok` / 503 (tekst, bez sesji) |
   | `/dostep/<token>` (`login_link`)          | GET, HEAD       | sprawdza token (bez zużycia) → strona z przyciskiem  |
   | `/dostep` (`login`)                       | POST            | zużywa token, tworzy sesję → 303 `/profil`           |
   | `/profil` (`profile`)                     | GET, HEAD       | nazwa, status, komunikat, linki, formularze (sesja)  |
@@ -979,6 +980,7 @@ nie ponawia się w nieskończoność.
 | SMTP (`digest`, `status --notify`)            | połączenie 10 s, powitanie 10 s, gniazdo 30 s, DNS 10 s                                                                                                                                               | chwilowe błędy: najwyżej 2 w przebiegu (po 2 s i 10 s); `failed` — kolejne uruchomienia do 3 prób na ofertę; `uncertain` nigdy                    |
 | `serve`                                       | nagłówki 10 s, żądanie 15 s, keep-alive 5 s, zamknięcie po SIGTERM ≤ 10 s                                                                                                                             | —                                                                                                                                                 |
 | `/dopasowania`                                | czekanie w kolejce ≤ 3 s (≤ 8 czekających) → 503; ≤ 2 żądania na sesję → 429                                                                                                                          | — (klient ponawia po `Retry-After: 5`)                                                                                                            |
+| `/zdrowie`                                    | czekanie na `select 1` ≤ 2 s → 503; jedno zapytanie naraz, wspólne dla równoległych żądań (zawieszone zostaje wspólne, aż skończy je limit puli)                                                      | — (kolejne żądanie sprawdza ponownie)                                                                                                             |
 | `pg_dump` / `pg_restore` (`backup`/`restore`) | 30 min, potem SIGTERM, po 5 s SIGKILL; połączenie 10 s (`PGCONNECT_TIMEOUT`)                                                                                                                          | brak                                                                                                                                              |
 | Heartbeat (`status`, `HEARTBEAT_URL`)         | 10 s na całość (połączenie, TLS, żądanie, nagłówki odpowiedzi); ogranicza wynik, nie czas życia procesu (trwający `getaddrinfo` może go przedłużyć do limitu resolvera; kod wyjścia i logi bez zmian) | brak (kolejny `status` wyśle nowy ping)                                                                                                           |
 
@@ -1024,5 +1026,5 @@ narzędzia — nigdy stderr narzędzia, conninfo ani hasła. Na pilocie (PR-07B,
 logi zadań crona trafiają do `/var/log/radar/<komenda>.log` (rotacja `deploy/logrotate/radar`,
 14 dni), `serve` — do journala (`journalctl -u radar-serve`), log dostępu Caddy bez ścieżek
 z tokenami. Brak pingu heartbeat alarmuje zewnętrzna usługa (dead man's switch); heartbeat
-obejmuje cron i `status`, nie `serve` — dostępność strony sprawdza zewnętrzny monitoring HTTPS
-`PUBLIC_BASE_URL` (`docs/DEPLOY.md` punkt 10).
+obejmuje cron i `status`, nie `serve` — dostępność strony i połączenie `serve` z bazą sprawdza
+zewnętrzny monitoring `https://<domena>/zdrowie` (`docs/DEPLOY.md` punkt 10).
