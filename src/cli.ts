@@ -262,12 +262,12 @@ export const SOURCE_RUN_TIMEOUT_MS = 5 * 60_000;
  * for BZP (contract notices, small contracts, notice updates), i.e. 120
  * requests spaced >= 2 s apart (>= 240 s) plus response and write time.
  * Baza Konkurencyjności needs one request per announcement: at most
- * BK_MAX_DETAILS_PER_DAY (250) details plus at most 10 listing pages (4 on a
- * day of ~180), i.e. <= 260 requests at ~2.9 s each measured (~12.5 min); 15
- * minutes leaves about 3.5 s per request. Sources run in id order (bk
+ * BK_MAX_DETAILS_PER_DAY (250) details plus at most 4 listing pages (1 on a
+ * day of up to 250), i.e. <= 254 requests at ~2.9 s each measured (~12.5 min);
+ * 15 minutes leaves about 3.5 s per request. Sources run in id order (bk
  * before bzp): a typical bk day (~180 announcements) takes ~9 min, then BZP a
  * few minutes, so the 06:00 `ingest` ends well before the 06:30 `status`;
- * even both sources at their request bounds (bk 260, BZP 120 requests at
+ * even both sources at their request bounds (bk 254, BZP 120 requests at
  * ~2.9 s: ~12.5 + ~6 min) end by about 06:20. A run covers up to
  * INGEST_MAX_DAYS days, each with its own timeout: the worst case is 31 × 15
  * min per source (D-021), and BZP starts only after all of bk's days — up to

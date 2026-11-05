@@ -477,7 +477,7 @@ external_id)` (błąd po zatwierdzeniu tamtego zapisu), `ingestOpportunity` pona
   120 żądań na dzień, ≥ 240 s samych przerw i średnio ~5 s na żądanie w limicie 10 min;
   timeout dotyczy jednego przebiegu źródła i dnia (D-021). Tytuł decyzji zostaje bez zmian.
 - **Uzupełnienie (PR-08, D-030):** timeout źródła i dnia wynosi **15 min**: Baza
-  Konkurencyjności czyta jedno ogłoszenie na żądanie (do 260 żądań na dzień, ~12,5 min). Dla
+  Konkurencyjności czyta jedno ogłoszenie na żądanie (do 254 żądań na dzień, ~12,5 min). Dla
   BZP to średnio ~7 s na żądanie. Limit 1000 dotyczy w `bk` ogłoszeń na dzień i jest dodatkowo
   ograniczony do 250 (`BK_MAX_DETAILS_PER_DAY`).
 
@@ -1648,8 +1648,8 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     - nieznane ogłoszenie daje 404 z kopertą `{"status":"Error",…}`.
 
   - **Odczyt (dwa etapy):**
-    - **Lista:** `GET /api/announcements/search?page=N&limit=100&sort=…&status[]=PUBLISHED&publicationDateRange[from]=D&publicationDateRange[to]=D`.
-      Zwraca strony po 100 rekordów oraz `meta.total`. Filtr dnia dotyczy publikacji
+    - **Lista:** `GET /api/announcements/search?page=N&limit=250&sort=…&status[]=PUBLISHED&publicationDateRange[from]=D&publicationDateRange[to]=D`.
+      Zwraca strony po 250 rekordów oraz `meta.total`. Filtr dnia dotyczy publikacji
       **bieżącej wersji** ogłoszenia (fixture: 296132 opublikowane 2026-10-27 jest na liście
       2026-11-03, bo tego dnia wyszła jego nowa wersja). Nowa wersja trafia więc na listę dnia
       swojej publikacji i daje `updated` (PR-08 AC3).
@@ -1698,47 +1698,80 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
         rekordy, więc i tak jest wykryta w każdym dniu z co najmniej 3 ogłoszeniami (dni
         robocze mają ich ok. 150–180). Stała liczba jest prostsza niż odsetek.
       - Koszt: mały dzień (1–2 ogłoszenia), w którym wszystkie rekordy są odrzucone, jest
-        `succeeded` bez alertu. Widać go tylko w licznikach (`rejected`) i w logu
-        `source record rejected`.
+        `succeeded` (albo `incomplete`, gdy były pominięcia) bez alertu. Widać go tylko
+        w licznikach (`rejected`) i w logu `source record rejected`.
       - Pojedyncze odrzucenia w dniu z innymi zapisanymi rekordami nie zmieniają statusu.
         Widać je w licznikach (`rejected`) i w logu `source record rejected`.
     - Inne błędy HTTP (5xx po ponowieniach, timeout, budżet błędów) nadal kończą dzień jako
       `failed`.
 
-  - **Niestabilna paginacja (pomiar 2026-11-03, `meta.total` 180):** strony 1 i 2 przy
-    `sort=publicationDate` zachodziły na siebie o 14 rekordów i pomijały 14 innych.
-    - Adapter czyta kolejno dwa porządki (`publicationDate`, potem `default`). Zbiera sumę
-      różnych id, aż osiągnie `min(meta.total, budżet)`.
+  - **Niestabilna paginacja, więc lista dnia to jedna strona:** rekordy z tą samą datą
+    publikacji nie mają stałej kolejności między żądaniami.
+    - Pomiar 2026-11-03 (`meta.total` 180, strony po 100): strony 1 i 2 przy
+      `sort=publicationDate` zachodziły na siebie o 14 rekordów i pomijały 14 innych. Porządek
+      `default` pomijał inne 14, oba razem dały 180.
+    - Pomiar właściciela 2026-11-04 (`meta.total` 130, strony po 100): 111 różnych id
+      w każdym porządku i **111 także w sumie obu**, więc 19 ogłoszeń (15%) nie było
+      widocznych wcale. Jedno żądanie z `limit=200` albo `limit=500` dało wszystkie 130
+      (ok. 94 KB).
+    - **Dlatego strona ma 250 rekordów (`BK_PAGE_SIZE` = `BK_MAX_DETAILS_PER_DAY`), niezależnie
+      od `--limit`.** Dzień do 250 ogłoszeń (każdy dotąd zmierzony) to jedno żądanie listy,
+      bez paginacji, także w `source:preview` z małym `--limit`; po sprawdzeniu listy (niżej)
+      adapter bierze z niej pierwsze `budżet` id. Strona 250 rekordów to ok. 180 KB, daleko
+      poniżej limitu odpowiedzi SafeHttpClient (`DEFAULT_LIMITS.maxBytes`, 5 MiB).
+    - **Rezerwa, gdy `meta.total` > 250:** paginacja stronami po 250 w dwóch porządkach
+      (`publicationDate`, potem `default`), aż suma różnych id osiągnie
+      `min(meta.total, budżet)`. Najwyżej 2 strony na porządek (`BK_MAX_PAGES_PER_ORDER`, 500
+      pozycji, dwa razy więcej niż budżet). Lista mieszcząca się na jednej stronie nie jest
+      czytana w drugim porządku: to te same rekordy (pomiar 2026-11-04).
     - Porządek kończy się na ostatniej, krótszej stronie albo po `meta.total` pozycjach.
       Pozycje są pełne aż do `meta.total` także wtedy, gdy rekordy się powtarzają (strona 2
       dnia 2026-11-03: 80, 100 + 80 = 180). Krótsza strona przed końcem listy zakończyłaby
-      porządek po cichu, więc jest błędem formatu (`invalid_document`), a nie
-      `listing_mismatch`.
-    - Najwyżej 5 stron na porządek (`BK_MAX_PAGES_PER_ORDER`, 500 pozycji, dwa razy więcej niż
-      budżet).
-    - Gdy po obu porządkach brakuje rekordów, przebieg jest `incomplete` z powodem
-      `listing_mismatch` (nowy powód w `incompleteReasons`). Gdy wyczerpie się limit stron,
-      powód to `max_pages`. Przeczytane ogłoszenia są zapisywane.
-    - Nigdy nie jest to cisza: w logu jest `source listing incomplete` z liczbami.
+      porządek po cichu, więc jest błędem formatu (`invalid_document`).
+    - **Lista poniżej własnego `meta.total` kończy dzień jako `failed`:** adapter rzuca
+      `SourceFormatError` („listing has fewer distinct records than its total”,
+      `invalid_document`), gdy różnych id jest mniej niż cel. W logu jest `source listing short`
+      z liczbami (strony, rekordy, `total`).
+      - Lista mieszcząca się na jednej stronie (`meta.total` ≤ 250) jest zawsze sprawdzana
+        względem całego `meta.total`, także w podglądzie z małym `--limit`: strona i tak jest
+        pobrana, więc sprawdzenie nie kosztuje żądania.
+      - Powyżej 250 (rezerwa) celem jest `min(meta.total, budżet)`, także po limicie stron.
+      - Lista jest czytana przed szczegółami, więc nic nie jest zapisywane. `status` zgłasza
+        `source_failed`, a nadrabianie ponawia dzień według D-021 (z istniejącym limitem
+        kolejnych błędów).
+      - Uzasadnienie: dotąd taki dzień był `incomplete` (`listing_mismatch`), czyli pokryty.
+        Nadrabianie go nie ponawiało, a `status` nie alarmował, więc brakujące ogłoszenia
+        przepadały po cichu (przegląd właściciela PR #14). Bez nowego kodu ani reguł
+        nadrabiania: istniejące `failed` daje alert i ponowienie.
+      - Koszt: lista, która pozostaje krótka, traci ofertę `bk` całego dnia (nie tylko
+        brakujące), aż do poprawki adaptera; przyjęte, bo jest to głośne i ponawiane.
+        Odrzucone: zapis częściowej listy z jednoczesnym `failed`, bo każde ponowienie
+        czytałoby znów wszystkie szczegóły (ok. 6–9 min) i opóźniało BZP (jak przy L-R3-1).
+      - Powód `listing_mismatch` usunięty z `incompleteReasons` (dodany w PR-08, nie zapisuje
+        go żadna wydana wersja; zapisane wartości nie są odczytywane z powrotem). `max_pages`
+        dla `bk` nie występuje: wyczerpany limit stron rezerwy bez osiągnięcia celu to ta sama
+        lista poniżej `meta.total`, więc też `failed`. Inaczej byłby to znów pokryty dzień
+        z brakami. `max_pages` zostaje dla BZP.
   - **Wolumen i budżet:** dni robocze to ok. 150–180 ogłoszeń w bieżącej wersji (180 dnia
     2026-11-03, 155 dnia 2026-11-02), sobota ok. 10. Starsze dni maleją, bo ogłoszenia dostają
     nowsze wersje albo przestają być `PUBLISHED` (pomiar 2026-11-04: 70 dla 2026-10-27, 4 dla
     2026-09-30, 0 dla 2026-06-30).
     - Budżet dnia: `min(--limit, BK_MAX_DETAILS_PER_DAY = 250)` szczegółów. Więcej daje
       `incomplete` z powodem `max_records`.
-    - Dzień to najwyżej 250 + 10 = 260 żądań. Przy zmierzonych ~2,9 s na żądanie (odstęp 2 s +
-      odpowiedź) daje to ok. 12,5 min.
+    - Dzień to zwykle 1 + liczba ogłoszeń żądań, najwyżej 250 + 4 = 254 (rezerwa: 2 porządki
+      × 2 strony). Przy zmierzonych ~2,9 s na żądanie (odstęp 2 s + odpowiedź) daje to ok.
+      12,5 min.
     - Dlatego **timeout źródła i dnia w `ingest` rośnie z 10 do 15 min**
       (`INGEST_SOURCE_TIMEOUT_MS`, uzupełnienie D-018). Przekroczenie to `failed`
       (`source_timeout`), nigdy cisza.
     - `--limit` znaczy dla `bk` „najwyżej tyle ogłoszeń na dzień”.
-    - `source:preview bk` (domyślnie 20 rekordów, ok. 22 żądań, ok. 1 min) mieści w swoich
+    - `source:preview bk` (domyślnie 20 rekordów, 21 żądań, ok. 1 min) mieści w swoich
       5 min ok. 100 rekordów. Dla większego `--limit` kończy się `source_timeout`.
   - **Harmonogram (bez zmian w `deploy/cron/radar`):**
     - `ingest` o 6:00 czyta źródła w kolejności id (`listEnabledSources`, `ORDER BY id`), czyli
       **najpierw `bk`, potem BZP**. Typowy dzień `bk` (~180) trwa ok. 9 min, BZP kilka minut,
       więc całość kończy się ok. 6:15.
-    - Nawet oba źródła na swoich limitach żądań (`bk` 260, BZP 120) kończą się ok. 6:20.
+    - Nawet oba źródła na swoich limitach żądań (`bk` 254, BZP 120) kończą się ok. 6:20.
       `status` o 6:30 widzi więc błąd `bk` z tego samego cyklu (PR-08 AC3).
     - Nadrabianie wielu dni (D-021) może trwać dłużej. Najgorszy przypadek to
       31 × 15 min na źródło. Tak było dotąd dla BZP przy 10 min.
@@ -1837,7 +1870,10 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
 - **Odrzucone alternatywy:**
   - parsowanie HTML strony: to aplikacja SPA, której treść i tak pochodzi z tego API;
   - sama lista bez szczegółów: nie ma w niej zamówień, wartości, CPV ani kontaktu;
-  - jeden porządek listy: zmierzone braki;
+  - strony po 100 w dwóch porządkach jako główna ścieżka: zmierzone braki, których suma
+    porządków nie zamyka (2026-11-04);
+  - lista poniżej `meta.total` jako `incomplete`: dzień pokryty, braki bez alertu i bez
+    ponowienia;
   - pobieranie załączników: poza zakresem, a do tego większe ryzyko i dane osobowe;
   - wybór „pierwszego” województwa przy kilku;
   - częściowa suma wartości;

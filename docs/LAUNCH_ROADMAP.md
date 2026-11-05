@@ -107,6 +107,10 @@ tylko e-mail i telefon, bez nazwisk (D-022).
 Dokumenty do przygotowania:
 
 - polityka prywatności z informacją z art. 13 RODO;
+- obowiązek informacyjny z art. 14 RODO wobec osób, których dane kontaktowe pochodzą z
+  ogłoszeń (BZP, BK): decyzja właściciela, czy powołać się na wyjątek z art. 14 ust. 5
+  lit. b (niewspółmierny wysiłek) — wymaga oceny prawnie uzasadnionego interesu (LIA) i
+  publicznie dostępnej informacji o przetwarzaniu (np. na stronie usługi);
 - regulamin pilotażu (usługa bezpłatna, bez gwarancji kompletności, prawo rezygnacji);
 - rejestr czynności przetwarzania;
 - umowa powierzenia z dostawcą VPS i z dostawcą poczty.
@@ -265,13 +269,13 @@ Decyzja o skali, zapisana w `docs/DECISIONS.md`:
 
 ## Ryzyka
 
-| Ryzyko                                                              | Skutek                       | Zabezpieczenie                                                                                                                                                                                                                                                                           |
-| ------------------------------------------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| API Bazy Konkurencyjności jest nieudokumentowane i może się zmienić | brak ofert BK                | zmiana struktury: `SourceFormatError` → `invalid_document`, alert z `status`; pojedyncze pominięcia (`detail_*`, `listing_mismatch`) widoczne tylko w podsumowaniu `ingest` i `ingest.log` — operator sprawdza je po backfillu (DEPLOY §6); próba błędu źródła (§13); szybki PR poprawki |
-| Niska trafność dopasowań                                            | odejście firm w 1. tygodniu  | PR-09 przed pilotażem, ankieta tygodniowa, kalibracja na profilach pilotażowych                                                                                                                                                                                                          |
-| Digest w spamie                                                     | brak wartości mimo działania | SPF/DKIM/DMARC, test na własnej skrzynce, monitoring zwrotów                                                                                                                                                                                                                             |
-| Pojedynczy VPS                                                      | przerwa w dostawach          | kopia poza hostem, ćwiczenie odtworzenia, heartbeat, zewnętrzny monitoring dostępności                                                                                                                                                                                                   |
-| Wąskie gardło operatora (profile przez CLI)                         | limit kilkunastu firm        | samoobsługowe wejście w etapie 5, nie wcześniej                                                                                                                                                                                                                                          |
+| Ryzyko                                                              | Skutek                       | Zabezpieczenie                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------------------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| API Bazy Konkurencyjności jest nieudokumentowane i może się zmienić | brak ofert BK                | zmiana struktury: `SourceFormatError` → `invalid_document`, alert z `status` (także lista krótsza niż jej `meta.total`); pojedyncze pominięcia (`detail_*`) widoczne tylko w podsumowaniu `ingest` i `ingest.log` — operator sprawdza je po backfillu (DEPLOY §6); próba błędu źródła (§13); szybki PR poprawki |
+| Niska trafność dopasowań                                            | odejście firm w 1. tygodniu  | PR-09 przed pilotażem, ankieta tygodniowa, kalibracja na profilach pilotażowych                                                                                                                                                                                                                                 |
+| Digest w spamie                                                     | brak wartości mimo działania | SPF/DKIM/DMARC, test na własnej skrzynce, monitoring zwrotów                                                                                                                                                                                                                                                    |
+| Pojedynczy VPS                                                      | przerwa w dostawach          | kopia poza hostem, ćwiczenie odtworzenia, heartbeat, zewnętrzny monitoring dostępności                                                                                                                                                                                                                          |
+| Wąskie gardło operatora (profile przez CLI)                         | limit kilkunastu firm        | samoobsługowe wejście w etapie 5, nie wcześniej                                                                                                                                                                                                                                                                 |
 
 ## Otwarte decyzje właściciela
 
@@ -282,3 +286,5 @@ Lista obejmuje tylko punkty blokujące kolejne etapy:
 3. Progi metryk pilotażu z tabeli w etapie 4 (przed etapem 4).
 4. TTL tokenów i formularz „wyślij mi link” (przed etapem 5).
 5. Model płatności, cennik i hosting landingu (przed etapem 5).
+6. RODO art. 14 dla danych kontaktowych z ogłoszeń: wyjątek z art. 14 ust. 5 lit. b z LIA
+   i informacją publiczną albo inny sposób (etap 3c, przed etapem 4).

@@ -222,15 +222,21 @@ nadrabia tylko wczoraj, a nie 31 dni.
   „Kolejność źródeł”). Dzień z 1–2 ogłoszeniami, wszystkimi odrzuconymi, nie jest `failed` —
   widać go tylko w `rejected` w wyniku `ingest`.
 
+- **Lista krótsza niż jej `meta.total` (`invalid_document`, „listing has fewer distinct
+  records than its total”, log `source listing short` z liczbami):** lista dnia (jedna strona
+  250 rekordów, przy ponad 250 ogłoszeniach strony w dwóch porządkach) dała mniej różnych
+  ogłoszeń, niż podaje sama. Dzień jest `failed` przed odczytem szczegółów, nic nie jest
+  zapisane, a nadrabianie ponowi go następnego rana. Gdy kolejne ranki kończą się tak również
+  dla nowych dni, postępuj jak przy zmianie formatu (wyżej) i wyłącz `bk` (niżej, „Kolejność
+  źródeł”). Gdy powtarza się tylko jeden starszy dzień, a nowe przechodzą, zostaw `bk`
+  włączone i zgłoś to (ponowienie kosztuje jedno żądanie, nie opóźnia BZP; `status` alarmuje,
+  dopóki dzień nie zostanie poprawiony albo nie wyjdzie z 31-dniowego okna). Jeśli w bazie jest
+  przebieg `bk` z powodem `listing_mismatch` sprzed tej zmiany, uruchom raz
+  `ingest bk --date <dzień>` dla tego dnia.
 - **`incomplete` w przebiegu `bk`:**
   - `max_records`: dzień miał więcej ogłoszeń niż `--limit` albo 250
     (`BK_MAX_DETAILS_PER_DAY`). Zaobserwowane maksimum to ok. 180. Powtarzające się
     `max_records` przy domyślnym limicie zgłoś: trzeba przeliczyć budżet i timeout.
-  - `listing_mismatch`: lista Bazy dała mniej różnych ogłoszeń niż jej własne `meta.total`,
-    także po drugim porządku sortowania (niestabilna paginacja). Pojedynczy przypadek to brak
-    kilku ogłoszeń. Uzupełnij go ręcznie `ingest bk --date <dzień>` (nadrabianie nie ponawia
-    dni `incomplete`).
-  - `max_pages`: lista się nie przesuwa (5 stron na porządek). Zgłoś to jak zmianę formatu.
   - `detail_missing`: szczegóły ogłoszenia dały 404 (np. wycofane między listą a
     szczegółami). `detail_invalid`: szczegóły nie miały oczekiwanej koperty albo pola wymaganego
     (`source detail fields invalid` w logu: id i ścieżki pól, bez wartości). Ogłoszenie jest
@@ -247,7 +253,7 @@ nadrabia tylko wczoraj, a nie 31 dni.
     nadrobienia, a `ingest` kończy się po 6:30.
   - **Gdy ten sam dzień `bk` jest `failed` kolejne ranki, wyłącz `bk`** (wyżej, „Wyłączenie”)
     i zgłoś problem. BZP zaczyna wtedy znowu o 6:00.
-- **`source_timeout`** (15 min): dzień `bk` to do 260 żądań po ~2,9 s. Timeout oznacza
+- **`source_timeout`** (15 min): dzień `bk` to do 254 żądań po ~2,9 s. Timeout oznacza
   wolniejsze źródło niż zmierzone. Powtarzający się timeout zgłoś, nie podnoś limitu ręcznie.
 - **Atrybucja:** pole „Źródło: Baza Konkurencyjności, Ministerstwo Funduszy i Polityki
   Regionalnej; pobrano …; dane przetworzone …” w e-mailu i na `/dopasowania` jest wymagane

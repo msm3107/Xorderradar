@@ -198,10 +198,10 @@ interface SourceAdapter<TNotice = unknown> {
   propagowane bez zmian. Bez `onDocument` (`source:preview`) dokumenty są zbierane i zwracane.
 - `FetchResult` = `{ documents: RawDocument[], incomplete: { part, reason }[] }`. Osiągnięcie
   limitu (`max_records`, `max_pages`), niemożność bezpiecznej kontynuacji paginacji
-  (`invalid_cursor`, `repeated_cursor`) albo lista, która dała mniej różnych rekordów niż
-  podaje sama (`listing_mismatch`, `bk`, D-030), a także pominięte szczegóły ogłoszenia
+  (`invalid_cursor`, `repeated_cursor`), a także pominięte szczegóły ogłoszenia
   (`detail_missing`, `detail_invalid`, `bk`, D-030) nigdy nie są ciche: trafiają do `incomplete`
-  i do logu (warn).
+  i do logu (warn). Lista `bk`, która dała mniej różnych rekordów niż podaje sama, nie jest
+  `incomplete`, tylko kończy dzień błędem (`invalid_document`, D-030).
 - `RawDocument` = `{ sourceId, url, fetchedAt, contentType, body }` — tylko w pamięci (D-008).
 - Model błędów: błąd HTTP → `HttpClientError` z klienta (propagowany bez zmian); dokument
   bezużyteczny jako całość (nie UTF-8, nie JSON, nie ta struktura, za dużo rekordów) →
@@ -274,12 +274,19 @@ API publicznej aplikacji na `bazakonkurencyjnosci.funduszeeuropejskie.gov.pl`.
 
 - **Lista dnia:** `GET /api/announcements/search` z `status[]=PUBLISHED` i
   `publicationDateRange[from]` = `[to]` = dzień. Filtr dotyczy publikacji bieżącej wersji
-  ogłoszenia. Strony mają po min(100, budżet) rekordów.
-- **Dwa porządki, bo paginacja jest niestabilna:** adapter czyta kolejno `sort=publicationDate`
+  ogłoszenia. Strona ma 250 rekordów (`BK_PAGE_SIZE`) niezależnie od budżetu, bo paginacja
+  jest niestabilna (pomiar 2026-11-04: strony po 100 gubiły 19 ze 130 ogłoszeń także w sumie
+  dwóch porządków). Dzień do 250 ogłoszeń to jedno żądanie listy.
+- **Rezerwa dla `meta.total` > 250:** adapter czyta kolejno `sort=publicationDate`
   i `sort=default`. Zbiera sumę różnych id, aż osiągnie `min(meta.total, budżet)`, najwyżej
-  5 stron na porządek. Brak rekordów to `incomplete` z powodem `listing_mismatch`, limit stron
-  — `max_pages`. Porządek kończy ostatnia, krótsza strona albo `meta.total`; strona krótsza niż
-  żądana przed końcem listy i rekord listy z innym `publication_date` niż żądany dzień to
+  2 strony na porządek. Lista na jednej stronie nie jest czytana w drugim porządku.
+- **Lista poniżej `meta.total`:** mniej różnych id niż cel to `SourceFormatError` („listing
+  has fewer distinct records than its total”, `invalid_document`, log `source listing short`)
+  przed odczytem szczegółów. Celem jest całe `meta.total` dla listy na jednej stronie (także
+  w podglądzie z małym budżetem), a `min(meta.total, budżet)` dla rezerwy. Nic nie jest
+  zapisywane, `status` zgłasza `source_failed`, nadrabianie ponawia dzień.
+  Porządek kończy ostatnia, krótsza strona albo `meta.total`; strona krótsza niż żądana przed
+  końcem listy i rekord listy z innym `publication_date` niż żądany dzień to
   `SourceFormatError`.
 - **Budżet:** `min(maxRecords, BK_MAX_DETAILS_PER_DAY = 250)`. Więcej daje `max_records`.
 - **Szczegóły:** potem `GET /api/announcements/{id}` dla każdego ogłoszenia, po kolei.

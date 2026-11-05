@@ -4,17 +4,16 @@ import { sourceIdSchema } from "./source.js";
 /**
  * Why a source was not read to its natural end: a run limit was reached,
  * pagination could not continue safely, or listed records could not be read.
- * More records may exist. Baza Konkurencyjności (D-030): `listing_mismatch`,
- * the pages read gave fewer distinct records than the listing's own total;
- * `detail_missing`, a listed record's detail answered 404; `detail_invalid`,
- * a listed record's detail was not in the expected envelope.
+ * More records may exist. Baza Konkurencyjności (D-030): `detail_missing`, a
+ * listed record's detail answered 404; `detail_invalid`, a listed record's
+ * detail was not a usable record. (A bk listing short of its own total fails
+ * the day instead.)
  */
 export const incompleteReasons = [
   "max_records",
   "max_pages",
   "invalid_cursor",
   "repeated_cursor",
-  "listing_mismatch",
   "detail_missing",
   "detail_invalid",
 ] as const;

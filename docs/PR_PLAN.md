@@ -501,7 +501,8 @@ właściciela 2026-11-04.
 
 - adapter `src/sources/bk/` (`fetch → extract → normalize`), allowlista
   `["bazakonkurencyjnosci.funduszeeuropejskie.gov.pl"]`, tylko `https`, SafeHttpClient
-  (rate limit, limity rozmiaru): lista dnia (strony po 100) + szczegół każdego ogłoszenia;
+  (rate limit, limity rozmiaru): lista dnia (jedna strona 250; powyżej 250 strony w dwóch
+  porządkach — przegląd właściciela PR #14) + szczegół każdego ogłoszenia;
   budżet `maxRecords` i niedokończony odczyt zgłaszany w `incomplete`;
 - normalizacja: `externalId` = id ogłoszenia, `sourceUrl` = `/ogloszenia/{id}`, tytuł,
   zamawiający, opis, termin, data publikacji, CPV/kategorie, wartość (suma lub jedna

@@ -179,7 +179,11 @@ Baza Konkurencyjności (`bk`, PR-08, D-030):
   pomijane jako `detail_invalid` (`incomplete`). Dzień z więcej niż 2 przeczytanymi rekordami,
   z których `normalize` odrzuca każdy (np. termin w nowym formacie), też jest
   `invalid_document`. Oba wychodzą w `status`. Dzień z 1–2 rekordami, wszystkimi odrzuconymi,
-  nie jest alertowany, tylko liczony (`rejected`); odrzucony rekord nie jest zapisywany. Rekordy niezgodne ze schematem nie są zapisywane. Zmiana nazwy pola
+  nie jest alertowany, tylko liczony (`rejected`); odrzucony rekord nie jest zapisywany.
+  Rekordy niezgodne ze schematem nie są zapisywane. Lista dnia z mniejszą liczbą różnych
+  ogłoszeń niż jej własne `meta.total` (przy ponad 250 ogłoszeniach: niż budżet) też kończy
+  dzień kodem `invalid_document`, zanim cokolwiek zostanie zapisane, więc braki nie są cichym,
+  pokrytym dniem. Zmiana nazwy pola
   **opcjonalnego** (termin, kontakt, miejsca realizacji, wartość, CPV) nie jest wykrywana:
   pole staje się `null`, nigdy zgadywaną wartością (D-030).
 
@@ -214,7 +218,8 @@ Baza Konkurencyjności (`bk`, PR-08, D-030):
   formularza (pierwszy zamawiający), bez imion i nazwisk, bez wzbogacania (§7). Testy:
   wrogie treści po 1 000 000 znaków (`tests/bzp-notice-body.test.ts`).
 - JSON Bazy Konkurencyjności (`bk`, PR-08, D-030): ścisły UTF-8 i `JSON.parse` w limicie
-  5 MB odpowiedzi; schematy zod tylko dla używanych pól, każde tekstowe pole ≤ 20 000 znaków
+  5 MB odpowiedzi (strona listy 250 rekordów to ok. 180 KB; zwykle jedno żądanie listy na
+  dzień, najwyżej 4); schematy zod tylko dla używanych pól, każde tekstowe pole ≤ 20 000 znaków
   (opis pozycji ≤ 200 000), listy ≤ 1 000 elementów; HTML w danych nie jest parsowany —
   tekst przechodzi przez `cleanText`, wyrażenia regularne (kwota, CPV, telefon, daty) są
   zakotwiczone, bez zagnieżdżonych kwantyfikatorów i działają na ograniczonych ciągach.

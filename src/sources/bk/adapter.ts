@@ -37,8 +37,6 @@ const DETAIL_API_URL = `https://${BK_HOST}/api/announcements/`;
 /** Public announcement page, the offer's link; followed by the announcement id. */
 const PAGE_URL = `https://${BK_HOST}/ogloszenia/`;
 
-/** Largest page the web application itself asks for; a page is ~73 KB (2026-11-03). */
-export const BK_PAGE_SIZE = 100;
 /**
  * Details read per publication day, whatever the run's record limit: each is
  * one request (>= 2 s apart, ~2.9 s measured), so 250 fit the per-source
@@ -46,14 +44,26 @@ export const BK_PAGE_SIZE = 100;
  * had 180 (2026-11-03). More → `incomplete` (`max_records`), never silent.
  */
 export const BK_MAX_DETAILS_PER_DAY = 250;
-/** Pages per listing order and run: 500 positions, twice BK_MAX_DETAILS_PER_DAY. */
-export const BK_MAX_PAGES_PER_ORDER = 5;
 /**
- * Listing orders, read one after another until the distinct ids reach the
- * listing's total. Equal publication dates are not ordered stably between
- * pages: with `publicationDate` alone, pages 1 and 2 of 2026-11-03 (total 180)
- * overlapped by 14 announcements and missed 14 others; the `default` order
- * missed a different 14, and both together gave all 180 (D-030).
+ * Listing page size, whatever the run's record limit: a day of up to 250
+ * announcements (every day measured so far) is one request, with nothing to
+ * page through. Pages are not stable across requests (equal publication dates
+ * are not ordered stably): on 2026-11-04 (total 130) pages of 100 gave 111
+ * distinct ids in either order and in both together, while one page of 200 or
+ * 500 gave all 130 (~94 KB). 250 is ~180 KB, far within SafeHttpClient's
+ * response limit (DEFAULT_LIMITS.maxBytes, 5 MiB) (D-030).
+ */
+export const BK_PAGE_SIZE = BK_MAX_DETAILS_PER_DAY;
+/**
+ * Fallback only, for a listing longer than one page: pages per order and run,
+ * 500 positions, twice BK_MAX_DETAILS_PER_DAY.
+ */
+export const BK_MAX_PAGES_PER_ORDER = 2;
+/**
+ * Listing orders of the fallback, read one after another until the distinct
+ * ids reach the target: on 2026-11-03 (total 180, pages of 100) each order
+ * alone missed 14 announcements, both together gave all 180; on 2026-11-04
+ * they did not help (D-030). A listing that fits one page is read once.
  */
 export const BK_LIST_ORDERS = ["publicationDate", "default"] as const;
 /**
@@ -259,33 +269,33 @@ interface Listing {
   /** The listing's own count (the largest seen; it may grow while being read). */
   readonly total: number;
   readonly pages: number;
-  readonly stop: IncompleteReason | null;
+  /** `max_records`: the day has more announcements than the budget. */
+  readonly stop: Extract<IncompleteReason, "max_records"> | null;
 }
 
 /**
  * The ids of the announcements published on `ctx.publicationDate` (their
- * current version), page by page in each of BK_LIST_ORDERS until the distinct
- * ids reach the listing's total — or `budget`. A short last page or the
- * total ends one order; a page shorter than requested before the listing's
- * end is a format error (it would end the order early with no alert). Not
- * reaching the target is never silent:
- * `max_pages` when an order hit its page limit, else `listing_mismatch`;
- * reaching only the budget is `max_records`.
+ * current version). A listing of up to BK_PAGE_SIZE is one request, and its
+ * distinct ids must reach the whole total whatever the budget (a preview with
+ * a small budget checks it too; the page is fetched either way). A longer one
+ * is paged through each of BK_LIST_ORDERS until the distinct ids reach
+ * min(total, budget). A short last page or the total ends one order; a page
+ * shorter than requested before the listing's end is a format error (it would
+ * end the order early with no alert). Fewer distinct ids than the target
+ * (repeated records, or the fallback's page limit) fail the day: a covered
+ * day with silently missing announcements would never be read again (D-030).
+ * Reaching only the budget is `max_records`.
  */
 async function listAnnouncements(ctx: FetchContext, budget: number): Promise<Listing> {
-  const pageSize = Math.min(BK_PAGE_SIZE, budget);
+  const pageSize = BK_PAGE_SIZE;
   const ids = new Set<number>();
   let total: number | null = null;
   let pages = 0;
-  let pageLimitHit = false;
-  const reachedTarget = () => total !== null && ids.size >= Math.min(total, budget);
+  const reachedTarget = () =>
+    total !== null && ids.size >= (total <= pageSize ? total : Math.min(total, budget));
   for (const order of BK_LIST_ORDERS) {
-    for (let page = 1; !reachedTarget(); page++) {
+    for (let page = 1; !reachedTarget() && page <= BK_MAX_PAGES_PER_ORDER; page++) {
       if (total !== null && (page - 1) * pageSize >= total) break;
-      if (page > BK_MAX_PAGES_PER_ORDER) {
-        pageLimitHit = true;
-        break;
-      }
       // SafeHttpClient also refuses an aborted signal; checked here so the loop
       // never depends on the client for it.
       if (ctx.signal.aborted) throw new HttpClientError("aborted", { host: BK_HOST });
@@ -307,13 +317,22 @@ async function listAnnouncements(ctx: FetchContext, budget: number): Promise<Lis
         break;
       }
     }
-    if (reachedTarget()) break;
+    // One page held the whole listing: another order would be the same
+    // records again (measured 2026-11-04), so it cannot add any.
+    if (reachedTarget() || (total ?? 0) <= pageSize) break;
   }
   const listed = total ?? 0;
-  let stop: IncompleteReason | null = null;
-  if (!reachedTarget()) stop = pageLimitHit ? "max_pages" : "listing_mismatch";
-  else if (listed > budget) stop = "max_records";
-  return { ids: [...ids], total: listed, pages, stop };
+  if (!reachedTarget()) {
+    ctx.logger.warn("source listing short", {
+      sourceId: BK_SOURCE_ID,
+      part: PART,
+      pages,
+      records: ids.size,
+      total: listed,
+    });
+    throw new SourceFormatError(BK_SOURCE_ID, "listing has fewer distinct records than its total");
+  }
+  return { ids: [...ids], total: listed, pages, stop: listed > budget ? "max_records" : null };
 }
 
 type DetailSkip = Extract<IncompleteReason, "detail_missing" | "detail_invalid">;

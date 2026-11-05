@@ -30,15 +30,18 @@ const LISTED: Readonly<Record<string, string>> = {
 const fixtureText = (name: string) =>
   readFileSync(new URL(`../fixtures/bk/${name}`, import.meta.url), "utf8");
 
-/** Serves the captured listing and details; `detail` may replace a detail's body. */
-function bkHttp(detail: (id: string, body: string) => string = (_id, body) => body) {
+/** Serves the captured listing and details; `detail` may replace a detail's body, `list` the listing's. */
+function bkHttp(
+  detail: (id: string, body: string) => string = (_id, body) => body,
+  list: (body: string) => string = (body) => body,
+) {
   const client: SourceHttpClient = {
     get(url) {
       const href = url.toString();
       const { pathname } = new URL(href);
       let body: string;
       if (pathname === "/api/announcements/search") {
-        body = fixtureText("list-2026-11-03.json");
+        body = list(fixtureText("list-2026-11-03.json"));
       } else {
         const id = pathname.split("/").at(-1) ?? "";
         const name = LISTED[id];
@@ -67,6 +70,10 @@ function changedVersion(body: string, change: (version: Record<string, unknown>)
   change(root.data.advertisement);
   return JSON.stringify(root);
 }
+
+const listSchema = z.looseObject({
+  data: z.looseObject({ advertisements: z.array(z.unknown()), meta: z.looseObject({}) }),
+});
 
 async function ingestBk(schema: TestSchema, http: SourceHttpClient, at: Date) {
   let clock = at.getTime();
@@ -242,5 +249,33 @@ describe.skipIf(skipWithoutDatabase)("bk source (PostgreSQL)", () => {
     const report = await collectStatus(schema.db, new Date(T0.getTime() + 11_300_000));
     const bk = (report.sources ?? []).find((source) => source.sourceId === "bk");
     expect(bk).toMatchObject({ problems: ["source_failed"] });
+  });
+
+  it("fails the day on a listing short of its own total, storing nothing (D-030)", async () => {
+    // One record listed twice: 5 positions, 4 distinct announcements.
+    const repeated = bkHttp(undefined, (body) => {
+      const root = listSchema.parse(JSON.parse(body));
+      const { advertisements } = root.data;
+      return JSON.stringify({
+        ...root,
+        data: {
+          ...root.data,
+          advertisements: [...advertisements, advertisements[0]],
+          meta: { total: 5 },
+        },
+      });
+    });
+    const before = await bkRows(schema);
+    const failed = await ingestBk(schema, repeated, new Date(T0.getTime() + 11_400_000));
+    expect(failed).toMatchObject({ status: "failed", errorCode: "invalid_document" });
+    expect(failed.counters).toMatchObject({ documents: 0, inserted: 0, updated: 0, rejected: 0 });
+    expect(await bkRows(schema)).toEqual(before);
+
+    const report = await collectStatus(schema.db, new Date(T0.getTime() + 11_500_000));
+    const bk = (report.sources ?? []).find((source) => source.sourceId === "bk");
+    expect(bk).toMatchObject({
+      problems: ["source_failed"],
+      lastRun: { status: "failed", errorCode: "invalid_document" },
+    });
   });
 });

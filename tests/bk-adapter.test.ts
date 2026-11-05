@@ -652,7 +652,7 @@ describe("bkAdapter.fetch", () => {
     const ctx = fetchContext(http, {}, logLines);
     const result = await bkAdapter.fetch(ctx);
     expect(http.urls).toEqual([
-      listUrl(1, 100),
+      listUrl(1, 250),
       detailUrl(296132),
       detailUrl(296920),
       detailUrl(296667),
@@ -698,98 +698,122 @@ describe("bkAdapter.fetch", () => {
   it("makes one request for an empty day", async () => {
     const http = new FakeHttpClient(() => fixtureBytes(EMPTY));
     const result = await bkAdapter.fetch(fetchContext(http, { publicationDate: "2026-06-30" }));
-    expect(http.urls).toEqual([listUrl(1, 100, "publicationDate", "2026-06-30")]);
+    expect(http.urls).toEqual([listUrl(1, 250, "publicationDate", "2026-06-30")]);
     expect(result).toEqual({ documents: [], incomplete: [] });
   });
 
-  it("reads the second order when pages of the first overlap (D-030)", async () => {
-    // As measured on 2026-11-03: two pages of one order overlap by 14 and miss 14.
+  it("pages through both orders only for a listing longer than one page (D-030)", async () => {
+    // total 400 > 250: page 1 of the first order repeats 50 of its own ids and
+    // page 2 only repeats (200 distinct after the page limit); the second order
+    // brings the rest of the budget.
+    const repeating = [...range(1, 200), ...range(1, 50)];
     const http = new FakeHttpClient((url) => {
       if (url.pathname !== "/api/announcements/search") return anyDetail();
       const sort = url.searchParams.get("sort");
       const page = url.searchParams.get("page");
       if (sort === "publicationDate") {
-        return page === "1" ? listPage(range(1, 100), 180) : listPage(range(87, 166), 180);
+        return page === "1" ? listPage(repeating, 400) : listPage(range(1, 150), 400);
       }
-      return page === "1"
-        ? listPage([...range(1, 86), ...range(167, 180)], 180)
-        : new Error("not needed");
+      return page === "1" ? listPage(range(201, 450), 400) : new Error("not needed");
     });
     const result = await bkAdapter.fetch(fetchContext(http, { maxRecords: 1000 }));
+    expect(BK_MAX_PAGES_PER_ORDER).toBe(2);
     expect(http.urls.slice(0, 3)).toEqual([
-      listUrl(1, 100),
-      listUrl(2, 100),
-      listUrl(1, 100, "default"),
+      listUrl(1, 250),
+      listUrl(2, 250),
+      listUrl(1, 250, "default"),
     ]);
-    expect(http.urls.slice(3)).toEqual(range(1, 180).map(detailUrl));
-    expect(result.incomplete).toEqual([]);
-    expect(result.documents).toHaveLength(180);
+    expect(http.urls.slice(3)).toEqual(range(1, BK_MAX_DETAILS_PER_DAY).map(detailUrl));
+    expect(result.documents).toHaveLength(BK_MAX_DETAILS_PER_DAY);
+    expect(result.incomplete).toEqual([{ part: "announcements", reason: "max_records" }]);
   });
 
-  it("reports listing_mismatch when both orders give fewer ids than the total", async () => {
-    const http = new FakeHttpClient((url) => {
-      if (url.pathname !== "/api/announcements/search") return anyDetail();
-      return url.searchParams.get("page") === "1"
-        ? listPage(range(1, 100), 180)
-        : listPage(range(87, 166), 180);
-    });
+  it("fails the day on one page with fewer distinct records than its total (2026-11-04)", async () => {
+    // As measured: 130 positions, 111 distinct announcements.
+    const http = new FakeHttpClient((url) =>
+      url.pathname === "/api/announcements/search"
+        ? listPage([...range(1, 111), ...range(1, 19)], 130)
+        : anyDetail(),
+    );
     const logLines: string[] = [];
-    const result = await bkAdapter.fetch(fetchContext(http, { maxRecords: 1000 }, logLines));
-    expect(http.urls.slice(0, 4)).toEqual([
-      listUrl(1, 100),
-      listUrl(2, 100),
-      listUrl(1, 100, "default"),
-      listUrl(2, 100, "default"),
-    ]);
-    // What was listed is still read.
-    expect(result.documents).toHaveLength(166);
-    expect(result.incomplete).toEqual([{ part: "announcements", reason: "listing_mismatch" }]);
+    expect(
+      await fetchError(bkAdapter.fetch(fetchContext(http, { maxRecords: 1000 }, logLines))),
+    ).toEqual(new SourceFormatError("bk", "listing has fewer distinct records than its total"));
+    // One request, no second order (it cannot add to a whole-day page), no detail.
+    expect(http.urls).toEqual([listUrl(1, 250)]);
     const logs = logLines.map((line) => logEntrySchema.parse(JSON.parse(line)));
     expect(logs).toContainEqual(
       expect.objectContaining({
         level: "warn",
-        message: "source listing incomplete",
-        records: 166,
-        total: 180,
-        reason: "listing_mismatch",
+        message: "source listing short",
+        sourceId: "bk",
+        pages: 1,
+        records: 111,
+        total: 130,
       }),
     );
   });
 
-  it("stops at the record budget and reports max_records", async () => {
+  it("checks a one-page listing against its whole total, even under a smaller budget", async () => {
+    // 5 positions, 4 distinct: the budget of 2 is reachable, the total is not.
+    const shortList = (url: URL) =>
+      url.pathname === "/api/announcements/search" ? listPage([1, 2, 3, 4, 1], 5) : anyDetail();
+    const http = new FakeHttpClient(shortList);
+    expect(await fetchError(bkAdapter.fetch(fetchContext(http, { maxRecords: 2 })))).toEqual(
+      new SourceFormatError("bk", "listing has fewer distinct records than its total"),
+    );
+    expect(http.urls).toEqual([listUrl(1, 250)]);
+
+    // Preview (`source:preview bk --limit 2`): the same check, the same one request.
+    const previewHttp = new FakeHttpClient(shortList);
+    expect(
+      await fetchError(previewSource(bkAdapter, fetchContext(previewHttp, { maxRecords: 2 }))),
+    ).toEqual(new SourceFormatError("bk", "listing has fewer distinct records than its total"));
+    expect(previewHttp.urls).toEqual([listUrl(1, 250)]);
+  });
+
+  it("fails the day when both orders stay short of the budget at their page limit", async () => {
+    // Every page repeats the same 200 ids: the listing never advances.
     const http = new FakeHttpClient((url) =>
       url.pathname === "/api/announcements/search"
-        ? listPage([296132, 296920], 4)
-        : capturedSource(url),
+        ? listPage([...range(1, 200), ...range(1, 50)], 1000)
+        : anyDetail(),
     );
+    expect(await fetchError(bkAdapter.fetch(fetchContext(http, { maxRecords: 1000 })))).toEqual(
+      new SourceFormatError("bk", "listing has fewer distinct records than its total"),
+    );
+    expect(http.urls).toEqual([
+      listUrl(1, 250),
+      listUrl(2, 250),
+      listUrl(1, 250, "default"),
+      listUrl(2, 250, "default"),
+    ]);
+  });
+
+  it("stops at the record budget and reports max_records, the listing still one page", async () => {
+    const http = new FakeHttpClient(capturedSource);
     const result = await bkAdapter.fetch(fetchContext(http, { maxRecords: 2 }));
-    expect(http.urls).toEqual([listUrl(1, 2), detailUrl(296132), detailUrl(296920)]);
+    expect(http.urls).toEqual([listUrl(1, 250), detailUrl(296132), detailUrl(296920)]);
     expect(result.incomplete).toEqual([{ part: "announcements", reason: "max_records" }]);
+
+    // Preview with a small limit: the same single listing request.
+    const previewHttp = new FakeHttpClient(capturedSource);
+    const preview = await previewSource(bkAdapter, fetchContext(previewHttp, { maxRecords: 2 }));
+    expect(previewHttp.urls).toEqual([listUrl(1, 250), detailUrl(296132), detailUrl(296920)]);
+    expect(preview.incomplete).toEqual([{ part: "announcements", reason: "max_records" }]);
   });
 
   it("reads at most BK_MAX_DETAILS_PER_DAY details, whatever the record limit", async () => {
     const http = new FakeHttpClient((url) => {
       if (url.pathname !== "/api/announcements/search") return anyDetail();
       const page = Number(url.searchParams.get("page"));
-      return listPage(range((page - 1) * 100 + 1, page * 100), 400);
+      return listPage(range((page - 1) * 250 + 1, page * 250), 400);
     });
     const result = await bkAdapter.fetch(fetchContext(http, { maxRecords: 1000 }));
-    expect(http.urls.slice(0, 3)).toEqual([listUrl(1, 100), listUrl(2, 100), listUrl(3, 100)]);
-    expect(http.urls.slice(3)).toEqual(range(1, BK_MAX_DETAILS_PER_DAY).map(detailUrl));
+    expect(http.urls.slice(0, 1)).toEqual([listUrl(1, 250)]);
+    expect(http.urls.slice(1)).toEqual(range(1, BK_MAX_DETAILS_PER_DAY).map(detailUrl));
     expect(result.documents).toHaveLength(BK_MAX_DETAILS_PER_DAY);
     expect(result.incomplete).toEqual([{ part: "announcements", reason: "max_records" }]);
-  });
-
-  it("stops each order at its page limit and reports max_pages", async () => {
-    // Every page repeats the same ids: the listing never advances.
-    const http = new FakeHttpClient((url) =>
-      url.pathname === "/api/announcements/search" ? listPage(range(1, 100), 1000) : anyDetail(),
-    );
-    const result = await bkAdapter.fetch(fetchContext(http, { maxRecords: 1000 }));
-    const listings = http.urls.filter((url) => url.includes("/search?"));
-    expect(listings).toHaveLength(2 * BK_MAX_PAGES_PER_ORDER);
-    expect(result.documents).toHaveLength(100);
-    expect(result.incomplete).toEqual([{ part: "announcements", reason: "max_pages" }]);
   });
 
   it("refuses an unusable listing page (AC2)", async () => {
@@ -809,7 +833,7 @@ describe("bkAdapter.fetch", () => {
         Buffer.from('{"status":"OK","data":{"advertisements":[],"meta":{"total":-1}}}'),
         "listing does not have the expected structure",
       ],
-      [listPage(range(1, 101), 101), "page has more records than requested"],
+      [listPage(range(1, 251), 251), "page has more records than requested"],
     ];
     for (const [body, reason] of cases) {
       const http = new FakeHttpClient(() => body);
@@ -821,12 +845,12 @@ describe("bkAdapter.fetch", () => {
   });
 
   it("refuses a page shorter than requested before the listing's end (AC2)", async () => {
-    // Pages of 50 where 100 were asked, total 180: the order would end early, silently.
-    const http = new FakeHttpClient(() => listPage(range(1, 50), 180));
+    // A page of 100 where 250 were asked, total 180: the order would end early, silently.
+    const http = new FakeHttpClient(() => listPage(range(1, 100), 180));
     expect(await fetchError(bkAdapter.fetch(fetchContext(http, { maxRecords: 1000 })))).toEqual(
       new SourceFormatError("bk", "page shorter than requested before the listing's end"),
     );
-    expect(http.urls).toEqual([listUrl(1, 100)]);
+    expect(http.urls).toEqual([listUrl(1, 250)]);
   });
 
   it("refuses a listing of another publication day (an ignored date filter)", async () => {
@@ -1036,6 +1060,27 @@ describe("bkAdapter.fetch", () => {
     expect(await fetchError(bkAdapter.fetch(fetchContext(http)))).toEqual(
       new SourceFormatError("bk", "every record of the day was rejected"),
     );
+  });
+
+  it("counts an all-rejected day past the skips: read records, not listed ones (L-R4-2)", async () => {
+    const detail = parsedDetail(GNIEZNO);
+    detail.version.submission_deadline = "05.11.2026 15:00";
+    const rejectedBody = Buffer.from(detail.body());
+    const missing = new HttpClientError("http_status", { status: 404, host: BK_HOST });
+    const day = (ids: readonly number[]) =>
+      new FakeHttpClient((url) => {
+        if (url.pathname === "/api/announcements/search") return listPage(ids, ids.length);
+        // The first two listed details are gone, the rest are rejected records.
+        return url.pathname.endsWith("/1") || url.pathname.endsWith("/2") ? missing : rejectedBody;
+      });
+    // 2 skipped + 3 read, all rejected: past the limit, the day fails.
+    expect(await fetchError(bkAdapter.fetch(fetchContext(day(range(1, 5)))))).toEqual(
+      new SourceFormatError("bk", "every record of the day was rejected"),
+    );
+    // 2 skipped + 2 read, all rejected: within the limit, incomplete, not failed.
+    const result = await bkAdapter.fetch(fetchContext(day(range(1, 4))));
+    expect(result.documents).toHaveLength(2);
+    expect(result.incomplete).toEqual([{ part: "announcements", reason: "detail_missing" }]);
   });
 
   it("propagates HTTP client errors unchanged", async () => {

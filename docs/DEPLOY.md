@@ -203,14 +203,15 @@ z `$RADAR` jak wyżej, **poza oknem crona 5:30–8:00**:
    - `sourceUrl` prowadzi do `/ogloszenia/<id>` i otwiera się w przeglądarce;
    - w `contact` tylko e-mail i telefon, bez imion i nazwisk.
 
-   Przy `--limit 20` adapter czyta tylko pierwszy porządek listy, więc suma dwóch porządków
-   (niestabilna paginacja, D-030) nie jest tu sprawdzana. Pierwszy raz sprawdza ją backfill
-   (krok 3) w dniach roboczych ze 100+ ogłoszeniami.
+   Lista dnia to jedno żądanie z `limit=250` także przy `--limit 20` (D-030). Lista mieszcząca
+   się na jednej stronie jest zawsze sprawdzana względem całego `meta.total`, także w podglądzie:
+   gdy różnych ogłoszeń jest mniej, podgląd kończy się kodem `1` (`invalid_document`, „listing
+   has fewer distinct records than its total”). Powyżej 250 ogłoszeń sprawdzenie dotyczy tylko
+   budżetu (`min(meta.total, --limit)`).
 
-   Kod `1` (np. `invalid_document`) albo `incomplete` z innym powodem (`listing_mismatch`,
-   `max_pages`, `detail_invalid`): nie włączaj `bk`; postępowanie — `docs/RUNBOOK.md` → „Baza
-   Konkurencyjności”. Pojedyncze `detail_missing` (404, ogłoszenie wycofane w trakcie): powtórz
-   podgląd.
+   Kod `1` (np. `invalid_document`) albo `incomplete` z innym powodem (`detail_invalid`): nie
+   włączaj `bk`; postępowanie — `docs/RUNBOOK.md` → „Baza Konkurencyjności”. Pojedyncze
+   `detail_missing` (404, ogłoszenie wycofane w trakcie): powtórz podgląd.
 
 2. **Włączenie** — w `psql` jak w `docs/RUNBOOK.md` (na początku, `SET ROLE radar;`):
 
@@ -236,13 +237,18 @@ z `$RADAR` jak wyżej, **poza oknem crona 5:30–8:00**:
    treści ogłoszeń):
 
    ```sh
+   jq '{status, notRun}' /root/bk-backfill.json
    jq -c '.runs[] | {publicationDate, status, documents, inserted, rejected, incomplete, errorCode}' /root/bk-backfill.json
    ```
 
-   - Każdy przebieg ma `status` `succeeded` albo `incomplete`. Wypisz dni `incomplete`
+   - `notRun` puste: inaczej część dni nie była czytana (np. zatrzymanie po kolejnych błędach,
+     `consecutive_failures`, D-021). Te dni nie mają wpisu w `runs` — sprawdź przyczynę
+     (pierwszy dzień `failed`) i uruchom je ponownie.
+
+   - Każdy przebieg powinien mieć `status` `succeeded` albo `incomplete`. Wypisz dni `incomplete`
      i ich powody (`incomplete[].reason`).
    - `rejected` ≈ 0 w każdym dniu.
-   - Dni z `listing_mismatch`, `detail_missing` albo `detail_invalid` powtórz pojedynczo:
+   - Dni z `detail_missing` albo `detail_invalid` powtórz pojedynczo:
      `$RADAR ingest bk --date <dzień>`. `max_records` oznacza dzień z ponad 250 ogłoszeniami
      i jest oczekiwany.
    - Dzień `failed`: kod w `errorCode`, postępowanie w `docs/RUNBOOK.md` → „Baza

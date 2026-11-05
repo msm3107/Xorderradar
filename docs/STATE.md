@@ -2,9 +2,10 @@
 
 Current phase: PHASE 4 — PILOT
 Current PR: PR-08 — Drugie źródło: Baza Konkurencyjności (adapter `bk`)
-Status: PR-07B **MERGED in PR #13 (e01aa0b)**. PR-08 (owner's choice 2026-11-04) **PR READY for
-the owner's review** (not merged): Code & Safety Review PASS (round 4), Quality Review ACCEPT
-(round 2). AC1 (`source:preview bk` against the live source) is the owner's step on the VPS.
+Status: PR-07B **MERGED in PR #13 (e01aa0b)**. PR-08 (owner's choice 2026-11-04) **PR #14 open for
+the owner's review** (not merged); owner-review round done: Code & Safety Review PASS (round 6),
+Quality Review ACCEPT (round 3). AC1 (`source:preview bk` against the live source) is the
+owner's step on the VPS.
 
 ## Completed
 
@@ -685,8 +686,8 @@ Round-1 fixes:
 PR READY for the owner's review (not merged); D-030 new.
 
 - `src/sources/bk/adapter.ts`: day listing (`/api/announcements/search`, current-version
-  publication date, two sort orders unioned against unstable pagination; `listing_mismatch`,
-  `max_pages`, `max_records`) plus one detail per announcement, at most 250 per day.
+  publication date, one page of 250; two sort orders only over 250 — see the owner-review
+  bullet below; `max_records`) plus one detail per announcement, at most 250 per day.
   `externalId` = announcement id, `sourceUrl` = `/ogloszenia/{id}`; value only as the sum of all
   orders' values (else `null`), `PLN` only with a value, voivodeship only when shared by all
   places, contact e-mail/phone only.
@@ -717,6 +718,26 @@ PR READY for the owner's review (not merged); D-030 new.
   (round 3; M-R3-1 small all-rejected day failed every morning → threshold > 2, L-R3-1 RUNBOOK
   BZP delay) → fix → C&S PASS (round 4) → Quality ACCEPT (round 2). Tracked tests changed only
   by list additions (new source id, migration, incomplete reasons). 1958 tests (+54).
+- Owner-review round (PR #14): the owner measured 2026-11-04 (total 130) that pages of 100 gave
+  111 distinct ids in both orders and in their union, while one page of 200/500 gave all 130.
+  The listing is now one page of 250 (`BK_PAGE_SIZE` = `BK_MAX_DETAILS_PER_DAY`, ~180 KB, within
+  the 5 MiB response limit) whatever `--limit`, so a day of up to 250 is one request (also in
+  preview). Over 250: the two-order pagination as fallback, 2 pages per order. A listing with
+  fewer distinct ids than its target now **fails the day** (`invalid_document`, "listing
+  has fewer distinct records than its total", log `source listing short`) before any detail:
+  `status` alerts and catch-up retries it (D-021). `listing_mismatch` removed from
+  `incompleteReasons` (added in this PR, not stored by any released version); bk no longer
+  reports `max_pages` (supersedes the listing reasons in the first bullet). Also C&S L-R4-1
+  („Koszt” wording), L-R4-2 (skips + all-rejected unit case) and the DEPLOY
+  `jq '{status, notRun}'` check.
+- C&S round 5: the target is the whole total for a one-page listing (≤ 250), whatever the
+  budget, so a small-`--limit` preview checks it too (no extra request); min(total, budget)
+  only over 250 (M-R5-1). RUNBOOK: re-run a day with a stored `listing_mismatch` (L-R5-2).
+- C&S round 6 PASS → Quality ACCEPT (round 3). Coordinator: RUNBOOK keeps `bk` on when only one
+  old day repeats (Quality L1); D-030 cost of failing the whole day (N1); DEPLOY step 3 wording
+  (N3); PR_PLAN listing scope; `docs/LAUNCH_ROADMAP.md` risk row without `listing_mismatch`
+  (C&S L-R5-1) and RODO art. 14 (owner's review) as stage 3c item and owner decision 6.
+  1961 tests (+3 over the PR head 442b581).
 - `docs/LAUNCH_ROADMAP.md` (new): stages from PR-08 to the market test; linked from ROADMAP.
 
 ## Blockers
@@ -788,16 +809,14 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
    merge, on the VPS: PR-07B checklist (`docs/DEPLOY.md` §13) if not done yet, then PR-08 AC1
    and the `bk` backfill (Blockers). Follow-ups from the PR-08 reviews (owner to choose the PR):
    - `status` does not warn when the same source day is repeatedly `incomplete` (C&S L-R2-1);
-     today single skips and `listing_mismatch` are visible only in the ingest summary/log.
+     a short listing now fails the day (owner-review round), but single detail skips
+     (`detail_missing`/`detail_invalid`) are still visible only in the ingest summary/log.
+   - Partial value (owner's review, QoL): when only some orders of a `bk` offer have a value,
+     the value stays `null`; showing „wartość części: …” in the digest needs a separate field
+     and a digest text change (D-030 value rule), so it is a separate PR.
    - A day failed by "every record of the day was rejected" is read in full (~9 min) on every
      catch-up morning and delays BZP (RUNBOOK says to disable `bk`); a cheaper early stop or a
      per-day give-up could follow (C&S L-R3-1, Quality).
-   - D-030 „Koszt” wording: a small all-rejected day is `succeeded` or `incomplete` (when it
-     also had skips), in both cases without an alert (C&S L-R4-1).
-   - Optional unit case combining skips with an all-rejected day (read=3 + 2 skipped fails;
-     read=2 + 2 skipped is `incomplete`) (C&S L-R4-2).
-   - DEPLOY §6 step 3: add `jq '{status, notRun}' /root/bk-backfill.json` so days stopped by
-     `consecutive_failures` are not missed (Quality Low).
    - Offers covering several voivodeships are `region_unknown` with a misleading reason text;
      net/gross label of the value; volume of the first digest after the backfill (D-030 notes).
    - Nits: `docs/SECURITY.md` bk line wrapping and a repeated sentence; long attribution line in
@@ -1027,6 +1046,12 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-05, PR-08 owner-review round (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 1961 tests passed in 57 files,
+none skipped (run by the coder, C&S round 6, Quality round 3 and the coordinator). No
+dependency changes; no network requests to the live source from the container (fixtures only);
+no e-mail sent. Working-tree fingerprint unchanged across every reviewer run.
 
 2026-11-05, PR-08 before the PR (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
 REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 1958 tests passed in 57 files,
