@@ -32,9 +32,9 @@ Szacunek: około 1 tygodnia.
 **Zadania:**
 
 - [A] Adapter `bk` dla Bazy Konkurencyjności (krok 0 i zakres: `docs/PR_PLAN.md` → PR-08).
-  Obejmuje parser, normalizację, migrację wiersza `sources`, przypisanie źródła („źródło:
-  Ministerstwo Funduszy i Polityki Regionalnej”, data pozyskania) w digeście i na
-  `/dopasowania`, `source:preview bk` oraz decyzję D-030.
+  Obejmuje parser, normalizację, migrację wiersza `sources`, przypisanie źródła („Źródło: Baza
+  Konkurencyjności, Ministerstwo Funduszy i Polityki Regionalnej; pobrano {data}; dane
+  przetworzone: skrócone i ujednolicone”) w digeście i na `/dopasowania`, `source:preview bk` oraz decyzję D-030.
 - [A] Budżet czasu: ingest BZP i BK musi skończyć się przed `status --notify` o 06:30.
   Jeśli się nie zmieści, zmiana limitu albo harmonogramu z uzasadnieniem w D-030.
 - [W] Review PR-a i merge.
@@ -55,7 +55,7 @@ Szacunek: 1–2 dni pracy właściciela. Wykonuje właściciel [W], według list
 
 1. Host, Node 22, PostgreSQL 16, Caddy, użytkownik i katalogi (§1–§5).
 2. Build, konfiguracja i migracje (§6).
-3. Pierwsze dane i **AC1 z PR-02**: `source:preview bzp`, potem `source:preview bk` na
+3. Pierwsze dane: **AC1 z PR-02** (`source:preview bzp`) i **AC1 z PR-08** (`source:preview bk`) na
    VPS z bezpośrednim HTTPS. Wynik i liczby trafiają do `docs/STATE.md` → Blockers.
 4. `serve` pod systemd, Caddy z TLS i sprawdzenie maskowania tokenów w logach (§7–§8).
 5. Cron i logrotate (§9), heartbeat (§10), kopia poza hostem zaszyfrowana `age` (§11).
@@ -84,7 +84,7 @@ action:
   tylko po słowie z opisu, z fałszywymi trafieniami. Do rozważenia:
   - mniej punktów za trafienie tylko w opisie;
   - podpowiedź słów wykluczających w `profile:create`;
-  - licznik „tylko CPV” w `match:preview`.
+  - licznik „dopasowane tylko po CPV” w `match:preview` (uwaga z review PR #8).
 
   Każda zmiana scoringu wymaga poprawki D-023.
 
@@ -131,7 +131,7 @@ Szacunek: 4–8 tygodni.
 ### Rekrutacja [W]
 
 - 5–10 firm z sieci kontaktów właściciela.
-- Branże zgodne ze słownikiem kategorii (D-022/D-023), np. usługi, budowlanka, IT, dostawy.
+- Branże zgodne ze słownikiem kategorii (D-022/D-023), np. sprzątanie, remonty, elektryka, IT, meble i wyposażenie.
 - Region: 1–2 województwa.
 - Warunek: 30 dni za darmo w zamian za ocenę każdego digestu.
 
@@ -265,13 +265,13 @@ Decyzja o skali, zapisana w `docs/DECISIONS.md`:
 
 ## Ryzyka
 
-| Ryzyko                                                              | Skutek                       | Zabezpieczenie                                                                              |
-| ------------------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------- |
-| API Bazy Konkurencyjności jest nieudokumentowane i może się zmienić | brak ofert BK                | `SourceFormatError` z kodem, alert z `status`, próba błędu źródła (§13), szybki PR poprawki |
-| Niska trafność dopasowań                                            | odejście firm w 1. tygodniu  | PR-09 przed pilotażem, ankieta tygodniowa, kalibracja na profilach pilotażowych             |
-| Digest w spamie                                                     | brak wartości mimo działania | SPF/DKIM/DMARC, test na własnej skrzynce, monitoring zwrotów                                |
-| Pojedynczy VPS                                                      | przerwa w dostawach          | kopia poza hostem, ćwiczenie odtworzenia, heartbeat, zewnętrzny monitoring dostępności      |
-| Wąskie gardło operatora (profile przez CLI)                         | limit kilkunastu firm        | samoobsługowe wejście w etapie 5, nie wcześniej                                             |
+| Ryzyko                                                              | Skutek                       | Zabezpieczenie                                                                                                                                                                                                                                                                           |
+| ------------------------------------------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| API Bazy Konkurencyjności jest nieudokumentowane i może się zmienić | brak ofert BK                | zmiana struktury: `SourceFormatError` → `invalid_document`, alert z `status`; pojedyncze pominięcia (`detail_*`, `listing_mismatch`) widoczne tylko w podsumowaniu `ingest` i `ingest.log` — operator sprawdza je po backfillu (DEPLOY §6); próba błędu źródła (§13); szybki PR poprawki |
+| Niska trafność dopasowań                                            | odejście firm w 1. tygodniu  | PR-09 przed pilotażem, ankieta tygodniowa, kalibracja na profilach pilotażowych                                                                                                                                                                                                          |
+| Digest w spamie                                                     | brak wartości mimo działania | SPF/DKIM/DMARC, test na własnej skrzynce, monitoring zwrotów                                                                                                                                                                                                                             |
+| Pojedynczy VPS                                                      | przerwa w dostawach          | kopia poza hostem, ćwiczenie odtworzenia, heartbeat, zewnętrzny monitoring dostępności                                                                                                                                                                                                   |
+| Wąskie gardło operatora (profile przez CLI)                         | limit kilkunastu firm        | samoobsługowe wejście w etapie 5, nie wcześniej                                                                                                                                                                                                                                          |
 
 ## Otwarte decyzje właściciela
 

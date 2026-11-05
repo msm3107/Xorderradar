@@ -179,6 +179,94 @@ Jako root, w `/opt/radar-zamowien`, z `$RADAR` jak wyżej:
    jeszcze raz tą samą komendą (deduplikacja nie zdubluje ogłoszeń).
 3. **Pierwszy backup**: `$RADAR backup /var/backups/radar`.
 
+### Drugie źródło: Baza Konkurencyjności
+
+Migracja `0007_bk_source` (PR-08, D-030) dodaje źródło `bk` **wyłączone** — przy pierwszym
+wdrożeniu i przy aktualizacji (punkt 15). Wyłączone `bk` nie jest pobierane, a `status` go nie
+sprawdza. Włączenie to decyzja właściciela po udanym AC1. Jako root, w `/opt/radar-zamowien`,
+z `$RADAR` jak wyżej, **poza oknem crona 5:30–8:00**:
+
+1. **AC1 z PR-08** — na tym hoście, nie w kontenerze deweloperskim (SafeHttpClient nie używa
+   proxy, D-014):
+
+   ```sh
+   $RADAR source:preview bk --date <dzień roboczy sprzed kilku dni> --limit 20 | jq .
+   ```
+
+   Oczekiwane:
+   - kod `0` i `normalized` > 0;
+   - w logu jedna część (`part` `announcements`) z `records` > 0: `source listing fetched`
+     albo `source listing incomplete` z powodem `max_records` (dzień ma więcej ogłoszeń niż
+     `--limit`);
+   - `rejected` = 0; inaczej sprawdź `rejectionReasons` (pojedyncze odrzucenie nie blokuje
+     włączenia, powtarzający się powód to sprawa dla adaptera);
+   - `sourceUrl` prowadzi do `/ogloszenia/<id>` i otwiera się w przeglądarce;
+   - w `contact` tylko e-mail i telefon, bez imion i nazwisk.
+
+   Przy `--limit 20` adapter czyta tylko pierwszy porządek listy, więc suma dwóch porządków
+   (niestabilna paginacja, D-030) nie jest tu sprawdzana. Pierwszy raz sprawdza ją backfill
+   (krok 3) w dniach roboczych ze 100+ ogłoszeniami.
+
+   Kod `1` (np. `invalid_document`) albo `incomplete` z innym powodem (`listing_mismatch`,
+   `max_pages`, `detail_invalid`): nie włączaj `bk`; postępowanie — `docs/RUNBOOK.md` → „Baza
+   Konkurencyjności”. Pojedyncze `detail_missing` (404, ogłoszenie wycofane w trakcie): powtórz
+   podgląd.
+
+2. **Włączenie** — w `psql` jak w `docs/RUNBOOK.md` (na początku, `SET ROLE radar;`):
+
+   ```sql
+   UPDATE sources SET enabled = true, updated_at = now() WHERE id = 'bk';
+   ```
+
+   Od tej chwili `status` sprawdza też `bk` i do pierwszego przebiegu zgłasza
+   `source_never_run` — zrób krok 3 od razu.
+
+3. **Backfill raz**, w `tmux` (jak w „Pierwsze dane”, krok 2):
+
+   ```sh
+   $RADAR ingest bk --from <wczoraj−30> --to <wczoraj> | tee /root/bk-backfill.json
+   ```
+
+   Trwa ok. 1–2 h (do 250 ogłoszeń na dzień, timeout 15 min na dzień). Uruchom go wieczorem,
+   **najpóźniej ok. 22:00**: nawet z zapasem kończy się długo przed `ingest` z crona o 6:00,
+   który w trakcie backfillu kończy się `"status":"skipped"` (blokada). Bez backfillu źródło
+   bez przebiegów nadrabia tylko wczoraj.
+
+   Po zakończeniu sprawdź podsumowanie JSON (jedna linia na stdout; same liczby i kody, bez
+   treści ogłoszeń):
+
+   ```sh
+   jq -c '.runs[] | {publicationDate, status, documents, inserted, rejected, incomplete, errorCode}' /root/bk-backfill.json
+   ```
+
+   - Każdy przebieg ma `status` `succeeded` albo `incomplete`. Wypisz dni `incomplete`
+     i ich powody (`incomplete[].reason`).
+   - `rejected` ≈ 0 w każdym dniu.
+   - Dni z `listing_mismatch`, `detail_missing` albo `detail_invalid` powtórz pojedynczo:
+     `$RADAR ingest bk --date <dzień>`. `max_records` oznacza dzień z ponad 250 ogłoszeniami
+     i jest oczekiwany.
+   - Dzień `failed`: kod w `errorCode`, postępowanie w `docs/RUNBOOK.md` → „Baza
+     Konkurencyjności”.
+
+   Przerwany backfill (np. zerwana sesja; podsumowania wtedy nie ma) uruchom od **pierwszego
+   niedokończonego dnia**, nie od początku:
+   `$RADAR ingest bk --from <pierwszy niedokończony dzień> --to <wczoraj>`. Dni są czytane od
+   najstarszego, więc to dzień po ostatnim przebiegu `succeeded`/`incomplete` z zapytania
+   „Ostatnie przebiegi źródła” w `docs/RUNBOOK.md` (z `'bk'`). Dzień przerwany w trakcie jest
+   czytany od nowa, a deduplikacja nie zdubluje ogłoszeń.
+
+4. **Przed pierwszym digestem po backfillu** (cron o 7:30): pierwszy digest może mieć do
+   50 ofert na profil (cały backfill mieści się w oknie `first_seen_at` 7 dni, D-024). Rano,
+   po `ingest` i przed 7:30, uruchom `$RADAR digest --dry-run` i sprawdź liczby ofert na
+   profil w podsumowaniu (nic nie jest wysyłane). Uprzedź firmy pilotażowe, że ten e-mail
+   będzie dłuższy.
+
+5. **Następnego ranka**: `$RADAR status | jq '.sources[] | {sourceId, problems}'` — `bk` bez
+   problemów; w digeście i na `/dopasowania` oferty `bk` mają pole „Źródło” z atrybucją.
+
+Wyłączenie `bk` i reakcja na zmianę formatu — `docs/RUNBOOK.md` → „Baza Konkurencyjności”.
+Cron się nie zmienia: `ingest` o 6:00 pobiera wszystkie włączone źródła po kolei.
+
 ## 7. `serve` (systemd)
 
 ```sh
@@ -437,6 +525,9 @@ szczegóły: `$RADAR status | jq .`.
 15. [ ] Smoke test: wszystko `PASS`.
 16. [ ] Ćwiczenie odtworzenia na VPS (punkt 14) — zakończone, baza próbna usunięta.
 17. [ ] Błąd źródła widoczny w jednym cyklu (kryterium PR-07) — „Próba błędu źródła” niżej.
+18. [ ] Baza Konkurencyjności (`bk`, po migracji wyłączona): AC1 z PR-08 i decyzja właściciela;
+        przy włączeniu — włączenie i backfill według punktu 6, „Drugie źródło: Baza
+        Konkurencyjności”.
 
 ### Próba ścieżki alertu (pozycja 13)
 
@@ -535,6 +626,9 @@ systemctl restart radar-serve
 systemctl reload caddy                    # gdy zmienił się Caddyfile — potem kontrola z punktu 8
 sh /opt/radar-zamowien/deploy/smoke.sh
 ```
+
+Aktualizacja do wersji z PR-08 dodaje źródło `bk` wyłączone (`migrate` wypisuje
+`0007_bk_source`); włączenie — punkt 6, „Drugie źródło: Baza Konkurencyjności”.
 
 Aktualizuj poza oknem 5:30–8:00 (cron). Gdy coś nie działa — **powrót**:
 

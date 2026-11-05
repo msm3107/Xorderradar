@@ -21,7 +21,9 @@
 > tabela `deliveries`). PR-06A dodaje dostęp do profilu: komendy `serve` i `access:link`,
 > moduł `src/web/` (`node:http`, D-025) oraz tabele `access_tokens` i `sessions` (migracja
 > `0006_access`, D-026). PR-06B dodaje ekrany klienta: formularz profilu, stronę dopasowań i
-> ponowne włączenie powiadomień (D-027), bez migracji. Wszystko poniżej oznaczone
+> ponowne włączenie powiadomień (D-027), bez migracji. PR-08 dodaje drugi adapter — Baza
+> Konkurencyjności (`src/sources/bk/`, D-030) — z migracją `0007_bk_source` (źródło `bk`,
+> wyłączone) i atrybucją ofert `bk` w e-mailu i na `/dopasowania`. Wszystko poniżej oznaczone
 > _(plan, PR-xx)_ to projekt docelowy — kontrakty mogą zostać doprecyzowane w danym PR, a
 > zmiana musi trafić do tego dokumentu i do `docs/DECISIONS.md`.
 
@@ -72,6 +74,7 @@ src/
 │                           # vocabulary.ts: kategorie MVP, 16 województw (D-023) [PR-04]
 ├── sources/                # kontrakt adaptera, rejestr, podgląd; bzp/ = BZP    [PR-02]
 │   │                       # bzp/notice-body.ts: opis/kontakt/wartość z htmlBody [PR-03C]
+│   │                       # bk/ = Baza Konkurencyjności (lista + szczegóły)   [PR-08]
 │   └── normalize/          # czyste helpery (D-022): whitespace, html-text,     [PR-03C]
 │                           # comparable, regions, cpv-categories, warsaw-time (PR-03B)
 ├── ingestion/              # fingerprint, content_hash, runIngestion, blokada ingest [PR-03A]
@@ -194,9 +197,11 @@ interface SourceAdapter<TNotice = unknown> {
   ograniczona do jednej strony (D-008); odrzucenie callbacku przerywa `fetch` i jest
   propagowane bez zmian. Bez `onDocument` (`source:preview`) dokumenty są zbierane i zwracane.
 - `FetchResult` = `{ documents: RawDocument[], incomplete: { part, reason }[] }`. Osiągnięcie
-  limitu (`max_records`, `max_pages`) albo niemożność bezpiecznej kontynuacji paginacji
-  (`invalid_cursor`, `repeated_cursor`) nigdy nie jest ciche: trafia do `incomplete` i do
-  logu (warn).
+  limitu (`max_records`, `max_pages`), niemożność bezpiecznej kontynuacji paginacji
+  (`invalid_cursor`, `repeated_cursor`) albo lista, która dała mniej różnych rekordów niż
+  podaje sama (`listing_mismatch`, `bk`, D-030), a także pominięte szczegóły ogłoszenia
+  (`detail_missing`, `detail_invalid`, `bk`, D-030) nigdy nie są ciche: trafiają do `incomplete`
+  i do logu (warn).
 - `RawDocument` = `{ sourceId, url, fetchedAt, contentType, body }` — tylko w pamięci (D-008).
 - Model błędów: błąd HTTP → `HttpClientError` z klienta (propagowany bez zmian); dokument
   bezużyteczny jako całość (nie UTF-8, nie JSON, nie ta struktura, za dużo rekordów) →
@@ -263,6 +268,52 @@ pominięta lub powtórzona przy zmianie czasu → odrzucenie), gdy zmieniane og�
 „Ogłoszenie o zamówieniu” (sekcja 3.1). Inna zmiana → `change.kind = "none"` ze stałym
 powodem; niejednoznaczna lub niepoprawna → odrzucenie ze stałym powodem. HTML nie jest
 zapisywany ani logowany.
+
+**Baza Konkurencyjności (`src/sources/bk/adapter.ts`, PR-08, D-030):** nieudokumentowane JSON
+API publicznej aplikacji na `bazakonkurencyjnosci.funduszeeuropejskie.gov.pl`.
+
+- **Lista dnia:** `GET /api/announcements/search` z `status[]=PUBLISHED` i
+  `publicationDateRange[from]` = `[to]` = dzień. Filtr dotyczy publikacji bieżącej wersji
+  ogłoszenia. Strony mają po min(100, budżet) rekordów.
+- **Dwa porządki, bo paginacja jest niestabilna:** adapter czyta kolejno `sort=publicationDate`
+  i `sort=default`. Zbiera sumę różnych id, aż osiągnie `min(meta.total, budżet)`, najwyżej
+  5 stron na porządek. Brak rekordów to `incomplete` z powodem `listing_mismatch`, limit stron
+  — `max_pages`. Porządek kończy ostatnia, krótsza strona albo `meta.total`; strona krótsza niż
+  żądana przed końcem listy i rekord listy z innym `publication_date` niż żądany dzień to
+  `SourceFormatError`.
+- **Budżet:** `min(maxRecords, BK_MAX_DETAILS_PER_DAY = 250)`. Więcej daje `max_records`.
+- **Szczegóły:** potem `GET /api/announcements/{id}` dla każdego ogłoszenia, po kolei.
+  Dokumentami są tylko szczegóły, przekazywane strumieniowo (`onDocument`). Strony listy są
+  walidowane i odrzucane. Szczegóły są sprawdzane przed przekazaniem tym samym czystym
+  `extract` (koperta i schemat rekordu): 404 → pominięcie z `detail_missing`, inna koperta
+  albo brak pola wymaganego (np. `title`, `advertiser_address_details.name`) →
+  `detail_invalid` (log `source detail skipped` z id ogłoszenia). Najwyżej 2 pominięcia na
+  dzień (`BK_MAX_SKIPPED_DETAILS_PER_DAY`); trzecie albo dzień bez żadnych czytelnych
+  szczegółów kończy przebieg błędem tego dokumentu. Dzień z więcej niż 2 przeczytanymi rekordami,
+  z których `normalize` odrzuca każdy, kończy się `invalid_document` (po zapisaniu liczników
+  odrzuceń); mniejszy dzień samych odrzuceń jest tylko liczony (`rejected`).
+- **Walidacja i błędy:** JSON przychodzi jako `text/html`, więc nagłówek nie jest używany. Dane
+  muszą być ścisłym UTF-8 z kopertą `status: "OK"` i oczekiwaną strukturą. Inaczej
+  `SourceFormatError` daje `invalid_document` (lista zawsze, szczegóły ponad granicę
+  pominięć). Wartość, której `normalize` nie przyjmuje (np. termin w innym formacie), jest
+  odrzuceniem rekordu z nazwą pola.
+- **Mapowanie:**
+  - `externalId` = id ogłoszenia, a nie wersji. Nowa wersja daje `updated`.
+  - `sourceUrl` = `/ogloszenia/{id}`, `tenderId` = `null`.
+  - `issuerName` = nazwa ogłoszeniodawcy.
+  - Opis to opisy pozycji wszystkich zamówień (≤ 10 000 znaków).
+  - `publishedAt` = dzień pierwszej publikacji (północ czasu polskiego).
+  - `deadline` = `YYYY-MM-DD HH:MM:SS` czasu polskiego → UTC.
+  - Wartość to suma `estimated_value` zamówień tylko wtedy, gdy każde ma ściśle poprawną,
+    dodatnią kwotę, inaczej `null`. Waluta `PLN` tylko przy wartości.
+  - Kategorie = kody CPV pozycji bez duplikatów.
+  - Lokalizacja = miejsca realizacji: województwo (z powiatem i miejscowością, jeśli wspólne)
+    tylko, gdy wszystkie miejsca mają to samo, inaczej `raw`.
+  - Kontakt = e-mail/telefon pierwszej osoby z poprawnym, nigdy imię i nazwisko.
+  - `status` z etykiety ogłoszenia (`PUBLISHED` → `open`/`closed` wg terminu, `CANCELLED` →
+    `cancelled`, `CLOSED`/`RESOLVED` → `closed`, inna → `unknown`).
+- **Atrybucja:** e-mail i `/dopasowania` pokazują przy ofercie `bk` pole „Źródło” z pełną nazwą
+  ministerstwa, dniem `fetched_at` i informacją o przetworzeniu (`digestItemView`, D-030).
 
 ### 4.2 SafeHttpClient (PR-02, zaimplementowany)
 
@@ -379,7 +430,8 @@ interface IngestionOutcome {
   (`src/ingestion/catch-up.ts`): niepokryte dni okna od najwcześniejszego dnia przebiegu
   źródła, rosnąco; źródło bez przebiegów — tylko wczoraj; brakujące dni starsze niż okno →
   `clipped` (log warn), nigdy nie pobierane automatycznie; nic do zrobienia → log info
-  `nothing to catch up`. Źródła po kolei, w każdym dni rosnąco, jeden przebieg na dzień;
+  `nothing to catch up`. Źródła po kolei (według id: `bk` przed `bzp`), w każdym dni rosnąco,
+  jeden przebieg na dzień;
   `failed` dnia nie zatrzymuje kolejnych dni; po 2 kolejnych nieudanych pierwszych próbach
   (`INGEST_MAX_CONSECUTIVE_FAILED_DAYS`, `failureStreak`; pierwsza próba = dzień bez
   wcześniejszego przebiegu źródła, z `catchUpHistory.attempted` — w trybie `range` to samo
@@ -387,7 +439,7 @@ interface IngestionOutcome {
   licznika) reszta dni źródła w `notRun` (`consecutive_failures`, log warn), inne źródła
   działają dalej; przerwany sygnał → reszta w `notRun` (`aborted`).
 - **Przebieg źródła** (sekwencyjnie, każde izolowane): nowy klient HTTP, `signal` =
-  timeout przebiegu źródła i dnia (`AbortSignal.timeout`, CLI: 10 min, D-018) połączony z sygnałem
+  timeout przebiegu źródła i dnia (`AbortSignal.timeout`, CLI: 15 min, D-018, D-030) połączony z sygnałem
   całego
   przebiegu (CLI: sygnał blokady ingest, przerywany przy jej utracie, D-019); `adapter.fetch`
   w trybie `onDocument`, każdy dokument od razu: `extract` → `normalize` → ponowna walidacja
@@ -763,6 +815,8 @@ Jeden wiersz na przebieg jednego źródła: `id uuid` (PK), `source_id` (FK →
 źródła”. Spójność „`failed` ⇔ jest `error_code`” pilnuje schemat domenowy
 (`src/domain/ingestion-run.ts`) i sama baza (`ingestion_runs_error_code_status_check`). Migracja dodaje też źródło `bzp` (`INSERT … ON CONFLICT (id)
 DO NOTHING` — istniejący wiersz, np. wyłączony przez operatora, zostaje bez zmian).
+Migracja `0007_bk_source` (PR-08, D-030) dodaje tak samo źródło `bk`, ale wyłączone
+(`enabled = false`): włącza je operator po `source:preview bk` (`docs/DEPLOY.md`).
 
 ### `deliveries` (PR-05, migracja `0005_deliveries`, D-024)
 
@@ -847,7 +901,7 @@ unikalny, `sessions_token_hash_key`, `sessions_token_hash_check`), `profile_id` 
   domyślnie — z niepokrytych dni z 31 kończących się wczoraj według UTC (nadrabianie; źródło
   bez przebiegów: wczoraj) wybranych źródeł (domyślnie wszystkich włączonych w bazie), do N rekordów
   na typ ogłoszenia i dzień (domyślnie i maks. 1000),
-  timeout 10 min na źródło i dzień (D-018, D-021). Kolejność kontroli: argumenty (kod 2) →
+  timeout 15 min na źródło i dzień (D-018, D-021, D-030). Kolejność kontroli: argumenty (kod 2) →
   konfiguracja (w
   tym `CRAWLER_CONTACT`, kod 1) → baza. Nie migruje sama (oczekujące migracje → kod 1). Wynik:
   JSON na stdout (`status`, `mode` = `date`/`range`/`catch_up`, `from`, `to`, `limit`,
@@ -974,7 +1028,7 @@ nie ponawia się w nieskończoność.
 | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SafeHttpClient` (źródła)                     | połączenie + TLS 10 s, jedna wymiana (DNS, nagłówki, całe ciało) 30 s; ciało ≤ 5 MiB                                                                                                                  | najwyżej 2 (429/502/503/504, zerwane połączenie), backoff 1 s·2ⁿ z jitterem, `Retry-After` ≤ 60 s; ≥ 2 s między żądaniami hosta; budżet 10 błędów |
 | `source:preview`                              | 5 min na przebieg                                                                                                                                                                                     | — (tylko klient HTTP)                                                                                                                             |
-| `ingest`                                      | 10 min na źródło i dzień                                                                                                                                                                              | nieudany dzień — następne uruchomienie (nadrabianie, D-021); po 2 nieudanych pierwszych dniach źródła reszta `notRun`                             |
+| `ingest`                                      | 15 min na źródło i dzień                                                                                                                                                                              | nieudany dzień — następne uruchomienie (nadrabianie, D-021); po 2 nieudanych pierwszych dniach źródła reszta `notRun`                             |
 | Pula PostgreSQL (`database.ts`)               | połączenie 5 s, `statement_timeout` 30 s (+ 35 s po stronie klienta), bezczynne 10 s, keepalive TCP 10 s                                                                                              | brak (komenda kończy się kodem 1)                                                                                                                 |
 | Blokady ingest/digest                         | sprawdzanie połączenia co 5 s                                                                                                                                                                         | brak — utrata blokady przerywa przebieg                                                                                                           |
 | SMTP (`digest`, `status --notify`)            | połączenie 10 s, powitanie 10 s, gniazdo 30 s, DNS 10 s                                                                                                                                               | chwilowe błędy: najwyżej 2 w przebiegu (po 2 s i 10 s); `failed` — kolejne uruchomienia do 3 prób na ofertę; `uncertain` nigdy                    |

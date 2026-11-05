@@ -94,7 +94,7 @@ przebiegi dają dalej `source_failed` (ostatni przebieg nieudany), a brak sukces
 
 Kody błędów przebiegu źródła (`error_code` w `ingestion_runs`): `http_status` (źródło odpowiedziało
 błędem — kod HTTP w `ingest.log`), `timeout`, `network`, `dns_failed`, `budget_exhausted`
-(za dużo błędów w przebiegu), `source_timeout` (10 min na dzień), `invalid_document` (źródło
+(za dużo błędów w przebiegu), `source_timeout` (15 min na dzień), `invalid_document` (źródło
 zmieniło format — wymaga poprawki adaptera, zgłoś jako nowy PR), `database_error`, `lock_lost`,
 `blocked_address` (host źródła wskazuje na adres prywatny — sprawdź DNS i `/etc/hosts`, np.
 wpis pozostały po próbie z `DEPLOY.md` punkt 13).
@@ -188,6 +188,70 @@ Po ponownym włączeniu `ingest` nadrabia najwyżej 31 ostatnich dni. **Nowe źr
 nowy PR (adapter, fixture'y, review; `docs/PR_PLAN.md`) — wiersz w `sources` dodaje jego
 migracja. Nie dodawaj wiersza ręcznie dla źródła bez adaptera (`ingest` skończy się
 `no_adapter`).
+
+### Baza Konkurencyjności (`bk`, D-030)
+
+Migracja `0007_bk_source` dodaje `bk` **wyłączone**. Pierwsze włączenie i pobranie danych
+opisuje `docs/DEPLOY.md`, punkt „Drugie źródło: Baza Konkurencyjności”: najpierw
+`source:preview bk` (AC1), potem `UPDATE … enabled = true` i backfill. Źródło bez przebiegów
+nadrabia tylko wczoraj, a nie 31 dni.
+
+- **Wyłączenie** (blokada, zmiana formatu, prośba właściciela Bazy):
+  `UPDATE sources SET enabled = false, updated_at = now() WHERE id = 'bk';`.
+  - BZP działa dalej.
+  - Zapisane oferty `bk` zostają i nadal trafiają do digestu z atrybucją, dopóki są w oknie
+    7 dni.
+  - Jeśli trzeba je wycofać z wysyłek, zgłoś to jako zadanie — nie kasuj wierszy ręcznie.
+- **Zmiana formatu (`invalid_document`):** API Bazy jest nieudokumentowane i może się zmienić
+  bez zapowiedzi. Przebieg dnia jest `failed`, a `status` z 6:30 zgłasza `source_failed` dla
+  `bk`. Postępowanie:
+  1. Sprawdź `ingest.log` (`errorCode`, bez treści).
+  2. Uruchom ręcznie `source:preview bk --date <dzień> --limit 5` poza kontenerem i porównaj
+     wynik.
+  3. Wyłącz `bk`, jeśli błąd się powtarza.
+  4. Zgłoś poprawkę adaptera jako nowy PR, z nowymi spseudonimizowanymi fixture'ami.
+
+  Po poprawce i ponownym włączeniu nadrabianie ponawia nieudane dni z ostatnich 31.
+  Odrzucenia pojedynczych ogłoszeń (`rejected`, powód z nazwą pola, np.
+  `invalid value: deadline`) też mogą oznaczać zmianę formatu. Zgłoś
+  je, gdy się powtarzają. Dzień z więcej niż 2 przeczytanymi rekordami, w którym odrzucone są
+  **wszystkie**, jest `failed` z `invalid_document` („every record of the day was rejected”):
+  to zmiana formatu wartości, postępowanie jak przy `invalid_document`. Taki dzień jest
+  czytany w całości (typowo ok. 9 min) i dopiero potem kończy się błędem, więc każdy taki dzień
+  opóźnia BZP. Gdy ten sam dzień wraca jako `failed` kolejne ranki, wyłącz `bk` (niżej,
+  „Kolejność źródeł”). Dzień z 1–2 ogłoszeniami, wszystkimi odrzuconymi, nie jest `failed` —
+  widać go tylko w `rejected` w wyniku `ingest`.
+
+- **`incomplete` w przebiegu `bk`:**
+  - `max_records`: dzień miał więcej ogłoszeń niż `--limit` albo 250
+    (`BK_MAX_DETAILS_PER_DAY`). Zaobserwowane maksimum to ok. 180. Powtarzające się
+    `max_records` przy domyślnym limicie zgłoś: trzeba przeliczyć budżet i timeout.
+  - `listing_mismatch`: lista Bazy dała mniej różnych ogłoszeń niż jej własne `meta.total`,
+    także po drugim porządku sortowania (niestabilna paginacja). Pojedynczy przypadek to brak
+    kilku ogłoszeń. Uzupełnij go ręcznie `ingest bk --date <dzień>` (nadrabianie nie ponawia
+    dni `incomplete`).
+  - `max_pages`: lista się nie przesuwa (5 stron na porządek). Zgłoś to jak zmianę formatu.
+  - `detail_missing`: szczegóły ogłoszenia dały 404 (np. wycofane między listą a
+    szczegółami). `detail_invalid`: szczegóły nie miały oczekiwanej koperty albo pola wymaganego
+    (`source detail fields invalid` w logu: id i ścieżki pól, bez wartości). Ogłoszenie jest
+    pominięte (`source detail skipped` w `ingest.log`, z id), reszta dnia zapisana. Możesz
+    ponowić dzień ręcznie: `ingest bk --date <dzień>`. Powtarzające się `detail_invalid` zgłoś
+    jak zmianę formatu.
+- **`http_status` w przebiegu `bk`:** 404 przy szczegółach pomija ogłoszenie (wyżej). Dzień
+  jest `failed` dopiero przy trzecich nieczytelnych szczegółach dnia albo gdy żadne nie dały
+  się odczytać. 5xx po ponowieniach także kończy dzień jako `failed`, a nadrabianie ponowi go
+  następnego rana. 403/429 — jak wyżej, bez obchodzenia blokady.
+  - **Kolejność źródeł:** `ingest` czyta źródła według id, czyli `bk` przed `bzp`, i każde
+    źródło kończy wszystkie swoje dni, zanim zacznie następne. Każdy ponawiany dzień `bk`
+    opóźnia BZP do 15 min. W najgorszym razie BZP startuje po 15 min × liczba dni `bk` do
+    nadrobienia, a `ingest` kończy się po 6:30.
+  - **Gdy ten sam dzień `bk` jest `failed` kolejne ranki, wyłącz `bk`** (wyżej, „Wyłączenie”)
+    i zgłoś problem. BZP zaczyna wtedy znowu o 6:00.
+- **`source_timeout`** (15 min): dzień `bk` to do 260 żądań po ~2,9 s. Timeout oznacza
+  wolniejsze źródło niż zmierzone. Powtarzający się timeout zgłoś, nie podnoś limitu ręcznie.
+- **Atrybucja:** pole „Źródło: Baza Konkurencyjności, Ministerstwo Funduszy i Polityki
+  Regionalnej; pobrano …; dane przetworzone …” w e-mailu i na `/dopasowania` jest wymagane
+  regulaminem Bazy. Nie usuwaj go.
 
 ## Wysyłki niepewne i ponowne wysłanie
 

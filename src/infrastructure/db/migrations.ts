@@ -301,4 +301,22 @@ export const migrations: Readonly<Record<string, Migration>> = {
       await sql`CREATE INDEX sessions_expires_at_idx ON sessions (expires_at)`.execute(db);
     },
   },
+
+  "0007_bk_source": {
+    async up(db: Kysely<unknown>) {
+      // The second source (D-030), disabled: the operator enables it after a
+      // real `source:preview bk` (docs/DEPLOY.md), then the daily `ingest`
+      // reads it. An existing row is left exactly as it is.
+      await sql`
+        INSERT INTO sources (id, name, base_url, enabled)
+        VALUES (
+          'bk',
+          'Baza Konkurencyjności',
+          'https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl/',
+          false
+        )
+        ON CONFLICT (id) DO NOTHING
+      `.execute(db);
+    },
+  },
 };

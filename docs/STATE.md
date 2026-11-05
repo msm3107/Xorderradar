@@ -1,13 +1,10 @@
 # Current State
 
 Current phase: PHASE 4 — PILOT
-Current PR: PR-07B — Wdrożenie na VPS (repozytorium)
-Status: PR-07A **MERGED in PR #12 (b622851)**. PR-07B (systemd + cron, PostgreSQL 16 on the same
-VPS, Caddy, heartbeat URL from env; the VPS has direct outbound HTTPS) **PR READY for the owner's
-re-review** (PR #13): owner review of 4d85cab PASS with QoL asks, addressed in an owner-review
-round (`/zdrowie`, off-host age check): Code & Safety Review PASS (round 6, confirmations 6b/7), Quality
-Review ACCEPT (round 3); not merged. Deployment itself and the drills are the owner's manual steps on the VPS
-(`docs/DEPLOY.md` §13).
+Current PR: PR-08 — Drugie źródło: Baza Konkurencyjności (adapter `bk`)
+Status: PR-07B **MERGED in PR #13 (e01aa0b)**. PR-08 (owner's choice 2026-11-04) **PR READY for
+the owner's review** (not merged): Code & Safety Review PASS (round 4), Quality Review ACCEPT
+(round 2). AC1 (`source:preview bk` against the live source) is the owner's step on the VPS.
 
 ## Completed
 
@@ -626,66 +623,111 @@ Round-1 fixes:
   same session now gets 429 first); its assertions are unchanged.
 - No new dependencies, tables or migrations.
 
+- **PR-07B — Wdrożenie na VPS (repozytorium)** (`docs/PR_PLAN.md` → PR-07B) — MERGED in PR #13
+  (e01aa0b). D-029 new. Owner decisions (2026-11-03): systemd + cron, PostgreSQL
+  16 on the same VPS, Caddy, heartbeat URL from env; the VPS has direct outbound HTTPS (D-014
+  unchanged, no proxy support needed).
+
+  - `status` checks backups (`BACKUP_DIR`, absolute path): newest `radar-*.dump` older than 26 h →
+    `backup_stale`, none → `backup_missing`, unreadable directory → `backup_dir_unreadable`; JSON
+    gains `backup`, the alert a „Kopia zapasowa: …” line. Sources keep the 36 h window. One failed
+    backup night is caught by the 07:45 `status` the same morning (26 h 15 min; spring-DST note in
+    the code and D-029).
+  - Heartbeat (`src/operations/heartbeat.ts`, `HEARTBEAT_URL`, https only, no userinfo/fragment):
+    one GET after `status` exits 0, `node:https` with `agent: false`, 10 s, no redirects, no body,
+    no retry; JSON `heartbeat` = `disabled`/`skipped`/`sent`/`failed` with fixed reason codes
+    (`timeout`, `http_<status>`, `network_<errno>`); the URL is never logged. Covers the cron
+    commands, not `serve` (DEPLOY recommends an external uptime check).
+  - `deploy/`: `systemd/radar-serve.service` (hardened, `IPAddressAllow=localhost`),
+    `cron/radar` (cron.d, host TZ Europe/Warsaw: backup 05:30, ingest 06:00, status 06:30,
+    digest 07:30, status 07:45; 14 dumps kept), `caddy/Caddyfile` (access and default logs redact
+    `/dostep/…` and `/wypis/…` in the URI and Referer; `log_skip` for those paths; HSTS left to the
+    app), `logrotate/radar`, `radar.env.example`, `smoke.sh` (PASS/FAIL only).
+  - Docs: `docs/DEPLOY.md` (new, Polish: first deploy, first data incl. AC1, Caddy redaction check,
+    heartbeat, encrypted off-host copy with append-only `rrsync`, §13 checklist with restore,
+    alert-path and source-error drills, updates); RUNBOOK, README (cron moved to
+    `deploy/cron/radar`), `.env.example`, SECURITY, ARCHITECTURE, D-029.
+  - Tests: `tests/status-config.test.ts`, `tests/heartbeat.test.ts` (local TLS server; skipped only
+    without openssl and never in CI), `tests/deploy-artifacts.test.ts`; status/backup/CLI and
+    integration tests extended (cron schedule vs. 26 h window, DST). No new dependencies, tables
+    or migrations.
+  - Reviews: C&S PASS WITH NOTES (M1 36 h window missed one failed night → 26 h; M2 Caddy's error
+    log could record tokens → filter in both logs + DEPLOY §8 check; L1–L4) → fix round → C&S
+    (L5 wrong spring-DST wording) → fix → C&S PASS → Quality (H1/H2 checklist and first-data gaps,
+    M1–M4 docs) → fix round → C&S PASS (round 4) → Quality ACCEPT (round 2) → docs polish of the
+    optional Lows → C&S PASS. One existing test changed deliberately: the env-example test expects
+    `heartbeatUrl: null` (the example ships `HEARTBEAT_URL=` empty) and gained an assertion that a
+    filled-in https URL is accepted (C&S: justified).
+  - Owner review of 4d85cab (PR #13): PASS, no blockers (`systemd-analyze security` exposure 1.4
+    „OK”, cron, smoke, heartbeat and backup check verified; Caddyfile not validated locally). QoL
+    asks → owner-review round:
+    - `GET`/`HEAD /zdrowie` in `serve` (`src/web/server.ts`): `select 1` through the existing pool,
+      one shared in-flight probe (a flood holds at most one connection), each request waits ≤ 2 s
+      → 503; a hung probe stays shared until the pool ends it (~40 s: 5 s acquire + 35 s
+      `query_timeout`); 200 `ok` / 503 `niedostępne`, `text/plain`, `no-store`, same security
+      headers, 405 + `Allow: GET, HEAD` for other methods, fixed log code `health_check_failed`.
+      `deploy/smoke.sh` and the external uptime check (DEPLOY §10) target it, so a sandbox or DB
+      failure of `serve` is no longer silent.
+    - Off-host copy: weekly check on the backup server that the newest file is < 48 h, what to do
+      on `BRAK`, optional second heartbeat from the backup user's crontab (URL in a 0600 file read
+      with `curl -K`, never in cron lines, argv or logs). RUNBOOK: `/zdrowie` 503 triage.
+    - Proxy rate limiting stays out of PR-07B (Next action).
+    - Reviews: C&S PASS (round 6; L-1 an existing test's sleeps 50 → 300 ms against flakiness,
+      assertions unchanged; L-2 ~40 s wording; L-3 SECURITY line → added, C&S PASS 6b) → Quality
+      ACCEPT (round 3; Lows: next step on `BRAK`, GET with keyword vs. status only, `health` JSON
+      wording) → copy round → C&S PASS. 1904 tests (+10).
+  - Not verifiable in the container (owner, on the VPS): `caddy validate` and the redaction check,
+    systemd/cron install, smoke test, restore/alert/source-error drills, AC1.
+
 ## In progress
 
-**PR-07B — Wdrożenie na VPS (repozytorium)** (`docs/PR_PLAN.md` → PR-07B) — PR READY for the
-owner's review (not merged). D-029 new. Owner decisions (2026-11-03): systemd + cron, PostgreSQL
-16 on the same VPS, Caddy, heartbeat URL from env; the VPS has direct outbound HTTPS (D-014
-unchanged, no proxy support needed).
+**PR-08 — Drugie źródło: Baza Konkurencyjności (adapter `bk`)** (`docs/PR_PLAN.md` → PR-08) —
+PR READY for the owner's review (not merged); D-030 new.
 
-- `status` checks backups (`BACKUP_DIR`, absolute path): newest `radar-*.dump` older than 26 h →
-  `backup_stale`, none → `backup_missing`, unreadable directory → `backup_dir_unreadable`; JSON
-  gains `backup`, the alert a „Kopia zapasowa: …” line. Sources keep the 36 h window. One failed
-  backup night is caught by the 07:45 `status` the same morning (26 h 15 min; spring-DST note in
-  the code and D-029).
-- Heartbeat (`src/operations/heartbeat.ts`, `HEARTBEAT_URL`, https only, no userinfo/fragment):
-  one GET after `status` exits 0, `node:https` with `agent: false`, 10 s, no redirects, no body,
-  no retry; JSON `heartbeat` = `disabled`/`skipped`/`sent`/`failed` with fixed reason codes
-  (`timeout`, `http_<status>`, `network_<errno>`); the URL is never logged. Covers the cron
-  commands, not `serve` (DEPLOY recommends an external uptime check).
-- `deploy/`: `systemd/radar-serve.service` (hardened, `IPAddressAllow=localhost`),
-  `cron/radar` (cron.d, host TZ Europe/Warsaw: backup 05:30, ingest 06:00, status 06:30,
-  digest 07:30, status 07:45; 14 dumps kept), `caddy/Caddyfile` (access and default logs redact
-  `/dostep/…` and `/wypis/…` in the URI and Referer; `log_skip` for those paths; HSTS left to the
-  app), `logrotate/radar`, `radar.env.example`, `smoke.sh` (PASS/FAIL only).
-- Docs: `docs/DEPLOY.md` (new, Polish: first deploy, first data incl. AC1, Caddy redaction check,
-  heartbeat, encrypted off-host copy with append-only `rrsync`, §13 checklist with restore,
-  alert-path and source-error drills, updates); RUNBOOK, README (cron moved to
-  `deploy/cron/radar`), `.env.example`, SECURITY, ARCHITECTURE, D-029.
-- Tests: `tests/status-config.test.ts`, `tests/heartbeat.test.ts` (local TLS server; skipped only
-  without openssl and never in CI), `tests/deploy-artifacts.test.ts`; status/backup/CLI and
-  integration tests extended (cron schedule vs. 26 h window, DST). No new dependencies, tables
-  or migrations.
-- Reviews: C&S PASS WITH NOTES (M1 36 h window missed one failed night → 26 h; M2 Caddy's error
-  log could record tokens → filter in both logs + DEPLOY §8 check; L1–L4) → fix round → C&S
-  (L5 wrong spring-DST wording) → fix → C&S PASS → Quality (H1/H2 checklist and first-data gaps,
-  M1–M4 docs) → fix round → C&S PASS (round 4) → Quality ACCEPT (round 2) → docs polish of the
-  optional Lows → C&S PASS. One existing test changed deliberately: the env-example test expects
-  `heartbeatUrl: null` (the example ships `HEARTBEAT_URL=` empty) and gained an assertion that a
-  filled-in https URL is accepted (C&S: justified).
-- Owner review of 4d85cab (PR #13): PASS, no blockers (`systemd-analyze security` exposure 1.4
-  „OK”, cron, smoke, heartbeat and backup check verified; Caddyfile not validated locally). QoL
-  asks → owner-review round:
-  - `GET`/`HEAD /zdrowie` in `serve` (`src/web/server.ts`): `select 1` through the existing pool,
-    one shared in-flight probe (a flood holds at most one connection), each request waits ≤ 2 s
-    → 503; a hung probe stays shared until the pool ends it (~40 s: 5 s acquire + 35 s
-    `query_timeout`); 200 `ok` / 503 `niedostępne`, `text/plain`, `no-store`, same security
-    headers, 405 + `Allow: GET, HEAD` for other methods, fixed log code `health_check_failed`.
-    `deploy/smoke.sh` and the external uptime check (DEPLOY §10) target it, so a sandbox or DB
-    failure of `serve` is no longer silent.
-  - Off-host copy: weekly check on the backup server that the newest file is < 48 h, what to do
-    on `BRAK`, optional second heartbeat from the backup user's crontab (URL in a 0600 file read
-    with `curl -K`, never in cron lines, argv or logs). RUNBOOK: `/zdrowie` 503 triage.
-  - Proxy rate limiting stays out of PR-07B (Next action).
-  - Reviews: C&S PASS (round 6; L-1 an existing test's sleeps 50 → 300 ms against flakiness,
-    assertions unchanged; L-2 ~40 s wording; L-3 SECURITY line → added, C&S PASS 6b) → Quality
-    ACCEPT (round 3; Lows: next step on `BRAK`, GET with keyword vs. status only, `health` JSON
-    wording) → copy round → C&S PASS. 1904 tests (+10).
-- Not verifiable in the container (owner, on the VPS): `caddy validate` and the redaction check,
-  systemd/cron install, smoke test, restore/alert/source-error drills, AC1.
+- `src/sources/bk/adapter.ts`: day listing (`/api/announcements/search`, current-version
+  publication date, two sort orders unioned against unstable pagination; `listing_mismatch`,
+  `max_pages`, `max_records`) plus one detail per announcement, at most 250 per day.
+  `externalId` = announcement id, `sourceUrl` = `/ogloszenia/{id}`; value only as the sum of all
+  orders' values (else `null`), `PLN` only with a value, voivodeship only when shared by all
+  places, contact e-mail/phone only.
+- Fix round after Code & Safety Review (PASS, 2 M + 3 L + 1 Nit): a detail answered 404
+  (`detail_missing`) or outside the detail envelope (`detail_invalid`) is skipped and reported in
+  `incomplete`, at most 2 per day; the third, or a day with no readable detail, fails the day.
+  A page shorter than requested before the listing's end, and a listing record of another
+  publication day, are `invalid_document`. Source order documented (`bk` before `bzp`, worst
+  case for BZP's start). `BK_SOURCE_ID` and the attribution text are in
+  `src/sources/bk/attribution.ts`.
+- Fix round 2 after Quality Review (H1, M2, L1, L2 + D-030 notes): fetch checks each detail
+  with the same `extract` (envelope + `bkRecordSchema`), so a renamed required field (`title`,
+  advertiser name) is `detail_invalid` and, past the limit, `invalid_document`; a day of
+  more than 2 read records that `normalize` all rejects is `invalid_document` too (`status`
+  alerts; C&S round 3 M-R3-1: 1–2 such records are only counted, so a small day does not fail
+  every morning). DEPLOY §6:
+  preview checks `rejected`, backfill by ~22:00 with the JSON summary review, reruns by
+  `--date`/`--from`, `digest --dry-run` before the first post-backfill digest. D-030 lists the
+  silent-null limit of optional fields, multi-region offers (`region_unknown`) and the
+  net/gross label.
+- Migration `0007_bk_source` seeds `bk` **disabled**; enabling, AC1 and backfill in
+  `docs/DEPLOY.md` §6 „Drugie źródło: Baza Konkurencyjności”. Ingest source timeout 10 → 15 min per day (preview stays 5 min).
+- Attribution „Źródło” in the digest and on `/dopasowania` for `bk` offers.
+- AC1 (real preview outside the container) is the owner's step.
+- Reviews: C&S PASS (round 1: M-1 one bad detail failed the day, M-2 short page, L-1–L-3, Nit) →
+  fix round → Quality CHANGES REQUESTED (H1 silent zero on a renamed required field, M1 STATE,
+  M2/L2 backfill checks, L1 README, L3 `docs/LAUNCH_ROADMAP.md`) → fix round 2 → C&S PASS
+  (round 3; M-R3-1 small all-rejected day failed every morning → threshold > 2, L-R3-1 RUNBOOK
+  BZP delay) → fix → C&S PASS (round 4) → Quality ACCEPT (round 2). Tracked tests changed only
+  by list additions (new source id, migration, incomplete reasons). 1958 tests (+54).
+- `docs/LAUNCH_ROADMAP.md` (new): stages from PR-08 to the market test; linked from ROADMAP.
 
 ## Blockers
 
+- **PR-08 AC1 (real `bk` records via `source:preview bk`)** cannot be verified in the container
+  (proxy-only egress, D-014). Owner, on the VPS after the merge (`docs/DEPLOY.md` §6 „Drugie
+  źródło: Baza Konkurencyjności”, checklist item 18): `source:preview bk` for a past weekday
+  (check `normalized`, `rejected` and its reasons, `incomplete`, 2–3 `sourceUrl` against the
+  page), decide, enable `bk`, 30-day backfill by ~22:00 with the JSON summary check, `digest
+--dry-run` before 7:30, `status` the next morning. Record "PR-08 AC1 verified by owner" with
+  the counts.
 - **AC1 (real notices via `source:preview`) cannot be verified in the session container:**
   the owner already verified the adapter loop against the live API through the container proxy
   (2026-10-28: 15 requests, 338 records, 0 rejected, `incomplete` `[]`), but AC1 still needs the
@@ -716,7 +758,7 @@ unchanged, no proxy support needed).
 
 ## Decisions made
 
-See `docs/DECISIONS.md` (D-001 … D-029). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
+See `docs/DECISIONS.md` (D-001 … D-030). D-007 and D-009 accepted in PR-01; D-014 (HTTP client
 on `node:https` with pinned lookup, no HTTP library) accepted in PR-02 Part A; D-015 (first
 source: BZP through the official API) in PR-02 Part B; PR-03 Part A: D-016 (fingerprint and
 `content_hash` format), D-017 (`unchanged` writes nothing, no `last_seen_at`), D-018 (ingest
@@ -736,18 +778,33 @@ D-024 amended (footer links, `List-Unsubscribe` https + mailto). PR-06B: D-027 (
 screens, e-mail change, matches list, login-CSRF); D-025 amended (`strict-origin`). PR-07A:
 D-028 (`status` rules and operator alert, backup/restore, per-session `/dopasowania` cap, HSTS,
 control characters at input, CI). PR-07B: D-029 (VPS deployment: systemd + cron, Caddy with
-token redaction, backup-age check in `status`, heartbeat).
+token redaction, backup-age check in `status`, heartbeat). PR-08: D-030 (second source: Baza
+Konkurencyjności — listing and detail limits, skip limit, all-rejected guard, mapping,
+attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` catch-up).
 
 ## Next action
 
-1. PR-07B: owner re-review of PR #13 after the owner-review round (not merged by the agents);
-   check CI on its head. After the
-   merge, the owner's manual steps on the VPS (`docs/DEPLOY.md` §13 checklist): first deploy,
-   smoke test, first data and AC1, Caddy redaction check, heartbeat set up, off-host copy,
-   restore drill, alert-path drill, source-error drill. Still open from PR-06B: last write wins,
-   already-sent offers on `/dopasowania`, the shared `/dopasowania` slot. Still open from
-   PR-06A: TTLs (7/60/30 days), a self-service "e-mail me a link" form, §8.3 leniency on
-   `/wypis`, forwarded digests.
+1. PR-08: owner review of the PR (not merged by the agents); check CI on its head. After the
+   merge, on the VPS: PR-07B checklist (`docs/DEPLOY.md` §13) if not done yet, then PR-08 AC1
+   and the `bk` backfill (Blockers). Follow-ups from the PR-08 reviews (owner to choose the PR):
+   - `status` does not warn when the same source day is repeatedly `incomplete` (C&S L-R2-1);
+     today single skips and `listing_mismatch` are visible only in the ingest summary/log.
+   - A day failed by "every record of the day was rejected" is read in full (~9 min) on every
+     catch-up morning and delays BZP (RUNBOOK says to disable `bk`); a cheaper early stop or a
+     per-day give-up could follow (C&S L-R3-1, Quality).
+   - D-030 „Koszt” wording: a small all-rejected day is `succeeded` or `incomplete` (when it
+     also had skips), in both cases without an alert (C&S L-R4-1).
+   - Optional unit case combining skips with an all-rejected day (read=3 + 2 skipped fails;
+     read=2 + 2 skipped is `incomplete`) (C&S L-R4-2).
+   - DEPLOY §6 step 3: add `jq '{status, notRun}' /root/bk-backfill.json` so days stopped by
+     `consecutive_failures` are not missed (Quality Low).
+   - Offers covering several voivodeships are `region_unknown` with a misleading reason text;
+     net/gross label of the value; volume of the first digest after the backfill (D-030 notes).
+   - Nits: `docs/SECURITY.md` bk line wrapping and a repeated sentence; long attribution line in
+     `docs/LAUNCH_ROADMAP.md`.
+     Still open from PR-06B: last write wins, already-sent offers on `/dopasowania`, the shared
+     `/dopasowania` slot. Still open from PR-06A: TTLs (7/60/30 days), a self-service "e-mail me a
+     link" form, §8.3 leniency on `/wypis`, forwarded digests.
 2. Left after PR-07B (owner to choose the PR): rate limiting at the proxy (incl.
    `/dopasowania` across sessions, PR-06B C&S L-2); `serve` uptime is covered only by the
    external uptime check recommended in DEPLOY §10 (the heartbeat covers the cron commands).
@@ -970,6 +1027,12 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-05, PR-08 before the PR (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 1958 tests passed in 57 files,
+none skipped (run by the coder, C&S round 4, Quality round 2 and the coordinator). No
+dependency changes; no network requests to the live source from the container (fixtures only);
+no e-mail sent. Working-tree fingerprint unchanged across every reviewer run.
 
 2026-11-04, PR-07B owner-review round (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
 REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 1904 tests passed in 55 files,

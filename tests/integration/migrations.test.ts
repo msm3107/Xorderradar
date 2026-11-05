@@ -33,6 +33,7 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
       "0004_notice_updates",
       "0005_deliveries",
       "0006_access",
+      "0007_bk_source",
     ]);
     expect(await tablesInSchema()).toEqual([
       "access_tokens",
@@ -60,6 +61,7 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
       "0004_notice_updates",
       "0005_deliveries",
       "0006_access",
+      "0007_bk_source",
     ]);
   });
 
@@ -125,6 +127,7 @@ describe.skipIf(skipWithoutDatabase)("migrations: concurrent runs (PostgreSQL)",
       "0004_notice_updates",
       "0005_deliveries",
       "0006_access",
+      "0007_bk_source",
     ]);
   });
 });

@@ -1,3 +1,4 @@
+import { bkAdapter } from "./bk/adapter.js";
 import { bzpAdapter } from "./bzp/adapter.js";
 import type { SourceAdapter } from "./types.js";
 
@@ -8,4 +9,5 @@ import type { SourceAdapter } from "./types.js";
  */
 export const sourceAdapters: ReadonlyMap<string, SourceAdapter> = new Map<string, SourceAdapter>([
   [bzpAdapter.sourceId, bzpAdapter],
+  [bkAdapter.sourceId, bkAdapter],
 ]);
