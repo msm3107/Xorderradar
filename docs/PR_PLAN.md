@@ -591,3 +591,243 @@ powtarzanym `incomplete`. Zakres: wybór właściciela 2026-11-06 (wszystkie 4 p
 **Poza zakresem:** „wartość części”, etykieta netto/brutto, `region_unknown` dla wielu
 województw, wczesne przerwanie dnia z samymi odrzuceniami (follow-upy PR-08), tokenizacja
 raz na ofertę, zmiany progu 50, słownik wykluczeń w produkcie, nowe źródła.
+
+---
+
+## Seria UX/QOL (PR-10 – PR-13): narzędzie, któremu klient może zaufać
+
+Źródło: niezależny audyt UX (2026-11-06), persony Marek (elektryk), Agnieszka (oferty) i
+Tomasz (kierownik, ocena w 2 minuty). Tezy audytu sprawdzone w kodzie:
+
+- `estimated_value` jest zapisywana, ale nigdzie nie pokazywana;
+- link logowania jest jednorazowy (D-026), a nowy przychodzi tylko w digeście;
+- serwis nie podaje adresu kontaktowego;
+- pole „Powiaty” nie zawęża dopasowań (`COUNTIES_HINT`);
+- README obiecuje BIP-y, szkoły i szpitale, a źródła to BZP i BK;
+- temat maila zawiera nazwę firmy odbiorcy.
+
+Kolejność według priorytetu audytu. Każdy PR przechodzi osobno ten sam przepływ 3 agentów.
+
+**Zasady wspólne serii:**
+
+- bez nowych zależności i bez JS po stronie klienta (CSP `default-src 'none'` zostaje);
+- brak wartości = „nie podano”, nigdy 0;
+- GET nigdy nie zmienia stanu (skanery poczty, D-026);
+- logi bez e-maili i tokenów — tylko identyfikatory, liczby i kody.
+
+---
+
+## PR-10 — Wejście bez pułapek
+
+**Cel:** klient, który zgubił albo zużył link, sam dostaje nowy. Literówka przy zmianie
+adresu nie odcina digestu. Strona główna mówi, czym jest serwis i skąd ma dane. Zamyka
+punkty 2 i 3 etapu 5 `docs/LAUNCH_ROADMAP.md`. To decyzja właściciela z 2026-11-06 (seria
+UX); TTL tokenów zostają bez zmian (7 / 60 / 30 dni).
+
+**Zakres:**
+
+1. **„Wyślij mi link”** — formularz z jednym polem e-mail na `/` i na stronie nieważnego
+   linku (zastępuje „odpowiedz na ostatnią wiadomość — operator wyśle nowy link”).
+   - `POST` z ochroną login-CSRF (ta sama ścisła kontrola `Origin`/`Sec-Fetch-Site` co
+     logowanie, PR-06B) i małym limitem ciała (1 KiB).
+   - **Zawsze ta sama odpowiedź** dla adresu istniejącego, nieistniejącego, wyłączonego i
+     przy wyczerpanym limicie profilu: status, treść i nagłówki identyczne. Treść: „Jeśli
+     adres jest w bazie, link przyjdzie w ciągu kilku minut. Sprawdź też folder spam.”
+     Błędna składnia adresu daje błąd formularza, niezależny od bazy.
+   - **Bez wyroczni czasowej:** odpowiedź nie czeka na bazę ani na wysyłkę. Wyszukanie
+     profilu i wysyłka idą po odpowiedzi, w procesie `serve`, przez ograniczony łańcuch
+     zadań w pamięci (np. jedno zadanie naraz, najwyżej 20 oczekujących; nadmiar odrzucony
+     z kodem w logu). Błąd wysyłki trafia do logu jako kod z `profileId`, bez adresu.
+   - **Limity:**
+     - ≤ 3 linki na profil w ciągu 24 h, liczone w bazie, atomowo przy współbieżnych
+       żądaniach (np. blokada wiersza profilu albo zapis warunkowy);
+     - ≤ 10 żądań na IP na godzinę, w pamięci procesu, z ograniczoną liczbą wpisów i
+       usuwaniem starych. IP klienta: za Caddy (gniazdo z loopback) z `X-Forwarded-For`
+       ustawianego przez Caddy, w innym razie adres gniazda. Przekroczenie daje 429 po
+       ludzku. Ten limit zależy tylko od IP, nie od adresu e-mail.
+   - Link jak w digeście: login, jednorazowy, 7 dni (D-026). Wydawany tylko, gdy profil
+     istnieje. Profil z wyłączonymi e-mailami (`active = false`) też dostaje link, bo sam o
+     niego prosi i bez niego nie włączy e-maili. Wysyłka przez istniejący sender (`test` /
+     `smtp`, D-024) z tymi samymi nagłówkami nadawcy. Temat: „Radar Zamówień: link do
+     profilu”. Treść: link, informacja, że działa raz przez 7 dni, i „Jeśli to nie Ty —
+     zignoruj tę wiadomość”.
+2. **Link logowania zostaje jednorazowy.** Strona `GET /dostep/<token>` mówi wprost: „Link
+   działa raz. Na innym urządzeniu poproś o nowy na stronie głównej.”
+3. **Zmiana e-maila z potwierdzeniem** (zmiana D-027):
+   - pole `email_confirm` znika z formularza;
+   - nowy adres trafia do `pending_email`, a profil i sesje pozostają bez zmian;
+   - na nowy adres idzie link potwierdzający: nowy cel tokenu `email_change`, jednorazowy,
+     24 h, związany z adresem z `pending_email`;
+   - na stary adres idzie powiadomienie bez linków i bez nowego adresu: „Poproszono o zmianę
+     adresu… Jeśli to nie Ty, zaloguj się i anuluj zmianę.”;
+   - do potwierdzenia digest, linki i logowanie idą na stary adres;
+   - `/profil` i formularz pokazują „Oczekuje na potwierdzenie: <nowy adres>” z przyciskiem
+     „Anuluj zmianę” (POST + CSRF);
+   - kolejna zmiana zastępuje oczekującą: stary token `email_change` zostaje usunięty;
+   - ≤ 3 e-maile potwierdzające na profil w ciągu 24 h. Ponad limit formularz pokazuje
+     błąd; to sesja właściciela, więc komunikat niczego nie ujawnia.
+   - **Potwierdzenie:**
+     - `GET /potwierdz-email/<token>` pokazuje stronę z przyciskiem, `POST` zużywa token;
+     - w jednej transakcji: `email = pending_email`, `pending_email = NULL`, zużycie
+       tokenu i to samo unieważnienie innych tokenów i sesji co dziś przy zmianie adresu
+       (`revokeOtherAccess`, ta sama kolejność blokad, D-027);
+     - wyścig dwóch potwierdzeń: wygrywa dokładnie jedno, drugie dostaje neutralną stronę
+       nieważnego linku;
+     - adres zajęty w chwili potwierdzenia: neutralny komunikat i brak zmiany. Przy
+       zapisie formularza nie ma wyroczni „adres zajęty”: każdy poprawny adres przechodzi
+       do potwierdzenia.
+4. **Strona główna `/`:**
+   - co to jest: codzienny e-mail z zamówieniami dopasowanymi do profilu firmy;
+   - skąd dane: Biuletyn Zamówień Publicznych (e-Zamówienia) i Baza Konkurencyjności;
+   - jak zacząć: obecnie przez operatora;
+   - formularz „Wyślij mi link”;
+   - link do `/przyklad`;
+   - kontakt.
+     **`/przyklad`:** przykładowy digest renderowany tym samym widokiem co
+     `/dopasowania`, ze stałych danych pseudonimizowanych w kodzie (Jan Kowalski,
+     `*.invalid`), bez bazy. **`CONTACT_EMAIL`:** opcjonalny w env, walidowany przy starcie;
+     bez niego adres kontaktowy nie jest pokazywany.
+5. **README i `docs/PRODUCT.md`:** obietnica zgodna ze źródłami (BZP + BK), bez BIP-ów,
+   szkół i szpitali jako kanału.
+
+**Kryteria akceptacji:**
+
+1. Odpowiedź na „Wyślij mi link” jest identyczna (status, treść, nagłówki) dla adresu
+   istniejącego, nieistniejącego, wyłączonego i z wyczerpanym limitem profilu (test).
+2. 4. żądanie dla profilu w 24 h nie wysyła e-maila; 11. żądanie z IP w godzinie daje 429.
+      Test DB pokazuje, że dwa równoległe żądania przy 2 wysłanych linkach wysyłają razem ≤ 1.
+3. Zmiana adresu nie zmienia `email` do potwierdzenia: digest i login idą na stary adres.
+   Stary adres dostaje powiadomienie. Anulowanie usuwa `pending_email` i token.
+4. Test DB: dwa równoległe potwierdzenia zmieniają adres raz, a drugi `POST` dostaje stronę
+   nieważnego linku. `GET` linku potwierdzającego niczego nie zmienia.
+5. Brak e-maili i tokenów w logach (test na zapisanych liniach logu). CSP bez zmian.
+6. D-031 (samoobsługowe wejście, potwierdzanie adresu). Zmiany D-026 (cel `email_change`) i
+   D-027 (koniec natychmiastowej zmiany e-maila). Aktualizacja RUNBOOK (`CONTACT_EMAIL`,
+   limity, „klient nie dostaje linku”), SECURITY, README, PRODUCT i STATE.
+
+**Poza zakresem:**
+
+- samodzielna rejestracja nowej firmy;
+- zmiana TTL;
+- limit żądań na proxy dla całej aplikacji (etap 5 pkt 1);
+- CAPTCHA;
+- drugi odbiorca;
+- wygląd kart (PR-11).
+
+---
+
+## PR-11 — Karta oferty do oceny w 20 sekund
+
+**Cel:** z karty w mailu i na `/dopasowania` widać od razu, czy oferta jest warta czasu:
+ile, do kiedy, co i dlaczego.
+
+**Zakres:**
+
+1. **Wartość:**
+   - „Wartość szacunkowa: 120 000,00 PLN (źródło nie podaje, netto czy brutto)”, zgodnie z
+     D-030;
+   - brak wartości → „nie podano”.
+2. **Termin:**
+   - format „18.11.2026 (śr) 10:00 — za 12 dni” zamiast ISO;
+   - „dziś” i „jutro”;
+   - termin ≤ 2 dni wyróżniony słowem „PILNE”;
+   - termin, który minął, oznaczony słowem „minął”;
+   - liczone w dniach kalendarzowych czasu polskiego od chwili renderowania.
+3. **Opis:** widoczne pierwsze ~300 znaków, cały opis w `<details>`. Kody CPV i techniczne
+   powody (region nieznany, CPV spoza słownika) w `<details>` „Szczegóły dopasowania”.
+4. **„Dlaczego pasuje”:** jedno ludzkie zdanie, np. „Elektryka · słowo „oświetlenie” w
+   tytule · mazowieckie”.
+5. **Wygląd:**
+   - karty z ramką i tłem;
+   - jeden wyraźny przycisk „Otwórz ogłoszenie”;
+   - nagłówek i stopka serwisu;
+   - kolor akcentu;
+   - `dl` w gridzie;
+   - `prefers-color-scheme: dark` na stronach;
+   - w mailu inline style bez sztywnych szarości.
+6. **Temat:** „Radar Zamówień: 3 nowe, najbliższy termin 18.11”, bez nazwy firmy odbiorcy.
+
+**Kryteria akceptacji:**
+
+1. Oferta bez wartości pokazuje „nie podano”.
+2. Testy graniczne terminu: zmiana czasu (DST), północ, termin minął, brak terminu.
+3. Mail i `/dopasowania` mają tę samą treść karty (jeden widok).
+4. Zrzuty 390 px i 1280 px w opisie PR. D-030 i README zaktualizowane.
+
+**Poza zakresem:** ocena trafności (PR-12), ustawienia (PR-13), zmiany scoringu.
+
+---
+
+## PR-12 — Ocena trafności i eksport
+
+**Cel:** trafność mierzona w produkcie zamiast w arkuszu (etap 4) oraz lista do Excela dla
+osoby przygotowującej oferty.
+
+**Zakres:**
+
+1. **Ocena w mailu:**
+   - przyciski „Trafne” i „Nietrafne” w każdej karcie;
+   - `GET /ocena/<token>/<oppId>/<werdykt>` pokazuje stronę z przyciskiem, a `POST`
+     zapisuje ocenę;
+   - token: cel `feedback`, wielorazowy, 60 dni, jeden na digest;
+   - ocena przyjmowana tylko dla oferty wysłanej temu profilowi (`deliveries`).
+2. **Ocena na `/dopasowania`:**
+   - te same przyciski (sesja + CSRF);
+   - oferty ocenione „nietrafne” są wyszarzone i trafiają na koniec listy.
+3. **Przechowywanie:** `match_feedback (profile_id, opportunity_id, verdict, created_at,
+updated_at)`, unikalna para, upsert, `ON DELETE CASCADE`.
+4. **Raport:** `feedback:report [--since YYYY-MM-DD]` zwraca JSON z liczbami per profil i
+   kategoria oraz trafnością. Bez e-maili i tytułów.
+5. **Eksport `GET /dopasowania.csv`** (sesja):
+   - separator `;`, UTF-8 z BOM pod polski Excel;
+   - neutralizacja formuł: komórki zaczynające się od `=`, `+`, `-`, `@`, tabulatora lub
+     CR;
+   - limit wierszy jak na liście.
+6. **Etap 4 roadmapy:** oceny w produkcie zastępują arkusz; ankieta zostaje tylko dla „co
+   przegapiliśmy”.
+
+**Kryteria akceptacji:**
+
+1. `GET` (skaner poczty) nie zapisuje oceny.
+2. Obcy `oppId` daje 404.
+3. Podwójny `POST` zostawia jedną ocenę.
+4. Komórka `=1+1` w CSV jest tekstem.
+5. D-031 albo nowa decyzja, RUNBOOK, STATE i LAUNCH_ROADMAP zaktualizowane.
+
+**Poza zakresem:** uczenie scoringu z ocen, oceny w `match:preview`, eksport XLSX.
+
+---
+
+## PR-13 — Ustawienia bez pułapek
+
+**Cel:** formularz, którego nie da się przypadkiem źle zapisać, i lista, która nie straszy
+błędem 503.
+
+**Zakres:**
+
+1. **Województwa:**
+   - jawny wybór „Cała Polska” / „Wybrane województwa”;
+   - „wybrane” bez zaznaczenia → błąd formularza.
+2. **Pole „Powiaty”** znika z formularza. Zapis zachowuje powiaty ustawione przez CLI.
+3. **Formularz:**
+   - checkboxy w siatce 2–3 kolumn z celem dotyku ≥ 44 px;
+   - krótsze podpowiedzi;
+   - wyraźny przycisk „Zapisz”.
+4. **Po zapisie:** komunikat „Lista dopasowań pokazuje zmiany od razu, e-mail — od jutra”
+   z linkiem do `/dopasowania`.
+5. **`/dopasowania`:**
+   - zamiast 503 strona z `<meta http-equiv="refresh" content="3">`;
+   - 429 po ludzku;
+   - stronicowanie `?strona=N` po 50, z limitem stron.
+
+**Kryteria akceptacji:**
+
+1. Przy „Cała Polska” nie da się przypadkiem zawęzić wyboru.
+2. Zapis formularza nie kasuje powiatów z CLI.
+3. Formularz na 390 px jest co najmniej o 40% niższy (zrzuty przed i po).
+4. D-027 zaktualizowana.
+
+**Poza zakresem:**
+
+- przycisk „zaznacz wszystkie” (wymaga JS i zmiany CSP);
+- drugi odbiorca na profil (zmienia klucz D-024; po pilotażu, jeśli firmy poproszą).

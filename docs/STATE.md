@@ -1,12 +1,13 @@
 # Current State
 
 Current phase: PHASE 4 — PILOT
-Current PR: PR-09 — Kalibracja dopasowań i narzędzia operatora
-Status: PR-08 **MERGED in PR #14 (366618e)**. PR-09 (owner's choice 2026-11-06: scoring
-calibration, operator delivery commands, category labels/footer, `source_incomplete`) **PR
-READY** (Code & Safety Review PASS, Quality Review ACCEPT), awaiting owner review; scope in
-`docs/PR_PLAN.md` → PR-09. Owner steps on the VPS for PR-08 (AC1, `bk`
-backfill, DEPLOY §6) remain in Blockers.
+Current PR: PR-10 — Wejście bez pułapek (UX/QOL series PR-10 – PR-13)
+Status: PR-08 **MERGED in PR #14 (366618e)**. PR-09 **PR READY in PR #15** (Code & Safety
+Review PASS, Quality Review ACCEPT), awaiting owner review. PR-10 (first PR of the UX/QOL
+series from the independent UX audit of 2026-11-06; plan in `docs/PR_PLAN.md` → PR-10 – PR-13,
+`docs/LAUNCH_ROADMAP.md` → 3d) **in progress**, built on top of PR-09; its PR opens only
+when ready for owner review (after PR #15 is merged). Owner steps on the VPS for PR-08 (AC1,
+`bk` backfill, DEPLOY §6) remain in Blockers.
 
 ## Completed
 
@@ -683,6 +684,12 @@ Round-1 fixes:
 
 ## In progress
 
+**PR-10 — Wejście bez pułapek** (`docs/PR_PLAN.md` → PR-10) — implementation in progress
+(coder). Self-service „Wyślij mi link” (constant response, limits 3/profile/24 h in the DB and
+10/IP/h in memory), e-mail change with confirmation (`pending_email`, token `email_change`
+24 h, notice to the old address), home page with sources, `/przyklad`, optional
+`CONTACT_EMAIL`; README/PRODUCT promise aligned with BZP + BK.
+
 **PR-09 — Kalibracja dopasowań i narzędzia operatora** (`docs/PR_PLAN.md` → PR-09) —
 PR READY: Code & Safety Review PASS (round 3), Quality Review ACCEPT (round 2); awaiting owner
 review. D-023, D-024, D-028 updated.
@@ -866,6 +873,8 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
 
 ## Next action
 
+0. PR-10: implementation → Code & Safety Review → Quality Review; then PR-11 – PR-13 in order
+   (`docs/PR_PLAN.md`). Each PR opens only when ready for owner review.
 1. PR-09: PR READY (Code & Safety Review PASS round 3, Quality Review ACCEPT round 2) → owner
    review of the PR (not merged by the agents); check CI on its head. On the VPS
    (PR-08 is merged, 366618e): PR-07B checklist (`docs/DEPLOY.md` §13) if not done yet, then
