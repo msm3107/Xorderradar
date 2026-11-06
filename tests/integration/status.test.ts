@@ -279,6 +279,163 @@ describe.skipIf(skipWithoutDatabase)("status (PostgreSQL)", () => {
 });
 
 /*
+ * PR-09 with PostgreSQL: `source_incomplete` from the two newest non-failed
+ * runs of two days per source, and its alert. Its own schema, so the report
+ * above keeps its sources.
+ */
+describe.skipIf(skipWithoutDatabase)("status: repeated incomplete runs (PostgreSQL)", () => {
+  let schema: TestSchema;
+  let dir = "";
+  const runIds: Record<string, string> = {};
+  const CUT = [{ part: "ContractNotice", reason: "max_pages" as const }];
+
+  beforeAll(async () => {
+    schema = await createTestSchema();
+    await migrateToLatest(schema.db);
+    dir = await mkdtemp(join(tmpdir(), "radar-status-incomplete-it-"));
+    await sql`UPDATE sources SET enabled = false`.execute(schema.db);
+    for (const id of ["twice", "once", "rerun", "same-day", "then-failed", "unreadable", "off"]) {
+      await upsertSource(schema.db, {
+        id,
+        name: `Źródło ${id}`,
+        baseUrl: "https://zamowienia.example.gov.pl",
+        enabled: id !== "off",
+      });
+    }
+    const record = async (
+      key: string,
+      sourceId: string,
+      day: string,
+      status: IngestionRunSummary["status"],
+      startedHoursAgo: number,
+      incomplete: IngestionRunSummary["incomplete"] = status === "incomplete" ? CUT : [],
+    ) => {
+      runIds[key] = await recordIngestionRun(schema.db, {
+        ...runSummary(sourceId, day, status, startedHoursAgo),
+        incomplete,
+      });
+    };
+    // Two days in a row cut short: the alarm.
+    await record("twice-old", "twice", "2026-10-31", "incomplete", 26, [
+      { part: "SmallContractNotice", reason: "max_records" },
+    ]);
+    await record("twice-new", "twice", "2026-11-01", "incomplete", 2);
+    // An incomplete day after a complete one: no alarm.
+    await record("once-old", "once", "2026-10-31", "succeeded", 26);
+    await record("once-new", "once", "2026-11-01", "incomplete", 2);
+    // A day re-run complete: it counts once, by its newest run.
+    await record("rerun-old", "rerun", "2026-10-31", "incomplete", 26);
+    await record("rerun-first", "rerun", "2026-11-01", "incomplete", 3);
+    await record("rerun-again", "rerun", "2026-11-01", "succeeded", 2);
+    // The same day incomplete twice is one day.
+    await record("same-1", "same-day", "2026-11-01", "incomplete", 3);
+    await record("same-2", "same-day", "2026-11-01", "incomplete", 2);
+    // A failed run is skipped: the two days before it were both incomplete.
+    await record("failed-a", "then-failed", "2026-10-30", "incomplete", 50);
+    await record("failed-b", "then-failed", "2026-10-31", "incomplete", 26);
+    await record("failed-c", "then-failed", "2026-11-01", "failed", 2);
+    // A stored reason list that no longer reads: shown as unreadable.
+    await record("unreadable-old", "unreadable", "2026-10-31", "incomplete", 26);
+    await record("unreadable-new", "unreadable", "2026-11-01", "incomplete", 2);
+    await sql`
+      UPDATE ingestion_runs SET incomplete = '[{"part": "", "reason": "unknown"}]'::jsonb
+      WHERE id = ${runIds["unreadable-new"] ?? ""}
+    `.execute(schema.db);
+    await record("off-old", "off", "2026-10-31", "incomplete", 26);
+    await record("off-new", "off", "2026-11-01", "incomplete", 2);
+  });
+
+  afterAll(async () => {
+    await schema.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("reports a source whose two newest days were both incomplete, not one", async () => {
+    const report = await collectStatus(schema.db, NOW);
+    const byId = Object.fromEntries(
+      (report.sources ?? []).map((source) => [source.sourceId, source]),
+    );
+    expect(Object.keys(byId)).toEqual([
+      "once",
+      "rerun",
+      "same-day",
+      "then-failed",
+      "twice",
+      "unreadable",
+    ]);
+    expect(byId.twice).toMatchObject({
+      problems: ["source_incomplete"],
+      incompleteRuns: [
+        {
+          runId: runIds["twice-new"],
+          publicationDate: "2026-11-01",
+          startedAt: at(2),
+          incomplete: CUT,
+        },
+        {
+          runId: runIds["twice-old"],
+          publicationDate: "2026-10-31",
+          startedAt: at(26),
+          incomplete: [{ part: "SmallContractNotice", reason: "max_records" }],
+        },
+      ],
+    });
+    for (const id of ["once", "rerun", "same-day"]) {
+      expect(byId[id]).toMatchObject({ problems: [], incompleteRuns: [] });
+    }
+    expect(byId["then-failed"]).toMatchObject({
+      problems: ["source_failed", "source_incomplete"],
+      incompleteRuns: [{ runId: runIds["failed-b"] }, { runId: runIds["failed-a"] }],
+    });
+    expect(byId.unreadable).toMatchObject({
+      problems: ["source_incomplete"],
+      incompleteRuns: [{ runId: runIds["unreadable-new"], incomplete: null }, { incomplete: CUT }],
+    });
+    expect(report.problems).toEqual(["source_failed", "source_incomplete"]);
+  });
+
+  it("status --notify alerts with the reason codes only", async () => {
+    const outboxDir = join(dir, "outbox");
+    let stdout = "";
+    const code = await runCli(
+      ["status", "--notify"],
+      {
+        env: {
+          DATABASE_URL: schema.url,
+          LOG_LEVEL: "error",
+          EMAIL_MODE: "test",
+          EMAIL_OUTBOX_DIR: outboxDir,
+          OPERATOR_EMAIL: "operator@example.invalid",
+        },
+        stdout: (text) => (stdout += text),
+        stderr: () => undefined,
+      },
+      { ...defaultCliDeps, digest: { ...defaultDigestDeps, now: () => NOW } },
+    );
+    expect(code).toBe(ExitCode.Failure);
+    expect(JSON.parse(stdout)).toMatchObject({
+      problems: ["source_failed", "source_incomplete"],
+      notification: "sent",
+    });
+    const json = (await readdir(outboxDir)).find((file) => file.endsWith(".json"));
+    if (json === undefined) throw new Error("no .json");
+    const alert = JSON.parse(await readFile(join(outboxDir, json), "utf8")) as {
+      subject: string;
+      text: string;
+    };
+    expect(alert.subject).toBe("Radar Zamówień: problem (source_failed, source_incomplete)");
+    expect(alert.text).toContain("Źródło twice: source_incomplete");
+    expect(alert.text).toContain(
+      `  niepełny dzień 2026-11-01: ${String(runIds["twice-new"])}, start ${at(2).toISOString()}, ` +
+        "powody ContractNotice: max_pages\n",
+    );
+    expect(alert.text).toContain("powody SmallContractNotice: max_records\n");
+    expect(alert.text).toContain("powody nieczytelne\n");
+    expect(alert.text).not.toContain("Źródło once");
+  });
+});
+
+/*
  * PR-07B with PostgreSQL: a healthy schema, a recent backup in BACKUP_DIR and
  * the heartbeat to a local HTTP server (the URL says https; the injected
  * request speaks plain HTTP to 127.0.0.1 only).

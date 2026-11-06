@@ -1,5 +1,9 @@
 import { sql, type Kysely } from "kysely";
-import type { IngestionRunStatus } from "../../domain/ingestion-run.js";
+import {
+  incompleteListSchema,
+  type IncompletePart,
+  type IngestionRunStatus,
+} from "../../domain/ingestion-run.js";
 import type { Database } from "./schema.js";
 
 /**
@@ -149,6 +153,73 @@ export async function listUnresolvedFailedDays(
     startedAt: row.started_at,
     errorCode: row.error_code,
   }));
+}
+
+/** A `succeeded` or `incomplete` run: the newest one of its publication day. */
+export interface CompletedRun {
+  readonly sourceId: string;
+  readonly runId: string;
+  readonly status: "succeeded" | "incomplete";
+  /** `YYYY-MM-DD`. */
+  readonly publicationDate: string;
+  readonly startedAt: Date;
+  /** Why the run is incomplete (part and reason codes); null when the stored value is unreadable. */
+  readonly incomplete: readonly IncompletePart[] | null;
+}
+
+/** Completed days read per source: the two newest are what `source_incomplete` compares. */
+export const STATUS_COMPLETED_RUNS_PER_SOURCE = 2;
+
+/**
+ * Per enabled source, its two newest non-failed runs of two different
+ * publication days (a day re-run counts once, by its newest run), newest
+ * first, by source. A failed run never covers a day, so it is skipped here:
+ * `source_failed` reports it.
+ */
+export async function listRecentCompletedRuns(db: Kysely<Database>): Promise<CompletedRun[]> {
+  const { rows } = await sql<{
+    source_id: string;
+    run_id: string;
+    status: "succeeded" | "incomplete";
+    publication_date: string;
+    started_at: Date;
+    incomplete: unknown;
+  }>`
+    SELECT
+      s.id AS source_id,
+      recent.id AS run_id,
+      recent.status,
+      to_char(recent.publication_date, 'YYYY-MM-DD') AS publication_date,
+      recent.started_at,
+      recent.incomplete
+    FROM sources s
+    CROSS JOIN LATERAL (
+      SELECT per_day.*
+      FROM (
+        SELECT DISTINCT ON (r.publication_date)
+          r.id, r.status, r.publication_date, r.started_at, r.finished_at, r.incomplete
+        FROM ingestion_runs r
+        WHERE r.source_id = s.id AND r.status IN ('succeeded', 'incomplete')
+        ORDER BY r.publication_date, r.started_at DESC, r.finished_at DESC, r.id DESC
+      ) per_day
+      ORDER BY per_day.started_at DESC, per_day.finished_at DESC, per_day.id DESC
+      LIMIT ${STATUS_COMPLETED_RUNS_PER_SOURCE}
+    ) recent
+    WHERE s.enabled
+    ORDER BY s.id, recent.started_at DESC, recent.finished_at DESC, recent.id DESC
+    LIMIT ${STATUS_MAX_SOURCES * STATUS_COMPLETED_RUNS_PER_SOURCE}
+  `.execute(db);
+  return rows.map((row) => {
+    const incomplete = incompleteListSchema.safeParse(row.incomplete);
+    return {
+      sourceId: row.source_id,
+      runId: row.run_id,
+      status: row.status,
+      publicationDate: row.publication_date,
+      startedAt: row.started_at,
+      incomplete: incomplete.success ? incomplete.data : null,
+    };
+  });
 }
 
 export interface DeliveryCounts {

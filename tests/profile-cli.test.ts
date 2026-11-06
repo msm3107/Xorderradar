@@ -226,6 +226,26 @@ describe("profile:create", () => {
     expect(warnings).toContain(": „ab [2J”, „bc”, „cd”, „de”, „ef” (+2 more). Jeśli");
   });
 
+  it("suggests excluding keywords for a profile with keywords and none to exclude (PR-09)", async () => {
+    const input = { ...validInput, excludeKeywords: [] };
+    const file = await profileFile("no-excludes.json", JSON.stringify(input));
+    const result = await run(["profile:create", file]);
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(JSON.parse(result.stdout)).toEqual({ status: "ok", id: PROFILE_ID });
+    expect(result.stderr).toBe(
+      "Wskazówka: profil ma słowa kluczowe, ale nie ma słów wykluczających. Słowo kluczowe " +
+        "znalezione w opisie może dopasować zamówienie z innej branży — rozważ wąskie słowa " +
+        "wykluczające (np. „ciągnik”, „koparka”, „dostawa paliwa”); wykluczenie działa też " +
+        "na opis — sprawdź wynik w match:preview.\n",
+    );
+    // The profile is created as given: nothing is added to it.
+    expect(result.calls.created).toEqual([input]);
+    // Without keywords there is nothing to exclude from: no hint, only the keyword warning.
+    expect(
+      profileWarnings({ ...validInput, includeKeywords: [], excludeKeywords: [] }).join("\n"),
+    ).not.toContain("Wskazówka");
+  });
+
   it("prints no warning for a profile with voivodeships and inflectable keywords", async () => {
     const file = await profileFile(
       "no-warnings.json",
@@ -679,6 +699,31 @@ describe("match:preview", () => {
     expect(result.stdout).toContain("  termin: brak terminu");
     expect(result.stdout.endsWith("\ndopasowane 4 z 6\n")).toBe(true);
     expect(result.stdout).not.toContain("Uwaga");
+  });
+
+  it("counts the matches without any keyword (category and region only, PR-09)", async () => {
+    const stub = stubDatabase({
+      listMatchCandidates: () =>
+        found([
+          storedOffer({ title: "Modernizacja oświetlenia ulicznego" }),
+          storedOffer({ title: "Roboty elektryczne w szkole" }),
+          storedOffer({ title: "Prace w budynku urzędu" }),
+          // A keyword in the description only, no category: 35, not a match.
+          storedOffer({
+            title: "Zakup ciągnika",
+            description: "Oświetlenie drogowe.",
+            categories: [],
+          }),
+        ]),
+    });
+    const result = await run(["match:preview", PROFILE_ID], stub);
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(
+      result.stdout.endsWith(
+        "\ndopasowane 3 z 4, w tym 2 bez słowa kluczowego (tylko kategoria i region)\n",
+      ),
+    ).toBe(true);
+    expect(result.stdout).not.toContain("Zakup ciągnika");
   });
 
   it("never prints the offers' contact data", async () => {

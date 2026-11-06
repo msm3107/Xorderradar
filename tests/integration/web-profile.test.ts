@@ -700,7 +700,10 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       const html = await page.text();
       const titles = [...html.matchAll(/<h2>([^<]+)<\/h2>/g)].map((match) => match[1]);
       expect(titles).toEqual(["Oświetlenie wcześniej", "Oświetlenie później"]);
-      expect(html).toContain("<dt>Dlaczego pasuje:</dt><dd>kategoria: elektryka (CPV 45310000-3)");
+      expect(html).toContain("<dt>Dlaczego pasuje:</dt><dd>kategoria: „Elektryka”;");
+      expect(html).toContain("<dt>Kategoria:</dt><dd>Elektryka · CPV: 45310000-3</dd>");
+      // The category label, never its key (PR-09).
+      expect(html).not.toMatch(/kategoria: elektryka|Kategoria:<\/dt><dd>elektryka/u);
       expect(html).toContain(
         `<a href="${later.opportunity.sourceUrl}" rel="noopener noreferrer">` +
           "Otwórz ogłoszenie w źródle (zamowienia.example.gov.pl)</a>",

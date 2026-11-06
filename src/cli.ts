@@ -44,6 +44,13 @@ import {
   getCompanyProfile,
 } from "./infrastructure/db/company-profiles-repository.js";
 import {
+  listPendingDeliveries,
+  resolvePendingDeliveries,
+  type PendingDeliveries,
+  type ResolveRequest,
+  type ResolveResult,
+} from "./infrastructure/db/deliveries-repository.js";
+import {
   listMatchCandidates,
   type MatchCandidates,
 } from "./infrastructure/db/opportunities-repository.js";
@@ -185,6 +192,13 @@ export interface CliDatabase {
    * Optional only so that stubs for the other commands need not provide it.
    */
   startWebServer?(options: Omit<WebServerOptions, "db">): Promise<WebServer>;
+  /**
+   * The pending deliveries (`deliveries:pending`) and the operator's decision
+   * on them (`deliveries:resolve`, under the digest lock; D-024). Optional
+   * only so that stubs for the other commands need not provide them.
+   */
+  listPendingDeliveries?(): Promise<PendingDeliveries>;
+  resolvePendingDeliveries?(request: Omit<ResolveRequest, "digestLockKey">): Promise<ResolveResult>;
   /**
    * The operator's status report (`status`, src/operations/status.ts).
    * Optional only so that stubs for the other commands need not provide it.
@@ -354,6 +368,9 @@ export function openCliDatabase(
     revokeProfileAccess: async (profileId) =>
       (await getProfileStatus(db, profileId)) === null ? null : revokeProfileAccess(db, profileId),
     startWebServer: (webOptions) => startWebServer({ db, ...webOptions }),
+    listPendingDeliveries: () => listPendingDeliveries(db),
+    resolvePendingDeliveries: (request) =>
+      resolvePendingDeliveries(db, { ...request, digestLockKey: DIGEST_LOCK_KEY }),
     collectStatus: (now) => collectStatus(db, now),
     backup: (dir, now, toolOptions) => backupDatabase(db, databaseUrl, dir, now, toolOptions),
     restore: (file, toolOptions) => restoreDatabase(db, databaseUrl, file, toolOptions),
@@ -453,6 +470,23 @@ Commands:
             --profile   only this profile (also when it has nothing new)
             With PUBLIC_BASE_URL set, every e-mail also carries a single-use login link
             ("Twój profil", 7 days) and a one-click unsubscribe link (RFC 8058, 60 days).
+  deliveries:pending
+            Print the deliveries waiting for an operator decision (status pending: a send
+            with an unknown outcome or a run stopped between claim and send) as JSON, per
+            profile, transport and digest day: profileId, transport, digestDate, offers and
+            the oldest claim time (oldestCreatedAt). Ids and counts only. Requires an
+            up-to-date schema (migrate).
+  deliveries:resolve <profileId> --sent|--failed [--date YYYY-MM-DD]
+            Record the operator's decision on the profile's pending deliveries (all of them,
+            or those of one digest day), in one transaction; other rows never change.
+            --sent    the e-mail arrived: the rows become sent (sent_at now, attempts + 1)
+            --failed  it did not: the rows are deleted, so the next digest sends those offers
+                      as new (if they still qualify)
+            --date    only the pending rows of this digest day
+            Prints the number of rows changed as JSON. Refused (exit 1, nothing changed)
+            while a digest or another deliveries:resolve runs (the digest lock) or when
+            there is no pending row to change.
+            Exactly one of --sent and --failed (exit 2 otherwise).
   serve     Run the web server (profile access through e-mail links, one-click
             unsubscribe) until SIGINT/SIGTERM. Listens on WEB_HOST:WEB_PORT (default
             127.0.0.1:3000) behind a reverse proxy that terminates TLS. Requires
@@ -474,7 +508,8 @@ Commands:
             run and its last succeeded/incomplete run, the failed days not covered since
             (last ${String(STATUS_STALE_AFTER_MS / 3_600_000)} h), and the pending and recently failed deliveries. Problems:
             source_failed, source_stale (no success in ${String(STATUS_STALE_AFTER_MS / 3_600_000)} h), source_never_run,
-            no_enabled_sources, deliveries_pending, deliveries_failed, schema_not_ready,
+            source_incomplete (the two newest non-failed runs, of two days, both incomplete;
+            the alert lists their part: reason codes), no_enabled_sources, deliveries_pending, deliveries_failed, schema_not_ready,
             database_unavailable; with BACKUP_DIR set also backup_dir_unreadable, backup_missing
             and backup_stale (newest radar-<UTC time>.dump older than ${String(BACKUP_STALE_AFTER_MS / 3_600_000)} h).
             Read-only; run it after ingest and after digest (cron). Exit 0 when there is no
@@ -506,6 +541,8 @@ type Command =
   | "profile:show"
   | "match:preview"
   | "digest"
+  | "deliveries:pending"
+  | "deliveries:resolve"
   | "serve"
   | "access:link"
   | "access:revoke"
@@ -521,6 +558,8 @@ const commands: readonly Command[] = [
   "profile:show",
   "match:preview",
   "digest",
+  "deliveries:pending",
+  "deliveries:resolve",
   "serve",
   "access:link",
   "access:revoke",
@@ -557,6 +596,13 @@ interface MatchPreviewArgs {
   readonly limit: number;
 }
 
+interface ResolveArgs {
+  readonly profileId: string;
+  readonly outcome: "sent" | "failed";
+  /** null: every pending row of the profile. */
+  readonly digestDate: string | null;
+}
+
 interface DigestArgs {
   readonly dryRun: boolean;
   /** null: every active profile. */
@@ -564,7 +610,7 @@ interface DigestArgs {
 }
 
 type Invocation =
-  | { readonly command: "health" | "migrate" | "serve" }
+  | { readonly command: "health" | "migrate" | "serve" | "deliveries:pending" }
   | { readonly command: "access:link" | "access:revoke"; readonly profileId: string }
   | { readonly command: "source:preview"; readonly preview: PreviewArgs }
   | { readonly command: "ingest"; readonly ingest: IngestArgs }
@@ -572,6 +618,7 @@ type Invocation =
   | { readonly command: "profile:show"; readonly profileId: string }
   | { readonly command: "match:preview"; readonly match: MatchPreviewArgs }
   | { readonly command: "digest"; readonly digest: DigestArgs }
+  | { readonly command: "deliveries:resolve"; readonly resolve: ResolveArgs }
   | { readonly command: "status"; readonly notify: boolean }
   | { readonly command: "backup"; readonly dir: string }
   | { readonly command: "restore"; readonly file: string };
@@ -744,6 +791,36 @@ function parseDigestArgs(args: readonly string[]): DigestArgs | string {
   return { dryRun, profileId };
 }
 
+/**
+ * `deliveries:resolve <profileId> --sent|--failed [--date YYYY-MM-DD]`;
+ * returns the parsed arguments or a usage error message.
+ */
+function parseResolveArgs(args: readonly string[]): ResolveArgs | string {
+  const [id, ...options] = args;
+  const profileId = parseProfileId(id);
+  if (profileId === null) return 'Command "deliveries:resolve" needs a profile id (uuid).';
+  let outcome: "sent" | "failed" | null = null;
+  let digestDate: string | null = null;
+  for (let index = 0; index < options.length; index++) {
+    const arg = options[index] ?? "";
+    if (arg === "--sent" || arg === "--failed") {
+      if (outcome !== null) return "Give exactly one of --sent and --failed.";
+      outcome = arg === "--sent" ? "sent" : "failed";
+    } else if (arg === "--date") {
+      if (digestDate !== null) return "Option --date given twice.";
+      const value = options[index + 1];
+      if (value === undefined) return "Option --date needs a value.";
+      if (!isCalendarDate(value)) return "--date must be a calendar date YYYY-MM-DD.";
+      digestDate = value;
+      index++;
+    } else {
+      return `Unexpected argument: ${JSON.stringify(arg)}`;
+    }
+  }
+  if (outcome === null) return "Give exactly one of --sent and --failed.";
+  return { profileId, outcome, digestDate };
+}
+
 /** Returns the invocation or a usage error message. */
 function parseInvocation(
   command: Command,
@@ -780,6 +857,10 @@ function parseInvocation(
   if (command === "digest") {
     const digest = parseDigestArgs(rest);
     return typeof digest === "string" ? digest : { command, digest };
+  }
+  if (command === "deliveries:resolve") {
+    const resolve = parseResolveArgs(rest);
+    return typeof resolve === "string" ? resolve : { command, resolve };
   }
   if (command === "status") {
     const [option, ...extra] = rest;
@@ -933,6 +1014,10 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
           deps.digest ?? defaultDigestDeps,
           publicBaseUrl,
         );
+      case "deliveries:pending":
+        return await runDeliveriesPending(database, io);
+      case "deliveries:resolve":
+        return await runDeliveriesResolve(invocation.resolve, database, io);
       case "serve":
         if (webConfig === null) throw new Error("web configuration was not loaded");
         return await runServe(config, webConfig, database, io, deps.web ?? defaultWebDeps);
@@ -1485,6 +1570,92 @@ async function runDigestCommand(
     .map((profile) => `${profile.profileId} (${profile.errorCode ?? profile.status})`);
   if (problems.length > 0) io.stderr(`Digest failed for: ${problems.join(", ")}\n`);
   return ExitCode.Failure;
+}
+
+/**
+ * `deliveries:pending`: the pending deliveries per profile, transport and
+ * digest day as one JSON line (ids, dates and counts — never addresses or
+ * titles). Read-only, no lock: a running digest's claimed rows show up too
+ * (`deliveries:resolve` refuses while it runs).
+ */
+async function runDeliveriesPending(database: CliDatabase, io: CliIo): Promise<ExitCode> {
+  if (database.listPendingDeliveries === undefined) {
+    throw new Error("database cannot list pending deliveries");
+  }
+  let pending: PendingDeliveries;
+  try {
+    const notReady = await schemaNotReady(database);
+    if (notReady !== null) {
+      io.stderr(`Cannot list pending deliveries: ${notReady}.\n`);
+      return ExitCode.Failure;
+    }
+    pending = await database.listPendingDeliveries();
+  } catch (error: unknown) {
+    const failure = describeDatabaseFailure(error);
+    if (failure.reason === "unknown") throw error;
+    io.stderr(`Cannot list pending deliveries: database ${formatDatabaseFailure(failure)}\n`);
+    return ExitCode.Failure;
+  }
+  io.stdout(
+    `${JSON.stringify({ status: "ok", pending: pending.groups, truncated: pending.truncated })}\n`,
+  );
+  return ExitCode.Ok;
+}
+
+/**
+ * `deliveries:resolve`: the operator's decision on the profile's pending
+ * deliveries (README „Wynik niepewny”, D-024), in one transaction under the
+ * digest lock. Exit 1, nothing changed, while a digest or another
+ * deliveries:resolve runs or when no pending row matches. Prints the number of rows changed as one JSON line.
+ */
+async function runDeliveriesResolve(
+  args: ResolveArgs,
+  database: CliDatabase,
+  io: CliIo,
+): Promise<ExitCode> {
+  if (database.resolvePendingDeliveries === undefined) {
+    throw new Error("database cannot resolve deliveries");
+  }
+  let result: ResolveResult;
+  try {
+    const notReady = await schemaNotReady(database);
+    if (notReady !== null) {
+      io.stderr(`Deliveries not resolved: ${notReady}.\n`);
+      return ExitCode.Failure;
+    }
+    result = await database.resolvePendingDeliveries(args);
+  } catch (error: unknown) {
+    const failure = describeDatabaseFailure(error);
+    if (failure.reason === "unknown") throw error;
+    io.stderr(`Deliveries not resolved: database ${formatDatabaseFailure(failure)}\n`);
+    return ExitCode.Failure;
+  }
+  if (result.status === "lock_busy") {
+    io.stderr(
+      "Deliveries not resolved: a digest run or another deliveries:resolve holds the lock " +
+        "(a digest's claimed rows are pending until it ends); nothing was changed. " +
+        "Try again when it has finished.\n",
+    );
+    return ExitCode.Failure;
+  }
+  if (result.changed === 0) {
+    io.stderr(
+      args.digestDate === null
+        ? "Deliveries not resolved: the profile has no pending deliveries; nothing was changed.\n"
+        : "Deliveries not resolved: the profile has no pending deliveries of that day; " +
+            "nothing was changed.\n",
+    );
+    return ExitCode.Failure;
+  }
+  io.stdout(
+    `${JSON.stringify({
+      status: "ok",
+      outcome: args.outcome,
+      digestDate: args.digestDate,
+      changed: result.changed,
+    })}\n`,
+  );
+  return ExitCode.Ok;
 }
 
 /** The schema check `serve`, `access:link` and `access:revoke` share; a message when not ready, else null. */
