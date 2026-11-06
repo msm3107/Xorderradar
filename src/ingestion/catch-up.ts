@@ -7,7 +7,7 @@
 /**
  * The most days one run covers, explicit range or catch-up: a month of
  * missed cron runs. Worst case one run takes this many days × the
- * per-source timeout per source (31 × 10 min for BZP).
+ * per-source timeout per source (31 × 15 min, INGEST_SOURCE_TIMEOUT_MS).
  */
 export const INGEST_MAX_DAYS = 31;
 
@@ -90,7 +90,7 @@ export function daysBetween(from: string, to: string): string[] {
  * one run (every mode; failureStreak). One failed day can be a passing source
  * or network error, so the later days still run; two in a row most likely
  * mean the source (or the network) is down, and each further day could cost
- * the full per-source timeout (31 × 10 min for BZP in the worst case). The
+ * the full per-source timeout (31 × 15 min in the worst case). The
  * days not run stay uncovered, so the next catch-up plans them again while
  * they are in its window.
  */

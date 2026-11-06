@@ -469,3 +469,66 @@ bezpośredni wychodzący HTTPS — D-014).
   **Poza zakresem PR-07B:** kontenery, zarządzana baza, rate limiting w Caddy (wymaga
   modułu spoza dystrybucji — limit `/dopasowania` na sesję zostaje w aplikacji), nowe
   źródła, zmiany produktu.
+
+---
+
+## PR-08 — Drugie źródło: Baza Konkurencyjności (adapter `bk`)
+
+**Cel:** zapytania ofertowe z projektów UE (zasada konkurencyjności, często poniżej 130 tys.
+zł) jako drugie źródło (ROADMAP Phase 4, D-015: BZP ma niewiele małych zamówień). Wybór
+właściciela 2026-11-04.
+
+**Krok 0 (koordynator, 2026-11-04, curl przez proxy kontenera; zapis w D-030):**
+
+- Strona `https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl` to SPA; `/robots.txt`
+  zwraca HTML aplikacji (200 `text/html`), więc pliku `robots.txt` nie ma.
+- Regulamin (`/api/regulations`, publikacja 2026-05-13): dostęp bezpłatny; ponowne
+  wykorzystanie treści dozwolone pod warunkami MFiPR: podać źródło pełną nazwą ministerstwa
+  („Ministerstwo Funduszy i Polityki Regionalnej”), datę pozyskania i informację o
+  przetworzeniu. Brak zakazu odczytu automatycznego.
+- Brak oficjalnego, opisanego API ani feedu. Publiczne JSON-y aplikacji działają bez
+  logowania: `GET /api/announcements/search?page=&limit=(≤100)&sort=publicationDate&status[]=PUBLISHED&publicationDateRange[from]=D&publicationDateRange[to]=D`
+  (`meta.total`; opis ucięty do 220 znaków) oraz `GET /api/announcements/{id}` (pełna
+  treść: zamówienia, CPV, `estimated_value` „50000,00”, miejsca realizacji z województwem,
+  termin, zamawiający, osoby kontaktowe). Bez `status[]` lub `sort` serwer zwraca 500.
+- Wolumen: 180 (2026-11-03), 155 (2026-11-02), 10 (sobota 2026-10-31) opublikowanych
+  ogłoszeń dziennie; `publication_date` na liście to data bieżącej wersji (zmiana ogłoszenia
+  wraca z nową datą).
+- Ryzyko: nieudokumentowane API aplikacji może się zmienić bez zapowiedzi → zmieniony format
+  musi dawać czytelny błąd źródła (`status`), nigdy cichych zer.
+
+**Zakres:**
+
+- adapter `src/sources/bk/` (`fetch → extract → normalize`), allowlista
+  `["bazakonkurencyjnosci.funduszeeuropejskie.gov.pl"]`, tylko `https`, SafeHttpClient
+  (rate limit, limity rozmiaru): lista dnia (jedna strona 250; powyżej 250 strony w dwóch
+  porządkach — przegląd właściciela PR #14) + szczegół każdego ogłoszenia;
+  budżet `maxRecords` i niedokończony odczyt zgłaszany w `incomplete`;
+- normalizacja: `externalId` = id ogłoszenia, `sourceUrl` = `/ogloszenia/{id}`, tytuł,
+  zamawiający, opis, termin, data publikacji, CPV/kategorie, wartość (suma lub jedna
+  wartość — reguła w D-030, nigdy zgadywana), waluta, lokalizacja (województwo), kontakt
+  wg reguły D-022 (e-mail/telefon z ogłoszenia, bez imienia i nazwiska); brak = `null`;
+- migracja: wiersz `sources` dla `bk`;
+- **atrybucja** (warunek ponownego wykorzystania): przy ofertach `bk` w digeście i na
+  `/dopasowania` — źródło z pełną nazwą ministerstwa, data pozyskania, informacja o
+  przetworzeniu;
+- czasy: dzień `bk` (~180 szczegółów × ≥ 2 s) musi mieścić się w limicie czasu źródła, a
+  cały `ingest` przed `status` z crona (06:30) — albo zmiana harmonogramu z uzasadnieniem;
+- fixtures z prawdziwych odpowiedzi, spseudonimizowane; testy parsera (brakujące pola,
+  zmieniony format, pusta lista, uszkodzony dokument, limity); `source:preview bk`;
+- D-030, README, ARCHITECTURE, SECURITY, RUNBOOK (dodanie źródła), DEPLOY (pierwsze dane
+  `bk`), STATE.
+
+**Kryteria akceptacji:**
+
+1. `source:preview bk --date <dzień>` pobiera rzeczywiste ogłoszenia (ręcznie przez
+   właściciela poza kontenerem, jak AC1 PR-02).
+2. Parser przechodzi testy na kilku fixture'ach; zmieniony/uszkodzony format → błąd źródła
+   z kodem, nie puste wyniki.
+3. `ingest` zapisuje oferty `bk` z deduplikacją i aktualizacją zmienionej wersji
+   (`updated`), a `status` widzi błąd `bk` w tym samym cyklu.
+4. Brak zapisu wartości nieobecnych w źródle; brak imion i nazwisk osób kontaktowych.
+5. Oferta `bk` w digeście i na `/dopasowania` ma atrybucję wymaganą przez regulamin.
+
+**Poza zakresem:** załączniki (`/api/files/…`), archiwalna wersja Bazy, logowanie, wersje
+historyczne ogłoszeń, zmiany matchingu, kolejne źródła.

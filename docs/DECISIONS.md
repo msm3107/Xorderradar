@@ -476,6 +476,10 @@ external_id)` (błąd po zatwierdzeniu tamtego zapisu), `ingestOpportunity` pona
 - **Uzupełnienie (PR-03B):** od PR-03B BZP pobiera 3 typy ogłoszeń (D-015), więc to najwyżej
   120 żądań na dzień, ≥ 240 s samych przerw i średnio ~5 s na żądanie w limicie 10 min;
   timeout dotyczy jednego przebiegu źródła i dnia (D-021). Tytuł decyzji zostaje bez zmian.
+- **Uzupełnienie (PR-08, D-030):** timeout źródła i dnia wynosi **15 min**: Baza
+  Konkurencyjności czyta jedno ogłoszenie na żądanie (do 254 żądań na dzień, ~12,5 min). Dla
+  BZP to średnio ~7 s na żądanie. Limit 1000 dotyczy w `bk` ogłoszeń na dzień i jest dodatkowo
+  ograniczony do 250 (`BK_MAX_DETAILS_PER_DAY`).
 
 ## D-019 — Jedno `ingest` naraz: sesyjny advisory lock PostgreSQL
 
@@ -628,7 +632,8 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
   najgorszy czas rośnie z czasem awarii (do 31 dni × timeout, jak wyżej). W praktyce awaria
   zwykle kończy się szybkim błędem HTTP, nie pełnym timeoutem. Kolejny cron w trakcie długiego nadrabiania kończy się `skipped`
   (`lock_busy`, kod 0). Granica dnia to UTC, jak dotąd (D-015, otwarte pytanie o granicę dnia
-  w API).
+  w API). Od PR-08 timeout wynosi 15 min (D-030): najgorszy przypadek to 31 × 15 min na
+  źródło.
 
 ## D-022 — Helpery normalizacji i szczegóły ofert BZP z `htmlBody`
 
@@ -1580,3 +1585,327 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
   1 h). Pierwszy `status` przed pierwszym backupem zgłasza `backup_missing`. Ręczne
   `status` z ustawionym `HEARTBEAT_URL` też pinguje. Pierwsze wdrożenie, smoke test i
   odtworzenie kopii na VPS robi właściciel ręcznie według `docs/DEPLOY.md`.
+
+## D-030 — Drugie źródło: Baza Konkurencyjności przez publiczne API aplikacji (adapter `bk`)
+
+- **Status:** Accepted (PR-08)
+- **Kontekst:** BZP obejmuje niewiele małych zamówień (D-015, „Znane ograniczenie pokrycia”).
+  Zamówienia beneficjentów funduszy europejskich publikowane w trybie zasady
+  konkurencyjności trafiają do Bazy Konkurencyjności
+  (`https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl`). Badanie wykonano 2026-11-03 i
+  2026-11-04 zapytaniami przez proxy kontenera (curl, łącznie ok. 15 żądań, odstęp ≥ 2 s,
+  User-Agent bez danych osobowych). SafeHttpClient nie był używany, bo ignoruje proxy (D-014).
+  Nie pobierano załączników (`/api/files/…`).
+- **Decyzja:** drugim źródłem jest **Baza Konkurencyjności (Ministerstwo Funduszy i Polityki
+  Regionalnej)**, czytana przez JSON API, z którego korzysta jej publiczna aplikacja.
+  - Adapter: `bk` (`src/sources/bk/adapter.ts`).
+  - Allowlista: `["bazakonkurencyjnosci.funduszeeuropejskie.gov.pl"]`, wyłącznie `https`.
+  - Ruch: SafeHttpClient z rate limitem (min. 2 s między żądaniami).
+  - Bez logowania, bez CAPTCHA, bez wersji archiwalnej Bazy i bez historycznych wersji ogłoszeń.
+  - **Podstawa korzystania:** regulamin Bazy (`/api/regulations`, wersja opublikowana
+    2026-05-13):
+    - rozdz. II pkt 1: „Dostęp do Bazy jest bezpłatny.”;
+    - pkt 4 — celem Bazy jest „…zapewnienie oferentom dostępu do oferowanych ogłoszeń …
+      poprzez powszechnie dostępny sposób ich odszukiwania i odczytu.”;
+    - pkt 5 — „Internauta, który wykorzystuje treści umieszczane w Bazie w celu innym niż
+      wskazany w punkcie 3., obowiązany jest przestrzegać polityki Ministerstwa zawartej w
+      dokumencie „Warunki ponownego wykorzystania informacji sektora publicznego”…:
+      - 5.1. należy poinformować o źródle pozyskania informacji poprzez podanie pełnej nazwy
+        Ministerstwa,
+      - 5.2. należy podać datę pozyskania informacji,
+      - 5.3. należy poinformować o przetworzeniu informacji, jeżeli miało to miejsce.
+
+      Brak zastosowania się do powyższych warunków jest działaniem bezprawnym…”;
+
+    - rozdz. VIII pkt 5: „Internauta ponosi pełną odpowiedzialność … za ponowne
+      wykorzystanie danych dostępnych na portalu.”
+
+    Radar ponownie wykorzystuje treści ogłoszeń. Robi to tylko z atrybucją z pkt 5.1–5.3
+    (punkt **Atrybucja** niżej). Regulamin nie zakazuje automatycznego odczytu i nie opisuje API.
+
+  - **`robots.txt`:** `/robots.txt` zwraca HTML aplikacji (200 `text/html`), a nie plik
+    reguł. Nie ma więc żadnych reguł dla robotów. Nie sprawdzamy go w runtime. Operator
+    sprawdza `robots.txt` i regulamin ponownie przy przeglądzie źródła, przed włączeniem `bk`
+    i przy każdej zmianie adaptera (jak w D-015).
+  - **Ryzyko nieudokumentowanego API:** API nie ma opisu ani gwarancji stabilności. Może się
+    zmienić bez zapowiedzi. Zabezpieczenia:
+    - każda odpowiedź przechodzi przez ścisłe schematy zod na granicy;
+    - inna struktura, inny status albo nieczytelny JSON/UTF-8 strony listy dają
+      `SourceFormatError`. Wtedy przebieg dnia jest `failed` z kodem `invalid_document`,
+      nigdy z pustym wynikiem (PR-08 AC2). To samo dotyczy strony listy krótszej niż
+      żądana przed końcem listy (`(strona−1) × rozmiar + liczba rekordów < meta.total`) i
+      rekordu listy z innym `publication_date` niż żądany dzień (zignorowany lub
+      przemianowany filtr daty). Lista podaje dzień jako `RRRR-MM-DD` (fixture 2026-11-03),
+      więc porównanie jest dokładne;
+    - szczegóły ogłoszeń: zasada niżej („Nieczytelne szczegóły”);
+    - `status` zgłasza to w tym samym cyklu (`source_failed`, 6:30);
+    - wyłączenie źródła opisuje `docs/RUNBOOK.md`.
+
+    Obserwacje z badania:
+    - API odpowiada JSON-em z `Content-Type: text/html`, więc adapter nie polega na
+      nagłówku;
+    - bez `status[]` albo `sort` serwer zwraca 500, dlatego oba są zawsze wysyłane;
+    - nieznane ogłoszenie daje 404 z kopertą `{"status":"Error",…}`.
+
+  - **Odczyt (dwa etapy):**
+    - **Lista:** `GET /api/announcements/search?page=N&limit=250&sort=…&status[]=PUBLISHED&publicationDateRange[from]=D&publicationDateRange[to]=D`.
+      Zwraca strony po 250 rekordów oraz `meta.total`. Filtr dnia dotyczy publikacji
+      **bieżącej wersji** ogłoszenia (fixture: 296132 opublikowane 2026-10-27 jest na liście
+      2026-11-03, bo tego dnia wyszła jego nowa wersja). Nowa wersja trafia więc na listę dnia
+      swojej publikacji i daje `updated` (PR-08 AC3).
+    - **Szczegóły:** `GET /api/announcements/{id}` dla każdego ogłoszenia z listy, po kolei.
+      Szczegóły zawierają bieżącą wersję z zamówieniami („częściami”), pozycjami, CPV,
+      miejscami realizacji i osobami kontaktowymi. Lista ich nie ma.
+
+    `RawDocument` to tylko szczegóły. Strony listy są walidowane i odrzucane.
+
+  - **Nieczytelne szczegóły:** jedno ogłoszenie nie zatrzymuje dnia, zmiana formatu tak.
+    - Szczegóły z odpowiedzią 404 (`http_status` 404; np. ogłoszenie wycofane między listą a
+      szczegółami albo widoczne na liście bez dostępnych szczegółów) są pomijane z powodem
+      `detail_missing`. Szczegóły, które nie są użytecznym rekordem, są pomijane z powodem
+      `detail_invalid`: poza kopertą (inny status, inna struktura, nieczytelny JSON/UTF-8)
+      albo bez pól wymaganych przez mapowanie (np. przemianowany `title` albo
+      `advertiser_address_details.name`, pole w innym typie JSON). Adapter sprawdza każdy
+      dokument, zanim przekaże go dalej, tym samym czystym `extract` (koperta i
+      `bkRecordSchema`), który potem uruchamia ingest. Reguły nie są powielone. Log
+      `source detail fields invalid` ma id ogłoszenia i ścieżki pól schematu, nigdy wartości.
+    - Każde pominięcie ma w logu `source detail skipped` (id ogłoszenia, powód, licznik).
+      Przebieg jest `incomplete` z tym powodem (nowe powody w `incompleteReasons`), więc
+      `lastRun.status` w `status` i wynik `ingest` to pokazują. Pozostałe ogłoszenia dnia są
+      zapisywane, a dzień jest pokryty, więc nadrabianie nie czyta go ponownie co rano.
+    - **Granica:** najwyżej 2 pominięcia na dzień (`BK_MAX_SKIPPED_DETAILS_PER_DAY`). Trzecie
+      nieczytelne szczegóły kończą dzień jako `failed` z własnym kodem (`invalid_document`
+      albo `http_status`). Dzień, w którym wszystkie szczegóły są nieczytelne, też jest
+      `failed`, nawet poniżej granicy.
+    - Uzasadnienie granicy: zmiana formatu albo przeniesiony endpoint psuje wszystkie
+      szczegóły. Taki dzień kończy się więc po 3 szczegółach (albo po wszystkich, gdy jest
+      ich mniej) błędem z kodem i `status` zgłasza `source_failed` w tym samym cyklu.
+      Pojedyncze, trwale wadliwe ogłoszenie nie blokuje dnia przez 31 dni nadrabiania.
+      Stała liczba jest prostsza niż odsetek i działa tak samo w dniu z 10 i ze 180
+      ogłoszeniami.
+    - **Dzień samych odrzuceń:** rekord poprawny według schematu, ale z wartością, której
+      `normalize` nie przyjmuje (np. termin w innym formacie, pusty tytuł), jest jak dotąd
+      odrzuceniem (`rejected`). Adapter liczy takie rekordy tym samym `normalize`. Gdy dzień
+      ma **więcej niż 2** przeczytane szczegóły (`BK_MAX_SKIPPED_DETAILS_PER_DAY`), a
+      **każdy** rekord jest odrzucony, dzień kończy się jako `failed` (`invalid_document`,
+      „every record of the day was rejected”), po zapisaniu liczników odrzuceń. Bez tej
+      reguły zmiana formatu wartości dałaby `succeeded` z zerem ofert, którego `status` nie
+      widzi.
+      - Uzasadnienie progu: ta sama granica co dla pominięć. Do 2 złych rekordów na dzień
+        jest tolerowanych, więc mały dzień (np. sobota z jednym ogłoszeniem) z prawdziwym
+        odrzuceniem nie kończy się `failed` co rano przez 31 dni nadrabiania i nie prowadzi
+        do wyłączenia `bk` przez RUNBOOK. Prawdziwa zmiana formatu wartości psuje wszystkie
+        rekordy, więc i tak jest wykryta w każdym dniu z co najmniej 3 ogłoszeniami (dni
+        robocze mają ich ok. 150–180). Stała liczba jest prostsza niż odsetek.
+      - Koszt: mały dzień (1–2 ogłoszenia), w którym wszystkie rekordy są odrzucone, jest
+        `succeeded` (albo `incomplete`, gdy były pominięcia) bez alertu. Widać go tylko
+        w licznikach (`rejected`) i w logu `source record rejected`.
+      - Pojedyncze odrzucenia w dniu z innymi zapisanymi rekordami nie zmieniają statusu.
+        Widać je w licznikach (`rejected`) i w logu `source record rejected`.
+    - Inne błędy HTTP (5xx po ponowieniach, timeout, budżet błędów) nadal kończą dzień jako
+      `failed`.
+
+  - **Niestabilna paginacja, więc lista dnia to jedna strona:** rekordy z tą samą datą
+    publikacji nie mają stałej kolejności między żądaniami.
+    - Pomiar 2026-11-03 (`meta.total` 180, strony po 100): strony 1 i 2 przy
+      `sort=publicationDate` zachodziły na siebie o 14 rekordów i pomijały 14 innych. Porządek
+      `default` pomijał inne 14, oba razem dały 180.
+    - Pomiar właściciela 2026-11-04 (`meta.total` 130, strony po 100): 111 różnych id
+      w każdym porządku i **111 także w sumie obu**, więc 19 ogłoszeń (15%) nie było
+      widocznych wcale. Jedno żądanie z `limit=200` albo `limit=500` dało wszystkie 130
+      (ok. 94 KB).
+    - **Dlatego strona ma 250 rekordów (`BK_PAGE_SIZE` = `BK_MAX_DETAILS_PER_DAY`), niezależnie
+      od `--limit`.** Dzień do 250 ogłoszeń (każdy dotąd zmierzony) to jedno żądanie listy,
+      bez paginacji, także w `source:preview` z małym `--limit`; po sprawdzeniu listy (niżej)
+      adapter bierze z niej pierwsze `budżet` id. Strona 250 rekordów to ok. 180 KB, daleko
+      poniżej limitu odpowiedzi SafeHttpClient (`DEFAULT_LIMITS.maxBytes`, 5 MiB).
+    - **Rezerwa, gdy `meta.total` > 250:** paginacja stronami po 250 w dwóch porządkach
+      (`publicationDate`, potem `default`), aż suma różnych id osiągnie
+      `min(meta.total, budżet)`. Najwyżej 2 strony na porządek (`BK_MAX_PAGES_PER_ORDER`, 500
+      pozycji, dwa razy więcej niż budżet). Lista mieszcząca się na jednej stronie nie jest
+      czytana w drugim porządku: to te same rekordy (pomiar 2026-11-04).
+    - Porządek kończy się na ostatniej, krótszej stronie albo po `meta.total` pozycjach.
+      Pozycje są pełne aż do `meta.total` także wtedy, gdy rekordy się powtarzają (strona 2
+      dnia 2026-11-03: 80, 100 + 80 = 180). Krótsza strona przed końcem listy zakończyłaby
+      porządek po cichu, więc jest błędem formatu (`invalid_document`).
+    - **Lista poniżej własnego `meta.total` kończy dzień jako `failed`:** adapter rzuca
+      `SourceFormatError` („listing has fewer distinct records than its total”,
+      `invalid_document`), gdy różnych id jest mniej niż cel. W logu jest `source listing short`
+      z liczbami (strony, rekordy, `total`).
+      - Lista mieszcząca się na jednej stronie (`meta.total` ≤ 250) jest zawsze sprawdzana
+        względem całego `meta.total`, także w podglądzie z małym `--limit`: strona i tak jest
+        pobrana, więc sprawdzenie nie kosztuje żądania.
+      - Powyżej 250 (rezerwa) celem jest `min(meta.total, budżet)`, także po limicie stron.
+      - Lista jest czytana przed szczegółami, więc nic nie jest zapisywane. `status` zgłasza
+        `source_failed`, a nadrabianie ponawia dzień według D-021 (z istniejącym limitem
+        kolejnych błędów).
+      - Uzasadnienie: dotąd taki dzień był `incomplete` (`listing_mismatch`), czyli pokryty.
+        Nadrabianie go nie ponawiało, a `status` nie alarmował, więc brakujące ogłoszenia
+        przepadały po cichu (przegląd właściciela PR #14). Bez nowego kodu ani reguł
+        nadrabiania: istniejące `failed` daje alert i ponowienie.
+      - Koszt: lista, która pozostaje krótka, traci ofertę `bk` całego dnia (nie tylko
+        brakujące), aż do poprawki adaptera; przyjęte, bo jest to głośne i ponawiane.
+        Odrzucone: zapis częściowej listy z jednoczesnym `failed`, bo każde ponowienie
+        czytałoby znów wszystkie szczegóły (ok. 6–9 min) i opóźniało BZP (jak przy L-R3-1).
+      - Powód `listing_mismatch` usunięty z `incompleteReasons` (dodany w PR-08, nie zapisuje
+        go żadna wydana wersja; zapisane wartości nie są odczytywane z powrotem). `max_pages`
+        dla `bk` nie występuje: wyczerpany limit stron rezerwy bez osiągnięcia celu to ta sama
+        lista poniżej `meta.total`, więc też `failed`. Inaczej byłby to znów pokryty dzień
+        z brakami. `max_pages` zostaje dla BZP.
+  - **Wolumen i budżet:** dni robocze to ok. 150–180 ogłoszeń w bieżącej wersji (180 dnia
+    2026-11-03, 155 dnia 2026-11-02), sobota ok. 10. Starsze dni maleją, bo ogłoszenia dostają
+    nowsze wersje albo przestają być `PUBLISHED` (pomiar 2026-11-04: 70 dla 2026-10-27, 4 dla
+    2026-09-30, 0 dla 2026-06-30).
+    - Budżet dnia: `min(--limit, BK_MAX_DETAILS_PER_DAY = 250)` szczegółów. Więcej daje
+      `incomplete` z powodem `max_records`.
+    - Dzień to zwykle 1 + liczba ogłoszeń żądań, najwyżej 250 + 4 = 254 (rezerwa: 2 porządki
+      × 2 strony). Przy zmierzonych ~2,9 s na żądanie (odstęp 2 s + odpowiedź) daje to ok.
+      12,5 min.
+    - Dlatego **timeout źródła i dnia w `ingest` rośnie z 10 do 15 min**
+      (`INGEST_SOURCE_TIMEOUT_MS`, uzupełnienie D-018). Przekroczenie to `failed`
+      (`source_timeout`), nigdy cisza.
+    - `--limit` znaczy dla `bk` „najwyżej tyle ogłoszeń na dzień”.
+    - `source:preview bk` (domyślnie 20 rekordów, 21 żądań, ok. 1 min) mieści w swoich
+      5 min ok. 100 rekordów. Dla większego `--limit` kończy się `source_timeout`.
+  - **Harmonogram (bez zmian w `deploy/cron/radar`):**
+    - `ingest` o 6:00 czyta źródła w kolejności id (`listEnabledSources`, `ORDER BY id`), czyli
+      **najpierw `bk`, potem BZP**. Typowy dzień `bk` (~180) trwa ok. 9 min, BZP kilka minut,
+      więc całość kończy się ok. 6:15.
+    - Nawet oba źródła na swoich limitach żądań (`bk` 254, BZP 120) kończą się ok. 6:20.
+      `status` o 6:30 widzi więc błąd `bk` z tego samego cyklu (PR-08 AC3).
+    - Nadrabianie wielu dni (D-021) może trwać dłużej. Najgorszy przypadek to
+      31 × 15 min na źródło. Tak było dotąd dla BZP przy 10 min.
+    - Każde źródło czyta wszystkie swoje dni, zanim zacznie następne. **BZP startuje więc
+      dopiero po wszystkich dniach `bk`: w najgorszym razie po 15 min × liczba dni `bk` do
+      nadrobienia.** Każdy dzień `bk` ponawiany po błędzie opóźnia BZP do 15 min i może
+      przesunąć koniec `ingest` poza 6:30. Gdy ten sam dzień `bk` wraca jako `failed` kolejne
+      ranki, wyłącz `bk` (`docs/RUNBOOK.md`); BZP wtedy zaczyna o 6:00.
+  - **Normalizacja (czyste `extract`/`normalize`, nic nie jest zgadywane; brak = `null`):**
+    - `externalId` to id **ogłoszenia** (`advertisement.advertisement.id`), a nie id wersji.
+      Jest stałe między wersjami. `sourceUrl` = `https://…/ogloszenia/{id}`. `tenderId` =
+      `null`.
+    - `issuerName` = `advertiser_address_details.name`. Jego brak to szczegóły
+      `detail_invalid` (patrz „Nieczytelne szczegóły”).
+    - `title` jest oczyszczony z białych znaków i przycięty do 1000 znaków na granicy słowa
+      z „…”. Pusty tytuł daje odrzucenie `invalid value: title`.
+    - `description` to opisy pozycji wszystkich zamówień: linie zachowane, puste usunięte,
+      pozycje rozdzielone pustą linią, całość do 10 000 znaków. Gdy nie ma opisu, jest `null`.
+    - `publishedAt` to dzień **pierwszej** publikacji ogłoszenia
+      (`advertisement.publication_date`, `YYYY-MM-DD`) jako północ czasu polskiego.
+    - `deadline` = `submission_deadline` (`YYYY-MM-DD HH:MM:SS`, czas polski → UTC,
+      `warsawLocalToUtc`). Zła albo niejednoznaczna data (zmiana czasu) daje odrzucenie
+      `invalid value: deadline` / `publishedAt`. Brak daty to `null`.
+    - **Wartość:** `estimated_value` zamówienia jest tekstem w formacie formularza (cyfry,
+      przecinek, dwa miejsca, np. `"50000,00"`).
+      - Jedno zamówienie daje jego wartość.
+      - Kilka zamówień („części”) daje **sumę tylko wtedy, gdy każde ma wartość**. Inaczej
+        `null`, bo częściowa suma zaniżałaby wartość.
+      - `"0,00"`, pusta wartość, inny tekst albo wartość poza zakresem kolumny (15 cyfr
+        całkowitych) dają `null`, nigdy 0.
+      - Wartość w innym typie JSON (np. liczba) to zmiana formatu: szczegóły
+        `detail_invalid` (log ze ścieżką `orders.N.estimated_value`).
+      - Netto czy brutto: API tego nie mówi. Zapisujemy liczbę tak, jak ją podano.
+    - **Waluta:** `PLN` **tylko, gdy jest wartość**. Uzasadnienie:
+      - rekord nie ma pola waluty;
+      - Baza służy zamówieniom beneficjentów programów w Polsce;
+      - regulamin wyraża progi w złotych („50 tys. PLN netto/80 tys PLN netto”, załącznik
+        pkt 6);
+      - kwoty mają polski format.
+
+      Bez wartości waluta to `null`.
+
+    - **Kategorie:** różne kody CPV (`NNNNNNNN-N`) ze wszystkich pozycji, najwyżej 100. Błędny
+      kod jest pomijany. Kategorie MVP z CPV wylicza matching, jak dla BZP (D-023). Brak CPV
+      daje `[]`.
+    - **Lokalizacja (miejsca realizacji, nie siedziba zamawiającego):**
+      - Gdy **wszystkie** miejsca mają to samo województwo rozpoznane przez
+        `normalizeVoivodeship`, zapisujemy `voivodeship` (istniejące etykiety). Do tego
+        `county`/`city`, gdy są wspólne dla wszystkich miejsc.
+      - Kilka województw, „cała Polska”, zagranica albo nierozpoznane województwo dają **brak
+        województwa**. Wybór jednego ukryłby ofertę przed profilami z pozostałych województw.
+        Wtedy `raw` zawiera listę różnych miejsc (województwo, kraj inny niż Polska, typ
+        miejsca inny niż „adres”, w ostateczności miejscowość), do 500 znaków.
+      - Brak miejsc daje `null`.
+      - Matching traktuje ofertę bez województwa jak dotąd (`region_unknown`).
+    - **Kontakt (D-022):** pierwsza osoba z poprawnym e-mailem (`email`, małe litery) i/lub
+      telefonem złożonym z cyfr i separatorów (`phone`).
+      - `-`, pusty tekst, tekst z literami i błędny e-mail są **pomijane**, a nie zapisywane
+        w `raw`, bo mogą zawierać nazwisko.
+      - **Imion i nazwisk (`forename`/`surname`) nie zapisujemy nigdy.**
+      - Brak danych daje `null`.
+    - **Status** wynika z etykiety statusu ogłoszenia:
+      - `PUBLISHED` → `open` do terminu, potem `closed`; bez terminu `unknown`;
+      - `CANCELLED` → `cancelled`;
+      - `CLOSED`/`RESOLVED` → `closed`;
+      - inna etykieta → `unknown`.
+  - **Dane osobowe:**
+    - zapisujemy tylko e-mail/telefon kontaktowy, jak w BZP. E-mail bywa imienny, ale jest
+      publikowany do kontaktu w sprawie ogłoszenia;
+    - nazwiska osób kontaktowych i autorów załączników nie są zapisywane ani logowane;
+    - opisy pozycji są tekstem zamawiającego i mogą wymieniać osoby, jak opisy BZP;
+    - logi zawierają tylko id, liczby i kody;
+    - fixtures są spseudonimizowane (`tests/fixtures/bk/README.md`).
+  - **Atrybucja (pkt 5 regulaminu):** każda oferta `bk` ma w e-mailu (tekst i HTML) i na
+    `/dopasowania` (w widocznej części karty, przed linkiem) pole
+    „Źródło: Baza Konkurencyjności, Ministerstwo Funduszy i Polityki Regionalnej;
+    pobrano RRRR-MM-DD; dane przetworzone: skrócone i ujednolicone”.
+    - **Data pozyskania** to `fetched_at` jako dzień w Polsce. Jest ustawiana przy wstawieniu
+      i przy zmianie treści. Ponowny odczyt bez zmian (`unchanged`, D-017) jej nie zmienia, bo
+      pokazana treść pochodzi z tamtego odczytu.
+    - „Przetworzone” oznacza przycięty tytuł i opis, ujednolicone daty, wartość, lokalizację
+      i kategorie.
+    - Wyjście BZP się nie zmienia (D-015 nie wymaga atrybucji).
+  - **Migracja `0007_bk_source`:** dodaje wiersz `sources`
+    (`bk`, „Baza Konkurencyjności”, `https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl/`)
+    jako **wyłączony** (`enabled = false`). Istniejącego wiersza nie zmienia.
+    - Powód: odczyt nieudokumentowanego API zaczyna się dopiero po prawdziwym
+      `source:preview bk` u właściciela (PR-08 AC1), a nie przy deployu. Do tego czasu `status`
+      nie zgłasza `source_never_run` dla `bk`.
+    - Włączenie i backfill opisują `docs/DEPLOY.md` i `docs/RUNBOOK.md`:
+      `UPDATE sources SET enabled = true …`, potem jednorazowo
+      `ingest bk --from <wczoraj−30> --to <wczoraj>` poza godzinami crona (szacunkowo 1–2 h;
+      starsze dni są mniejsze). Lista zawiera
+      tylko ogłoszenia nadal `PUBLISHED` w bieżącej wersji, więc backfill daje oferty wciąż
+      aktualne, a nie archiwum.
+- **Odrzucone alternatywy:**
+  - parsowanie HTML strony: to aplikacja SPA, której treść i tak pochodzi z tego API;
+  - sama lista bez szczegółów: nie ma w niej zamówień, wartości, CPV ani kontaktu;
+  - strony po 100 w dwóch porządkach jako główna ścieżka: zmierzone braki, których suma
+    porządków nie zamyka (2026-11-04);
+  - lista poniżej `meta.total` jako `incomplete`: dzień pokryty, braki bez alertu i bez
+    ponowienia;
+  - pobieranie załączników: poza zakresem, a do tego większe ryzyko i dane osobowe;
+  - wybór „pierwszego” województwa przy kilku;
+  - częściowa suma wartości;
+  - włączenie `bk` migracją: przed AC1 oznaczałoby automatyczny odczyt nieprzejrzanego API;
+  - wyższy timeout bez limitu szczegółów: wydłużyłby najgorszy przypadek bez granicy.
+- **Konsekwencje i znane ograniczenia:**
+  - Ogłoszenie, którego szczegóły dają 404, jest pominięte (`detail_missing`). Nie jest czytane
+    ponownie, bo dzień jest pokryty. Jeśli wróci w nowej wersji, trafi na listę jej dnia.
+  - Ogłoszenie anulowane albo zamknięte po odczycie nie jest już na liście
+    (`status[]=PUBLISHED`), a nowa wersja nie powstaje. Zapisany status zostaje wtedy `open`.
+    Digest i tak pomija oferty po terminie.
+  - Granica dnia: filtr `publicationDateRange` przyjmuje daty bez strefy. Nadrabianie liczy
+    dni UTC (D-021). To otwarte pytanie, jak w D-015.
+  - Zmiana struktury API zatrzymuje `bk` (`invalid_document`) do czasu poprawki adaptera. BZP
+    działa dalej. Procedurę opisuje `docs/RUNBOOK.md`.
+  - Pierwszy digest po backfillu może pokazać więcej ofert (`first_seen_at` w oknie 7 dni,
+    najwyżej 50 w e-mailu, D-024).
+  - `source:preview` ma zastosowanie praktyczne do ok. 100 rekordów.
+  - Przemianowanie pola **opcjonalnego** jest niewidoczne: `submission_deadline`,
+    `contact_persons`, `fulfillment_places`, `cpv_items` i opisy pozycji, `estimated_value`
+    stają się po cichu `null`/`[]` (brak terminu, kontaktu, lokalizacji, wartości,
+    kategorii). Schemat nie odróżni braku pola od zmiany nazwy. `status` wykrywa tylko
+    zmianę pól wymaganych (`detail_invalid`) i wartości odrzucanych przez `normalize` (dzień
+    samych odrzuceń). Zmianę pola opcjonalnego widać tylko w danych (np. same `null`
+    w terminach).
+  - Oferty z kilku województw albo „cała Polska” nie mają województwa i pasują jako
+    `region_unknown`, jak oferty BZP bez województwa. Profil z województwem, który pasuje
+    tylko kategorią (40 pkt), nie dostanie takiej oferty, bo próg to 50 pkt (potrzebna jest
+    też fraza kluczowa, 70 pkt). Świadomie bez zmian w matchingu w PR-08.
+  - Przy takiej ofercie powód „źródło nie podaje województwa” stoi obok linii
+    „Lokalizacja: mazowieckie, śląskie” (z `raw`). To prawda o polu `voivodeship`, ale
+    może dziwić. Do poprawy w tekstach matchingu, poza PR-08.
+  - Wartość `bk` nie mówi, czy jest netto, czy brutto. Gdy wartość będzie pokazywana
+    (dziś nie jest), etykieta ma brzmieć „wartość szacunkowa (źródło nie podaje, netto czy
+    brutto)”.

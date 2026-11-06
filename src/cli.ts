@@ -250,19 +250,30 @@ export interface CliDeps {
 /**
  * Bounds a whole `source:preview` run. Its default limit needs one request per
  * notice type (3 for BZP); the 500-record maximum (per notice type) up to
- * 3 × 20 requests at >= 2 s each (>= 120 s).
+ * 3 × 20 requests at >= 2 s each (>= 120 s). Baza Konkurencyjności reads one
+ * detail per announcement (D-030): its default 20 records are ~22 requests
+ * (~1 min); past ~100 records a preview runs into this bound (`source_timeout`).
  */
 export const SOURCE_RUN_TIMEOUT_MS = 5 * 60_000;
 
 /**
- * Bounds one source and one publication day within `ingest` (D-018). The
- * default limit of 1000 records per notice type is at most 3 × 40 pages for
- * BZP (contract notices, small contracts, notice updates), i.e. 120 requests
- * spaced >= 2 s apart (>= 240 s) plus response and write time; 10 minutes
- * leaves about 5 s per request. A run covers up to INGEST_MAX_DAYS days, each
- * with its own timeout: the worst case is 31 × 10 min per source (D-021).
+ * Bounds one source and one publication day within `ingest` (D-018, D-030).
+ * The default limit of 1000 records per notice type is at most 3 × 40 pages
+ * for BZP (contract notices, small contracts, notice updates), i.e. 120
+ * requests spaced >= 2 s apart (>= 240 s) plus response and write time.
+ * Baza Konkurencyjności needs one request per announcement: at most
+ * BK_MAX_DETAILS_PER_DAY (250) details plus at most 4 listing pages (1 on a
+ * day of up to 250), i.e. <= 254 requests at ~2.9 s each measured (~12.5 min);
+ * 15 minutes leaves about 3.5 s per request. Sources run in id order (bk
+ * before bzp): a typical bk day (~180 announcements) takes ~9 min, then BZP a
+ * few minutes, so the 06:00 `ingest` ends well before the 06:30 `status`;
+ * even both sources at their request bounds (bk 254, BZP 120 requests at
+ * ~2.9 s: ~12.5 + ~6 min) end by about 06:20. A run covers up to
+ * INGEST_MAX_DAYS days, each with its own timeout: the worst case is 31 × 15
+ * min per source (D-021), and BZP starts only after all of bk's days — up to
+ * 15 min × the number of bk days caught up (D-030).
  */
-export const INGEST_SOURCE_TIMEOUT_MS = 10 * 60_000;
+export const INGEST_SOURCE_TIMEOUT_MS = 15 * 60_000;
 
 /**
  * Production source wiring. SafeHttpClient is constructed with options only:

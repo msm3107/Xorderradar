@@ -7,6 +7,7 @@ import type {
 import { escapeHtml } from "../infrastructure/html.js";
 import { formatReasons } from "../matching/format.js";
 import type { MatchReason } from "../matching/match.js";
+import { ATTRIBUTION_LABEL, BK_SOURCE_ID, bkAttribution } from "../sources/bk/attribution.js";
 import { mvpCategoriesForCpv } from "../sources/normalize/cpv-categories.js";
 import { formatWarsawMinute, warsawDay } from "../sources/normalize/warsaw-time.js";
 import { cleanText } from "../sources/normalize/whitespace.js";
@@ -182,6 +183,14 @@ export function digestOrder(a: DigestItem, b: DigestItem): number {
 }
 
 /**
+ * The attribution the Baza Konkurencyjności's terms of reuse require with each
+ * of its offers (D-030). Other sources need none (BZP: D-015).
+ */
+function sourceAttribution(offer: Opportunity): string | null {
+  return offer.sourceId === BK_SOURCE_ID ? bkAttribution(offer.fetchedAt) : null;
+}
+
+/**
  * One offer's title and fields, as the digest shows them; also used by the
  * web page of matches (PR-06B), so both show an offer the same way.
  */
@@ -204,6 +213,8 @@ export function digestItemView({ offer, reasons }: DigestItem): DigestItemView {
   const contact = formatContact(offer.contact);
   if (contact !== null) fields.push({ label: "Kontakt", value: contact });
   fields.push({ label: "Dlaczego pasuje", value: formatReasons(reasons) });
+  const attribution = sourceAttribution(offer);
+  if (attribution !== null) fields.push({ label: ATTRIBUTION_LABEL, value: attribution });
   const link = safeLink(offer.sourceUrl);
   // An unsafe link is not shown, but the line stays, so its absence is visible.
   fields.push(

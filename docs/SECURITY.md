@@ -56,7 +56,12 @@ dotyczą projektu).
 Cały ruch wychodzący adapterów idzie przez `SafeHttpClient`:
 
 - allowlista hostów zdefiniowana statycznie w adapterze; URL-e z treści dokumentów (linki do
-  szczegółów) też muszą trafić na allowlistę;
+  szczegółów) też muszą trafić na allowlistę. Obecne allowlisty:
+  - `bzp` — `["ezamowienia.gov.pl"]` (D-015);
+  - `bk` — `["bazakonkurencyjnosci.funduszeeuropejskie.gov.pl"]` (PR-08, D-030). Adresy
+    szczegółów `bk` (`/api/announcements/{id}`) adapter buduje sam z liczbowego id z listy
+    (walidowanego schematem), a nie z URL-i z treści. Załączniki (`/api/files/…`) nie są
+    pobierane;
 - po rozwiązaniu DNS sprawdzane są **wszystkie** adresy hosta; jeśli którykolwiek jest
   zablokowany, żądanie jest odrzucane (`blocked_address`, bez retry). Zablokowane (PR-02,
   `src/infrastructure/http/address-policy.ts`):
@@ -106,7 +111,7 @@ całość, bez przekierowań, bez czytania treści odpowiedzi, bez ponowień.
   nagłówki, cała treść) 30 s, przerwanie przez `AbortSignal` (PR-02). Wywołujący może podać
   własny `AbortSignal`, który przerywa też czekanie na rate limit i backoff.
 - Timeout całego przebiegu źródła, aby jedno źródło nie blokowało crona: `source:preview`
-  5 min, `ingest` 10 min na źródło i dzień (D-018, D-021); po nim przebieg jest `failed`
+  5 min, `ingest` 15 min na źródło i dzień (D-018, D-021, D-030); po nim przebieg jest `failed`
   (`source_timeout`), a następne źródło startuje.
 - `ingest` nie nakłada się sam na siebie (advisory lock w PostgreSQL, D-019): drugie
   uruchomienie nic nie pobiera, więc nakładające się crony nie podwajają ruchu do źródeł.
@@ -155,6 +160,33 @@ Dane kontaktowe: przechowujemy wyłącznie dane opublikowane **przy danym zamów
 kontakt w sprawie zamówienia. Nie budujemy bazy osób, nie łączymy danych z innych źródeł.
 Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
 
+Baza Konkurencyjności (`bk`, PR-08, D-030):
+
+- Szczegóły ogłoszenia zawierają imiona i nazwiska osób kontaktowych i autorów załączników.
+  Adapter waliduje z osób tylko `email` i `phone_number`, więc imię i nazwisko nie trafia do
+  bazy, logu ani wyniku `source:preview`.
+- Zapisywany jest tylko poprawny e-mail i telefon złożony z cyfr i separatorów. Inne
+  wartości (`-`, tekst z literami, błędny e-mail) są pomijane, a nie zapisywane jako
+  `contact.raw`, bo mogą zawierać nazwisko.
+- Opisy pozycji to tekst zamawiającego (jak opisy BZP).
+- Ponowne wykorzystanie wymaga atrybucji zgodnie z regulaminem Bazy (źródło z pełną nazwą
+  ministerstwa, data pozyskania, informacja o przetworzeniu). Pokazują ją e-mail i
+  `/dopasowania`.
+- `robots.txt` nie istnieje (ścieżka zwraca HTML aplikacji).
+- API jest nieudokumentowane. Zmiana struktury listy, koperty szczegółów albo pól wymaganych
+  (np. przemianowany `title`, `advertiser_address_details.name`) kończy dzień kodem
+  `invalid_document` po co najwyżej 3 takich szczegółach; pojedyncze (do 2 na dzień) są
+  pomijane jako `detail_invalid` (`incomplete`). Dzień z więcej niż 2 przeczytanymi rekordami,
+  z których `normalize` odrzuca każdy (np. termin w nowym formacie), też jest
+  `invalid_document`. Oba wychodzą w `status`. Dzień z 1–2 rekordami, wszystkimi odrzuconymi,
+  nie jest alertowany, tylko liczony (`rejected`); odrzucony rekord nie jest zapisywany.
+  Rekordy niezgodne ze schematem nie są zapisywane. Lista dnia z mniejszą liczbą różnych
+  ogłoszeń niż jej własne `meta.total` (przy ponad 250 ogłoszeniach: niż budżet) też kończy
+  dzień kodem `invalid_document`, zanim cokolwiek zostanie zapisane, więc braki nie są cichym,
+  pokrytym dniem. Zmiana nazwy pola
+  **opcjonalnego** (termin, kontakt, miejsca realizacji, wartość, CPV) nie jest wykrywana:
+  pole staje się `null`, nigdy zgadywaną wartością (D-030).
+
 ## 8. Safe HTML parsing _(od PR-02)_
 
 - Parser HTML bez wykonywania skryptów (żadnych przeglądarek headless do parsowania).
@@ -185,6 +217,14 @@ Usunięte/wycofane ogłoszenia oznaczamy statusem; polityka retencji — PR-07.
   szczegółów nie jest logowany. Kontakt: tylko e-mail i telefon z pól kontaktowych
   formularza (pierwszy zamawiający), bez imion i nazwisk, bez wzbogacania (§7). Testy:
   wrogie treści po 1 000 000 znaków (`tests/bzp-notice-body.test.ts`).
+- JSON Bazy Konkurencyjności (`bk`, PR-08, D-030): ścisły UTF-8 i `JSON.parse` w limicie
+  5 MB odpowiedzi (strona listy 250 rekordów to ok. 180 KB; zwykle jedno żądanie listy na
+  dzień, najwyżej 4); schematy zod tylko dla używanych pól, każde tekstowe pole ≤ 20 000 znaków
+  (opis pozycji ≤ 200 000), listy ≤ 1 000 elementów; HTML w danych nie jest parsowany —
+  tekst przechodzi przez `cleanText`, wyrażenia regularne (kwota, CPV, telefon, daty) są
+  zakotwiczone, bez zagnieżdżonych kwantyfikatorów i działają na ograniczonych ciągach.
+  Pominięte szczegóły ogłoszenia (404, inna koperta) są logowane tylko z id ogłoszenia, kodem
+  powodu i licznikiem; najwyżej 2 na dzień, potem dzień jest `failed` (D-030).
 
 ## 9. SQL injection protection _(od PR-01)_
 

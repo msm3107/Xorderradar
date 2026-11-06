@@ -158,6 +158,32 @@ describe("buildDigest", () => {
     );
   });
 
+  it("attributes a Baza Konkurencyjności offer as its terms require, in both parts (D-030)", () => {
+    const bk = item({
+      sourceId: "bk",
+      sourceUrl: "https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl/ogloszenia/296920",
+      externalId: "296920",
+      contact: { email: "kontakt@example.invalid" },
+      // Late on 3 November in UTC is already 4 November in Poland.
+      fetchedAt: new Date("2026-11-03T23:30:00.000Z"),
+    });
+    const attribution =
+      "Baza Konkurencyjności, Ministerstwo Funduszy i Polityki Regionalnej; pobrano 2026-11-04; " +
+      "dane przetworzone: skrócone i ujednolicone";
+    const { text, html } = digest([bk]);
+    const lines = text.split("\n");
+    const at = lines.indexOf(`   Źródło: ${attribution}`);
+    expect(at).toBeGreaterThan(-1);
+    expect(lines[at - 1]).toMatch(/^ {3}Dlaczego pasuje: /u);
+    expect(lines[at + 1]).toBe(`   Link: ${bk.offer.sourceUrl}`);
+    expect(html).toContain(escapeHtml(attribution));
+
+    // BZP offers carry no such line (D-015): their output is unchanged.
+    const bzp = digest([item()]);
+    expect(bzp.text).not.toContain("Źródło:");
+    expect(bzp.html).not.toContain("Źródło");
+  });
+
   it("sorts by deadline, soonest first, unknown last", () => {
     const later = item({ title: "Później", deadline: new Date("2026-11-20T10:00:00.000Z") });
     const none = item({ title: "Bez terminu", deadline: null });

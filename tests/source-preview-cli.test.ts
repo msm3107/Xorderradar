@@ -422,6 +422,6 @@ describe("source:preview", () => {
     const result = await run(["--help"]);
     expect(result.code).toBe(ExitCode.Ok);
     expect(result.stdout).toContain("source:preview <sourceId> [--date YYYY-MM-DD] [--limit N]");
-    expect(result.stdout).toContain("Sources: bzp.");
+    expect(result.stdout).toContain("Sources: bzp, bk.");
   });
 });

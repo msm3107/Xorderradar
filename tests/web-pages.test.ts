@@ -283,6 +283,27 @@ describe("matchesPage", () => {
     }
   });
 
+  it("shows a Baza Konkurencyjności offer's attribution in the visible part, before the link", () => {
+    const bk: Opportunity = {
+      ...offer,
+      sourceId: "bk",
+      sourceUrl: "https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl/ogloszenia/296920",
+      externalId: "296920",
+    };
+    const { html } = matchesPage(view({ items: [digestItemView({ offer: bk, reasons })] }));
+    const [visible = "", folded = ""] = html.split("<details>");
+    expect(visible).toContain(
+      "<dt>Źródło:</dt><dd>Baza Konkurencyjności, Ministerstwo Funduszy i Polityki Regionalnej; " +
+        "pobrano 2026-10-30; dane przetworzone: skrócone i ujednolicone</dd>" +
+        '<dt>Link:</dt><dd><a href="https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl/ogloszenia/296920" ' +
+        'rel="noopener noreferrer">Otwórz ogłoszenie w źródle ' +
+        "(bazakonkurencyjnosci.funduszeeuropejskie.gov.pl)</a></dd></dl>",
+    );
+    expect(folded).not.toContain("Źródło");
+    // A BZP card has none.
+    expect(matchesPage(view()).html).not.toContain("<dt>Źródło:</dt>");
+  });
+
   it("leaves a missing description and contact out of the details, as before", () => {
     const { html } = matchesPage(view());
     const folded = html.split("<details>")[1] ?? "";

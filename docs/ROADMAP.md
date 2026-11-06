@@ -1,5 +1,7 @@
 # Roadmap — Radar Zamówień
 
+Kroki od pilotażu do testu rynkowego: `docs/LAUNCH_ROADMAP.md`.
+
 Zasada nadrzędna: każda faza kończy się czymś, co można zweryfikować uruchomieniem, a nie
 slajdem. Szczegóły PR-ów: `docs/PR_PLAN.md`.
 
