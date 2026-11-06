@@ -1,3 +1,4 @@
+import type { MvpCategory } from "../domain/vocabulary.js";
 import type { MatchReason, MatchField } from "./match.js";
 
 /**
@@ -5,6 +6,20 @@ import type { MatchReason, MatchField } from "./match.js";
  * why). Pure. The text of keywords and regions is shown as stored; a caller
  * that prints to a terminal cleans the whole line (`cleanText`).
  */
+
+export interface FormatReasonOptions {
+  /**
+   * Names shown for the MVP categories instead of their keys
+   * (`CATEGORY_LABELS`): the customer's digest and web page. There a
+   * category reason is the labels only, each in Polish quotes and joined
+   * with ", " ("kategoria: „Elektryka”, „Serwis, naprawy i konserwacja”"):
+   * labels contain commas themselves, the quotes say where one ends, and
+   * "; " stays the separator between reasons. The CPV codes are left out
+   * (the digest's "Kategoria:" line shows them). Without it the keys are
+   * shown with their codes (`match:preview`, the operator's view).
+   */
+  readonly categoryLabels?: Readonly<Record<MvpCategory, string>>;
+}
 
 const FIELD_NAMES: Readonly<Record<MatchField, string>> = {
   title: "tytuł",
@@ -20,15 +35,24 @@ const MISSING_REGION: Readonly<
   voivodeship_and_county: "źródło nie podaje województwa ani powiatu",
 };
 
-/** One reason, e.g. "kategoria: elektryka (CPV 45310000-3)" or "słowo: oświetlenie (tytuł)". */
-export function formatReason(reason: MatchReason): string {
+/**
+ * One reason, e.g. "kategoria: elektryka (CPV 45310000-3)" or "słowo:
+ * oświetlenie (tytuł)"; with `categoryLabels`, "kategoria: „Elektryka”".
+ */
+export function formatReason(reason: MatchReason, options: FormatReasonOptions = {}): string {
+  const { categoryLabels } = options;
+  const labelled = (keys: readonly MvpCategory[]): string | null =>
+    categoryLabels === undefined ? null : keys.map((key) => `„${categoryLabels[key]}”`).join(", ");
   switch (reason.kind) {
     case "category":
-      return `kategoria: ${reason.hits
-        .map((hit) => `${hit.category} (CPV ${hit.cpvCodes.join(", ")})`)
-        .join(", ")}`;
+      return `kategoria: ${
+        labelled(reason.hits.map((hit) => hit.category)) ??
+        reason.hits.map((hit) => `${hit.category} (CPV ${hit.cpvCodes.join(", ")})`).join(", ")
+      }`;
     case "category_mismatch":
-      return `kategoria: niezgodna (oferta: ${reason.offerCategories.join(", ")})`;
+      return `kategoria: niezgodna (oferta: ${
+        labelled(reason.offerCategories) ?? reason.offerCategories.join(", ")
+      })`;
     case "category_unverifiable":
       return reason.cpvCodes.length === 0
         ? "kategoria: ogłoszenie nie podaje kodu CPV"
@@ -59,7 +83,10 @@ export function formatReason(reason: MatchReason): string {
   }
 }
 
-/** All reasons in order, joined with "; ". */
-export function formatReasons(reasons: readonly MatchReason[]): string {
-  return reasons.map(formatReason).join("; ");
+/** All reasons in order, joined with "; " (only between reasons, never inside one). */
+export function formatReasons(
+  reasons: readonly MatchReason[],
+  options: FormatReasonOptions = {},
+): string {
+  return reasons.map((reason) => formatReason(reason, options)).join("; ");
 }

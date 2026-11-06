@@ -1,9 +1,8 @@
-import { VOIVODESHIPS, MVP_CATEGORIES } from "../domain/vocabulary.js";
+import { CATEGORY_LABELS, VOIVODESHIPS, MVP_CATEGORIES } from "../domain/vocabulary.js";
 import { escapeHtml } from "../infrastructure/html.js";
 import { plural, type DigestField, type DigestItemView } from "../notifications/digest.js";
 import { ATTRIBUTION_LABEL } from "../sources/bk/attribution.js";
 import {
-  CATEGORY_LABELS,
   FIELD_LABELS,
   FIELD_ORDER,
   type ProfileFormErrors,

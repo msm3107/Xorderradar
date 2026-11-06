@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type {
+  CompletedRun,
   DeliveryCounts,
   FailedDay,
   SourceRunState,
@@ -51,11 +52,13 @@ function evaluate(
   sources: SourceRunState[],
   deliveries: Partial<DeliveryCounts> = {},
   failedDays: FailedDay[] = [],
+  completedRuns: CompletedRun[] = [],
 ) {
   return evaluateStatus({
     now: NOW,
     sources,
     failedDays,
+    completedRuns,
     deliveries: { ...QUIET, ...deliveries },
     failedSince: "2026-11-01",
   });
@@ -159,6 +162,122 @@ describe("evaluateStatus", () => {
       "deliveries_pending",
       "deliveries_failed",
     ]);
+  });
+});
+
+describe("evaluateStatus — source_incomplete (PR-09)", () => {
+  function completed(overrides: Partial<CompletedRun> = {}): CompletedRun {
+    return {
+      sourceId: "bzp",
+      runId: RUN_ID,
+      status: "incomplete",
+      publicationDate: "2026-11-01",
+      startedAt: new Date(NOW.getTime() - 2 * HOUR),
+      incomplete: [{ part: "ContractNotice", reason: "max_pages" }],
+      ...overrides,
+    };
+  }
+  const RUN_2 = "00000000-0000-4000-8000-000000000002";
+  const previousDay = {
+    runId: RUN_2,
+    publicationDate: "2026-10-31",
+    startedAt: new Date(NOW.getTime() - 26 * HOUR),
+  };
+
+  it("reports two incomplete days in a row, with both runs and their reasons", () => {
+    const report = evaluate(
+      [source({ lastRun: run({ status: "incomplete" }) })],
+      {},
+      [],
+      [
+        completed(),
+        completed({ ...previousDay, incomplete: [{ part: "bk", reason: "detail_missing" }] }),
+      ],
+    );
+    expect(report.status).toBe("problem");
+    expect(report.problems).toEqual(["source_incomplete"]);
+    expect(report.sources?.[0]?.incompleteRuns).toEqual([
+      {
+        runId: RUN_ID,
+        publicationDate: "2026-11-01",
+        startedAt: new Date(NOW.getTime() - 2 * HOUR),
+        incomplete: [{ part: "ContractNotice", reason: "max_pages" }],
+      },
+      { ...previousDay, incomplete: [{ part: "bk", reason: "detail_missing" }] },
+    ]);
+  });
+
+  it("does not alarm on a single incomplete day", () => {
+    for (const runs of [
+      [completed()],
+      [completed(), completed({ ...previousDay, status: "succeeded", incomplete: [] })],
+      // The newest day succeeded again: the earlier incomplete day is history.
+      [completed({ status: "succeeded", incomplete: [] }), completed(previousDay)],
+    ]) {
+      const report = evaluate([source()], {}, [], runs);
+      expect(report.status).toBe("ok");
+      expect(report.sources?.[0]?.incompleteRuns).toEqual([]);
+    }
+  });
+
+  it("needs two different publication days", () => {
+    const report = evaluate([source()], {}, [], [completed(), completed({ runId: RUN_2 })]);
+    expect(report.problems).toEqual([]);
+  });
+
+  it("takes only the source's own runs", () => {
+    const report = evaluate(
+      [source({ sourceId: "bzp" }), source({ sourceId: "bk" })],
+      {},
+      [],
+      [completed({ sourceId: "bzp" }), completed({ ...previousDay, sourceId: "bk" })],
+    );
+    expect(report.problems).toEqual([]);
+  });
+
+  it("comes after the other source problems and before the delivery ones", () => {
+    const report = evaluate(
+      [
+        source({ sourceId: "a", lastRun: run({ status: "failed" }), lastSuccessAt: null }),
+        source({ sourceId: "b" }),
+      ],
+      { pending: 1 },
+      [],
+      [completed({ sourceId: "b" }), completed({ ...previousDay, sourceId: "b" })],
+    );
+    expect(report.problems).toEqual([
+      "source_failed",
+      "source_stale",
+      "source_incomplete",
+      "deliveries_pending",
+    ]);
+  });
+
+  it("lists the reasons in the alert as part: reason codes, on one line per day", () => {
+    const report = evaluate(
+      [source()],
+      {},
+      [],
+      [
+        completed({
+          incomplete: [
+            { part: "ContractNotice", reason: "max_pages" },
+            { part: "Tender\nNotice", reason: "repeated_cursor" },
+          ],
+        }),
+        completed({ ...previousDay, incomplete: null }),
+      ],
+    );
+    const { subject, text } = formatOperatorAlert(report);
+    expect(subject).toBe("Radar Zamówień: problem (source_incomplete)");
+    expect(text).toContain("Źródło bzp: source_incomplete");
+    expect(text).toContain(
+      `  niepełny dzień 2026-11-01: ${RUN_ID}, start ${new Date(NOW.getTime() - 2 * HOUR).toISOString()}, ` +
+        "powody ContractNotice: max_pages, Tender Notice: repeated_cursor\n",
+    );
+    expect(text).toContain(`  niepełny dzień 2026-10-31: ${RUN_2}, start `);
+    expect(text).toContain("powody nieczytelne\n");
+    expect(text).not.toMatch(/@|<|>/);
   });
 });
 

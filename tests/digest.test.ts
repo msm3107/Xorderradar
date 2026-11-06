@@ -79,10 +79,10 @@ describe("buildDigest", () => {
       "   Lokalizacja: Przykładowo, woj. mazowieckie",
       "   Termin składania ofert: 2026-11-05 12:00 (czas polski)",
       "   Data publikacji: 2026-10-30",
-      "   Kategoria: elektryka (CPV 45310000-3)",
+      "   Kategoria: Elektryka · CPV: 45310000-3",
       "   Opis: Wymiana opraw oświetleniowych na LED.",
       "   Kontakt: Jan Kowalski, kontakt@example.invalid, 000 000 000",
-      "   Dlaczego pasuje: kategoria: elektryka (CPV 45310000-3); słowo: oświetlenie (tytuł); region: mazowieckie",
+      "   Dlaczego pasuje: kategoria: „Elektryka”; słowo: oświetlenie (tytuł); region: mazowieckie",
       `   Link: ${one.offer.sourceUrl}`,
     ];
     for (const line of lines) expect(text.split("\n")).toContain(line);
@@ -154,7 +154,7 @@ describe("buildDigest", () => {
       }),
     ]);
     expect(text).toContain(
-      "   Kategoria: CPV 03000000-1, 09000000-3, 14000000-1, 15000000-8, 16000000-5 i 1 inny\n",
+      "   Kategoria: CPV: 03000000-1, 09000000-3, 14000000-1, 15000000-8, 16000000-5 i 1 inny\n",
     );
   });
 
@@ -306,6 +306,76 @@ describe("snippet", () => {
   });
 });
 
+describe("category labels in the digest (PR-09)", () => {
+  it("names every category by its label, never by its key", () => {
+    const cleaner: CompanyProfile = {
+      ...profile,
+      name: "Anna Nowak Sprzątanie",
+      categories: ["sprzatanie", "elektryka"],
+    };
+    // 90910000-9: cleaning services; 45310000-3: electrical installation work.
+    const value = offer({ title: "Usługi porządkowe", categories: ["90910000-9", "45310000-3"] });
+    const { text, html } = buildDigest(
+      cleaner,
+      [{ offer: value, reasons: matchOpportunity(value, cleaner).reasons }],
+      NOW,
+      { overflow: 0 },
+    );
+    const line = text.split("\n").find((candidate) => candidate.startsWith("   Kategoria: "));
+    expect(line).toMatch(/Sprzątanie/u);
+    expect(line).toMatch(/Elektryka/u);
+    expect(text).toContain("   Dlaczego pasuje: kategoria: „Elektryka”, „Sprzątanie”; ");
+    expect(html).toContain("„Elektryka”, „Sprzątanie”; słowo: oświetlenie (opis)");
+    for (const part of [text, html]) {
+      expect(part).not.toMatch(/\bsprzatanie\b|\belektryka\b/u);
+    }
+  });
+
+  it("keeps labels that contain commas apart: semicolons on the Kategoria line, quotes in the reasons", () => {
+    const service: CompanyProfile = {
+      ...profile,
+      categories: ["serwis", "instalacje"],
+      includeKeywords: [],
+    };
+    // 50000000-5: repair and maintenance; 45330000-9: plumbing.
+    const value = offer({ title: "Konserwacja", categories: ["50000000-5", "45330000-9"] });
+    const { text } = buildDigest(
+      service,
+      [{ offer: value, reasons: matchOpportunity(value, service).reasons }],
+      NOW,
+      { overflow: 0 },
+    );
+    expect(text).toContain(
+      "   Kategoria: Instalacje budowlane (wod.-kan., ogrzewanie, wentylacja); " +
+        "Serwis, naprawy i konserwacja · CPV: 50000000-5, 45330000-9\n",
+    );
+    // The reason names the categories only: the codes are on the Kategoria line.
+    expect(text).toContain(
+      "   Dlaczego pasuje: kategoria: „Instalacje budowlane (wod.-kan., ogrzewanie, wentylacja)”, " +
+        "„Serwis, naprawy i konserwacja”; region: mazowieckie\n",
+    );
+  });
+
+  it("counts the codes beyond five after the category names", () => {
+    const value = offer({
+      categories: [
+        "45310000-3",
+        "03000000-1",
+        "09000000-3",
+        "14000000-1",
+        "15000000-8",
+        "16000000-5",
+        "18000000-9",
+      ],
+    });
+    const { text } = digest([{ offer: value, reasons: matchOpportunity(value, profile).reasons }]);
+    expect(text).toContain(
+      "   Kategoria: Elektryka · CPV: 45310000-3, 03000000-1, 09000000-3, 14000000-1, " +
+        "15000000-8 i 2 inne\n",
+    );
+  });
+});
+
 describe("web links in the digest (PR-06A)", () => {
   const token = "T".repeat(43);
   const links = {
@@ -326,6 +396,18 @@ describe("web links in the digest (PR-06A)", () => {
     expect(html).not.toContain(`>${links.profileUrl}<`);
     expect(html).not.toContain(`>${links.unsubscribeUrl}<`);
     expect(text).not.toContain("napisz do operatora");
+  });
+
+  it("says what the profile page offers, next to its link (PR-09)", () => {
+    const { text, html } = buildDigest(profile, [item()], NOW, { overflow: 0, links });
+    for (const part of [text, html]) {
+      expect(part).toContain(
+        "Na stronie profilu możesz zmienić kategorie, regiony i słowa kluczowe oraz " +
+          "zobaczyć wszystkie pasujące zamówienia.",
+      );
+    }
+    const without = buildDigest(profile, [item()], NOW, { overflow: 0 });
+    expect(without.text).not.toContain("Na stronie profilu");
   });
 
   it("keeps the reply-only footer without links", () => {

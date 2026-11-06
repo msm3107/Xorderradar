@@ -40,7 +40,7 @@ wartość):
 - kategoria,
 - link do źródła,
 - publiczne dane kontaktowe opublikowane przy zamówieniu,
-- dlaczego pasuje (np. „kategoria: elektryka; słowo: oświetlenie; region: mazowieckie”).
+- dlaczego pasuje (np. kategoria: „Elektryka”; słowo: oświetlenie (tytuł); region: mazowieckie).
 
 ## Digest
 

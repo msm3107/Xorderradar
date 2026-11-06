@@ -5,7 +5,6 @@ import {
   MAX_KEYWORD_TOKENS,
   type CompanyProfileSettings,
 } from "../domain/company-profile.js";
-import type { MvpCategory } from "../domain/vocabulary.js";
 import type { StoredProfileSettings } from "../infrastructure/db/company-profiles-repository.js";
 import { countyKey } from "../matching/match.js";
 import { plural } from "../notifications/digest.js";
@@ -70,23 +69,6 @@ export const FIELD_ORDER: readonly ProfileFormField[] = [
   "includeKeywords",
   "excludeKeywords",
 ];
-
-/**
- * Polish names of the MVP categories, describing what their CPV prefixes
- * cover (src/sources/normalize/cpv-categories.ts).
- */
-export const CATEGORY_LABELS: Readonly<Record<MvpCategory, string>> = {
-  bhp: "BHP",
-  elektryka: "Elektryka",
-  instalacje: "Instalacje budowlane (wod.-kan., ogrzewanie, wentylacja)",
-  it: "IT (usługi, oprogramowanie, sprzęt komputerowy)",
-  ppoz: "Ochrona przeciwpożarowa",
-  remonty: "Roboty wykończeniowe i remonty",
-  serwis: "Serwis, naprawy i konserwacja",
-  sprzatanie: "Sprzątanie",
-  szkolenia: "Szkolenia",
-  wyposazenie: "Meble i wyposażenie",
-};
 
 /** Messages shown per field at most; the rest are counted. */
 const MESSAGES_SHOWN = 5;

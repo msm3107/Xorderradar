@@ -21,6 +21,24 @@ export const MVP_CATEGORIES = [
 ] as const;
 export type MvpCategory = (typeof MVP_CATEGORIES)[number];
 
+/**
+ * Polish names of the MVP categories, describing what their CPV prefixes
+ * cover (src/sources/normalize/cpv-categories.ts). What a customer sees (the
+ * profile form, the digest, the web page of matches) — never the keys.
+ */
+export const CATEGORY_LABELS: Readonly<Record<MvpCategory, string>> = {
+  bhp: "BHP",
+  elektryka: "Elektryka",
+  instalacje: "Instalacje budowlane (wod.-kan., ogrzewanie, wentylacja)",
+  it: "IT (usługi, oprogramowanie, sprzęt komputerowy)",
+  ppoz: "Ochrona przeciwpożarowa",
+  remonty: "Roboty wykończeniowe i remonty",
+  serwis: "Serwis, naprawy i konserwacja",
+  sprzatanie: "Sprzątanie",
+  szkolenia: "Szkolenia",
+  wyposazenie: "Meble i wyposażenie",
+};
+
 /** The 16 voivodeships, canonical form: lower case, Polish letters (as stored in `location.voivodeship`). */
 export const VOIVODESHIPS = [
   "dolnośląskie",

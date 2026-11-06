@@ -1,10 +1,13 @@
 import type { Kysely } from "kysely";
 import type { BackupDirectoryState } from "./backup.js";
+import type { IncompletePart } from "../domain/ingestion-run.js";
 import type { Database } from "../infrastructure/db/schema.js";
 import {
   countDeliveries,
+  listRecentCompletedRuns,
   listSourceRunStates,
   listUnresolvedFailedDays,
+  type CompletedRun,
   type DeliveryCounts,
   type FailedDay,
   type SourceRunState,
@@ -12,6 +15,7 @@ import {
 } from "../infrastructure/db/status-repository.js";
 import { addDays } from "../ingestion/catch-up.js";
 import { DIGEST_LOCK_KEY, DIGEST_MAX_ATTEMPTS } from "../notifications/run.js";
+import { cleanText } from "../sources/normalize/whitespace.js";
 import { warsawDay } from "../sources/normalize/warsaw-time.js";
 
 /**
@@ -55,6 +59,12 @@ export type StatusProblem =
   | "source_failed"
   /** Runs exist, but none succeeded within STATUS_STALE_AFTER_MS. */
   | "source_stale"
+  /**
+   * The source's two newest non-failed runs (two publication days) are both
+   * `incomplete`: a limit or a source fault cuts every day short. A single
+   * `incomplete` day is no alarm.
+   */
+  | "source_incomplete"
   /** An enabled source without any run. */
   | "source_never_run"
   /** No source is enabled: nothing is ingested. */
@@ -98,6 +108,8 @@ export interface SourceStatus {
   readonly lastRun: StatusRun | null;
   readonly lastSuccessAt: Date | null;
   readonly failedDays: readonly Omit<FailedDay, "sourceId">[];
+  /** The two incomplete runs behind `source_incomplete` (newest first); empty without it. */
+  readonly incompleteRuns: readonly Omit<CompletedRun, "sourceId" | "status">[];
 }
 
 export interface StatusReport {
@@ -122,6 +134,7 @@ const PROBLEM_ORDER: readonly StatusProblem[] = [
   "source_failed",
   "source_never_run",
   "source_stale",
+  "source_incomplete",
   "deliveries_pending",
   "deliveries_failed",
   "backup_dir_unreadable",
@@ -134,10 +147,25 @@ function ordered(problems: Iterable<StatusProblem>): StatusProblem[] {
   return PROBLEM_ORDER.filter((problem) => set.has(problem));
 }
 
+/**
+ * The two newest completed days of a source when both are `incomplete`
+ * (`source_incomplete`), else null. `recent`: the source's non-failed runs,
+ * newest first, one per publication day.
+ */
+function repeatedIncomplete(recent: readonly CompletedRun[]): readonly CompletedRun[] | null {
+  const [newest, previous] = recent;
+  if (newest === undefined || previous === undefined) return null;
+  if (newest.publicationDate === previous.publicationDate) return null;
+  return newest.status === "incomplete" && previous.status === "incomplete"
+    ? [newest, previous]
+    : null;
+}
+
 /** The problems of one source. */
 function sourceProblems(
   state: SourceRunState,
   failedDays: readonly FailedDay[],
+  incomplete: readonly CompletedRun[] | null,
   now: Date,
 ): StatusProblem[] {
   if (state.lastRun === null) return ["source_never_run"];
@@ -149,6 +177,7 @@ function sourceProblems(
   ) {
     problems.push("source_stale");
   }
+  if (incomplete !== null) problems.push("source_incomplete");
   return problems;
 }
 
@@ -157,14 +186,19 @@ export function evaluateStatus(input: {
   readonly now: Date;
   readonly sources: readonly SourceRunState[];
   readonly failedDays: readonly FailedDay[];
+  /** Per source, its two newest non-failed runs of two days (listRecentCompletedRuns). */
+  readonly completedRuns: readonly CompletedRun[];
   readonly deliveries: DeliveryCounts;
   readonly failedSince: string;
 }): StatusReport {
   const sources = input.sources.map((state): SourceStatus => {
     const failedDays = input.failedDays.filter((day) => day.sourceId === state.sourceId);
+    const incomplete = repeatedIncomplete(
+      input.completedRuns.filter((run) => run.sourceId === state.sourceId),
+    );
     return {
       sourceId: state.sourceId,
-      problems: sourceProblems(state, failedDays, input.now),
+      problems: sourceProblems(state, failedDays, incomplete, input.now),
       lastRun: state.lastRun,
       lastSuccessAt: state.lastSuccessAt,
       failedDays: failedDays.map((day) => ({
@@ -172,6 +206,12 @@ export function evaluateStatus(input: {
         publicationDate: day.publicationDate,
         startedAt: day.startedAt,
         errorCode: day.errorCode,
+      })),
+      incompleteRuns: (incomplete ?? []).map((run) => ({
+        runId: run.runId,
+        publicationDate: run.publicationDate,
+        startedAt: run.startedAt,
+        incomplete: run.incomplete,
       })),
     };
   });
@@ -203,12 +243,13 @@ export async function collectStatus(db: Kysely<Database>, now: Date): Promise<St
     db,
     new Date(now.getTime() - STATUS_STALE_AFTER_MS),
   );
+  const completedRuns = await listRecentCompletedRuns(db);
   const deliveries = await countDeliveries(db, {
     since: failedSince,
     maxAttempts: DIGEST_MAX_ATTEMPTS,
     digestLockKey: DIGEST_LOCK_KEY,
   });
-  return evaluateStatus({ now, sources, failedDays, deliveries, failedSince });
+  return evaluateStatus({ now, sources, failedDays, completedRuns, deliveries, failedSince });
 }
 
 /**
@@ -271,6 +312,16 @@ function iso(value: Date | null): string {
 }
 
 /**
+ * The reasons of an incomplete run as `part: reason` codes. The part is the
+ * adapter's own label (e.g. a notice type), cleaned so it stays on one line.
+ */
+function incompleteReasonsText(parts: readonly IncompletePart[] | null): string {
+  if (parts === null) return "nieczytelne";
+  if (parts.length === 0) return "brak";
+  return parts.map((part) => `${cleanText(part.part)}: ${part.reason}`).join(", ");
+}
+
+/**
  * The operator alert: plain text in Polish with ids, statuses, error codes,
  * timestamps and counts only — never addresses, offer titles or profile
  * content (D-028). The subject carries the problem codes only.
@@ -309,6 +360,12 @@ export function formatOperatorAlert(report: StatusReport): {
       lines.push(
         `  nieudany dzień ${day.publicationDate}: ${day.runId}, start ${day.startedAt.toISOString()}, ` +
           `kod błędu ${day.errorCode ?? "brak"}`,
+      );
+    }
+    for (const run of source.incompleteRuns) {
+      lines.push(
+        `  niepełny dzień ${run.publicationDate}: ${run.runId}, start ${run.startedAt.toISOString()}, ` +
+          `powody ${incompleteReasonsText(run.incomplete)}`,
       );
     }
     lines.push("");

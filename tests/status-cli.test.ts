@@ -46,6 +46,7 @@ const OK_REPORT: StatusReport = evaluateStatus({
     },
   ],
   failedDays: [],
+  completedRuns: [],
   deliveries: {
     pending: 0,
     failed: 0,

@@ -10,6 +10,7 @@ import {
   type MatchReason,
 } from "../src/matching/match.js";
 import { keywordTokenCount } from "../src/domain/company-profile.js";
+import { CATEGORY_LABELS, MVP_CATEGORIES } from "../src/domain/vocabulary.js";
 import { containsKeyword, findKeyword, prepareKeywords, tokenize } from "../src/matching/text.js";
 
 // Table-driven matching tests (PR-04). Offers and profiles carry only the
@@ -93,6 +94,45 @@ describe("matchOpportunity — scoring table", () => {
       score: 30,
       matched: false,
       kinds: ["category_unverifiable", "keyword", "region_unknown"],
+    },
+    {
+      name: "keyword in the description only + matching region (PR-09: 35, no match)",
+      offer: offer({
+        title: "Dostawa sprzętu",
+        description: "Wymiana oświetlenia w szkole.",
+        location: MAZOWIECKIE,
+      }),
+      profile: profile({ includeKeywords: ["oświetlenie"], voivodeships: ["mazowieckie"] }),
+      score: 35,
+      matched: false,
+      kinds: ["category_unverifiable", "keyword", "region_match"],
+    },
+    {
+      name: "category + keyword in the description only with no offer location (55)",
+      offer: offer({
+        title: "Roboty budowlane",
+        description: "Wymiana oświetlenia w szkole.",
+        categories: [ELEKTRYKA_CPV],
+      }),
+      profile: profile({ includeKeywords: ["oświetlenie"], voivodeships: ["mazowieckie"] }),
+      score: 55,
+      matched: true,
+      kinds: ["category", "keyword", "region_unknown"],
+    },
+    {
+      name: "two keywords in the description only + region (15 + 10 + 20, no match)",
+      offer: offer({
+        title: "Dostawa sprzętu",
+        description: "Oświetlenie oraz monitoring.",
+        location: MAZOWIECKIE,
+      }),
+      profile: profile({
+        includeKeywords: ["oświetlenie", "monitoring"],
+        voivodeships: ["mazowieckie"],
+      }),
+      score: 45,
+      matched: false,
+      kinds: ["category_unverifiable", "keyword", "keyword", "more_keywords", "region_match"],
     },
     {
       name: "category + two keywords + region",
@@ -182,6 +222,7 @@ describe("matchOpportunity — scoring table", () => {
     expect(POINTS).toEqual({
       category: 40,
       keyword: 30,
+      keywordInDescription: 15,
       moreKeywords: 10,
       region: 20,
       exclude: -100,
@@ -422,6 +463,87 @@ describe("matchOpportunity — keywords", () => {
     // On a single word, the same ten keywords are one piece of evidence.
     const single = matchOpportunity(offer({ title: word }), profile({ includeKeywords: prefixes }));
     expect(single.reasons.filter((reason) => reason.kind === "keyword")).toHaveLength(1);
+  });
+});
+
+describe("matchOpportunity — keyword points by field (PR-09, D-023)", () => {
+  const electrician = profile({
+    categories: ["elektryka"],
+    includeKeywords: ["oświetlenie", "instalacja elektryczna", "elektryczne"],
+    voivodeships: ["mazowieckie"],
+  });
+
+  // Pilot false positives: vehicles bought by a commune, matched to an
+  // electrician only by words deep in the description.
+  it.each([
+    {
+      title: "Zakup ciągnika rolniczego z osprzętem",
+      description:
+        "Ciągnik fabrycznie nowy, oświetlenie drogowe zgodne z przepisami, instalacja " +
+        "elektryczna 12 V, kabina z ogrzewaniem.",
+    },
+    {
+      title: "Dostawa koparko-ładowarki dla Zakładu Gospodarki Komunalnej",
+      description:
+        "Maszyna z kabiną, wyposażenie elektryczne: oświetlenie robocze LED, sygnał " +
+        "dźwiękowy cofania.",
+    },
+  ])("no longer matches a vehicle by its description: $title", ({ title, description }) => {
+    const result = matchOpportunity(
+      offer({ title, description, categories: ["34113300-5"], location: MAZOWIECKIE }),
+      electrician,
+    );
+    const keywords = result.reasons.filter((reason) => reason.kind === "keyword");
+    expect(keywords.length).toBeGreaterThan(0);
+    expect(keywords.every((reason) => reason.field === "description")).toBe(true);
+    expect(keywords.map((reason) => reason.points)).toEqual([
+      15,
+      ...keywords.slice(1).map(() => 0),
+    ]);
+    expect(result.score).toBeLessThan(MATCH_THRESHOLD);
+    expect(result.matched).toBe(false);
+  });
+
+  it("still matches a keyword in the title + region (50) and category + region (60)", () => {
+    const inTitle = matchOpportunity(
+      offer({ title: "Modernizacja oświetlenia ulicznego", location: MAZOWIECKIE }),
+      electrician,
+    );
+    expect(inTitle.score).toBe(50);
+    expect(inTitle.matched).toBe(true);
+    const byCategory = matchOpportunity(
+      offer({ title: "Roboty budowlane", categories: [ELEKTRYKA_CPV], location: MAZOWIECKIE }),
+      electrician,
+    );
+    expect(byCategory.score).toBe(60);
+    expect(byCategory.matched).toBe(true);
+  });
+
+  it("gives the full keyword points to the first keyword found in the title", () => {
+    // The first keyword (profile order) is in the description only; the
+    // second one, in the title, carries the 30 points.
+    const result = matchOpportunity(
+      offer({ title: "Przegląd monitoringu", description: "Oświetlenie parkingu." }),
+      profile({ includeKeywords: ["oświetlenie", "monitoring"] }),
+    );
+    expect(result.reasons.filter((reason) => reason.kind === "keyword")).toEqual([
+      { kind: "keyword", points: 0, keyword: "oświetlenie", field: "description" },
+      { kind: "keyword", points: 30, keyword: "monitoring", field: "title" },
+    ]);
+    expect(result.score).toBe(30 + 10 + 20);
+  });
+
+  it("gives the reduced points once when every keyword is in the description", () => {
+    const result = matchOpportunity(
+      offer({ title: "Usługa", description: "Oświetlenie oraz monitoring." }),
+      profile({ includeKeywords: ["oświetlenie", "monitoring"] }),
+    );
+    expect(result.reasons.filter((reason) => reason.kind === "keyword")).toEqual([
+      { kind: "keyword", points: 15, keyword: "oświetlenie", field: "description" },
+      { kind: "keyword", points: 0, keyword: "monitoring", field: "description" },
+    ]);
+    expect(result.score).toBe(15 + 10 + 20);
+    expect(formatReasons(result.reasons)).toContain("słowo: oświetlenie (opis)");
   });
 });
 
@@ -862,5 +984,65 @@ describe("formatReasons (Polish explanations)", () => {
     ],
   ])("formats %j", (reason, expected) => {
     expect(formatReason(reason)).toBe(expected);
+  });
+
+  it("names categories by their labels when given (the customer's views, PR-09)", () => {
+    const options = { categoryLabels: CATEGORY_LABELS };
+    expect(
+      formatReason(
+        {
+          kind: "category",
+          points: 40,
+          hits: [{ category: "sprzatanie", cpvCodes: ["90910000-9"] }],
+        },
+        options,
+      ),
+    ).toBe("kategoria: „Sprzątanie”");
+    expect(
+      formatReason(
+        { kind: "category_mismatch", points: 0, offerCategories: ["remonty", "serwis"] },
+        options,
+      ),
+    ).toBe(
+      "kategoria: niezgodna (oferta: „Roboty wykończeniowe i remonty”, „Serwis, naprawy i konserwacja”)",
+    );
+    const reasons: MatchReason[] = [
+      {
+        kind: "category",
+        points: 40,
+        hits: [{ category: "elektryka", cpvCodes: [ELEKTRYKA_CPV] }],
+      },
+      { kind: "region_unrestricted", points: 20 },
+    ];
+    expect(formatReasons(reasons, options)).toBe("kategoria: „Elektryka”; region: bez ograniczeń");
+    // Every category has a label, none of them the raw key.
+    for (const category of MVP_CATEGORIES) {
+      expect(CATEGORY_LABELS[category]).not.toBe(category);
+    }
+  });
+
+  it("quotes each label, so labels with commas stay one name, and leaves the codes out", () => {
+    const hits: MatchReason = {
+      kind: "category",
+      points: 40,
+      hits: [
+        { category: "serwis", cpvCodes: ["50000000-5"] },
+        { category: "instalacje", cpvCodes: ["45330000-9", "45331000-6"] },
+      ],
+    };
+    expect(formatReason(hits, { categoryLabels: CATEGORY_LABELS })).toBe(
+      "kategoria: „Serwis, naprawy i konserwacja”, " +
+        "„Instalacje budowlane (wod.-kan., ogrzewanie, wentylacja)”",
+    );
+    expect(
+      formatReason(
+        { kind: "category_mismatch", points: 0, offerCategories: ["serwis", "szkolenia"] },
+        { categoryLabels: CATEGORY_LABELS },
+      ),
+    ).toBe("kategoria: niezgodna (oferta: „Serwis, naprawy i konserwacja”, „Szkolenia”)");
+    // The operator's keys (match:preview) have no commas: unquoted, with their codes.
+    expect(formatReason(hits)).toBe(
+      "kategoria: serwis (CPV 50000000-5), instalacje (CPV 45330000-9, 45331000-6)",
+    );
   });
 });

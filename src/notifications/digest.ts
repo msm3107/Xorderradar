@@ -4,6 +4,7 @@ import type {
   OpportunityContact,
   OpportunityLocation,
 } from "../domain/opportunity.js";
+import { CATEGORY_LABELS } from "../domain/vocabulary.js";
 import { escapeHtml } from "../infrastructure/html.js";
 import { formatReasons } from "../matching/format.js";
 import type { MatchReason } from "../matching/match.js";
@@ -144,13 +145,20 @@ function formatLocation(location: OpportunityLocation | null): string {
   return location.raw ?? NOT_GIVEN;
 }
 
+/**
+ * The "Kategoria:" value: "Elektryka; Serwis, naprawy i konserwacja · CPV:
+ * 45310000-3, 50700000-2", or "CPV: …" alone without an MVP category. The
+ * customer sees category names, never the keys (CATEGORY_LABELS). Names
+ * contain commas, so they are joined with "; ", and " · CPV: " keeps the
+ * codes apart from the last name.
+ */
 function formatCategory(cpvCodes: readonly string[]): string {
   if (cpvCodes.length === 0) return NOT_GIVEN;
   const shown = cpvCodes.slice(0, CPV_CODES_SHOWN).join(", ");
   const more = cpvCodes.length - CPV_CODES_SHOWN;
-  const codes = `CPV ${shown}${more > 0 ? ` i ${String(more)} ${plural(more, "inny", "inne", "innych")}` : ""}`;
-  const categories = mvpCategoriesForCpv(cpvCodes);
-  return categories.length === 0 ? codes : `${categories.join(", ")} (${codes})`;
+  const codes = `CPV: ${shown}${more > 0 ? ` i ${String(more)} ${plural(more, "inny", "inne", "innych")}` : ""}`;
+  const categories = mvpCategoriesForCpv(cpvCodes).map((category) => CATEGORY_LABELS[category]);
+  return categories.length === 0 ? codes : `${categories.join("; ")} · ${codes}`;
 }
 
 function formatContact(contact: OpportunityContact | null): string | null {
@@ -212,7 +220,10 @@ export function digestItemView({ offer, reasons }: DigestItem): DigestItemView {
   if (offer.description !== null) fields.push({ label: "Opis", value: snippet(offer.description) });
   const contact = formatContact(offer.contact);
   if (contact !== null) fields.push({ label: "Kontakt", value: contact });
-  fields.push({ label: "Dlaczego pasuje", value: formatReasons(reasons) });
+  fields.push({
+    label: "Dlaczego pasuje",
+    value: formatReasons(reasons, { categoryLabels: CATEGORY_LABELS }),
+  });
   const attribution = sourceAttribution(offer);
   if (attribution !== null) fields.push({ label: ATTRIBUTION_LABEL, value: attribution });
   const link = safeLink(offer.sourceUrl);
@@ -260,7 +271,10 @@ function digestModel(
       ? []
       : [
           {
+            // What the profile page offers (PR-09): the form and the matching offers.
             text:
+              "Na stronie profilu możesz zmienić kategorie, regiony i słowa kluczowe oraz " +
+              "zobaczyć wszystkie pasujące zamówienia. " +
               "Twój profil (link jednorazowy, ważny 7 dni; nie przekazuj tej wiadomości " +
               "dalej — link daje dostęp do profilu):",
             href: profileUrl,

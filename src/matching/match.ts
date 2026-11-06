@@ -13,10 +13,19 @@ import { findKeyword, prepareKeywords, tokenize, type Keyword } from "./text.js"
  * the same order.
  */
 
-/** Points per rule (ARCHITECTURE §4.4; a starting point for calibration in the pilot). */
+/**
+ * Points per rule (ARCHITECTURE §4.4; calibrated before the pilot, D-023).
+ * Keywords give their points once: `keyword` when at least one counted
+ * keyword has its evidence in the title, `keywordInDescription` when all of
+ * them were found in the description only — a word deep in a long
+ * description (a tractor's "oświetlenie", "instalacja elektryczna") says
+ * little about what is being bought.
+ */
 export const POINTS = {
   category: 40,
   keyword: 30,
+  /** The keyword points when every counted keyword was found in the description only. */
+  keywordInDescription: 15,
   /** Once, when more than one distinct keyword is found. */
   moreKeywords: 10,
   region: 20,
@@ -27,8 +36,10 @@ export const POINTS = {
 /**
  * `matched` needs at least this score, no excluding keyword and a region that
  * is not a mismatch. Category + region (60) passes; with an unknown region
- * category + keyword (70) is needed; a keyword alone passes only with a
- * matching region (50); one keyword with an unknown region (30) does not.
+ * category + keyword is needed (70 from the title, 55 from the description);
+ * a keyword alone passes only from the title with a matching region (50);
+ * from the description with a matching region (35), or with an unknown
+ * region (30 / 15), it does not.
  */
 export const MATCH_THRESHOLD = 50;
 
@@ -70,10 +81,15 @@ export type MatchReason =
       readonly points: 0;
       readonly cpvCodes: readonly string[];
     }
-  /** A profile keyword found; the first one found gets the points, the others 0. */
+  /**
+   * A profile keyword found. One reason carries the keyword points: the first
+   * keyword (profile order) found in the title, with `POINTS.keyword`, or —
+   * when all were found in the description only — the first keyword, with
+   * `POINTS.keywordInDescription`. The others have 0.
+   */
   | {
       readonly kind: "keyword";
-      readonly points: typeof POINTS.keyword | 0;
+      readonly points: typeof POINTS.keyword | typeof POINTS.keywordInDescription | 0;
       readonly keyword: string;
       readonly field: MatchField;
     }
@@ -225,14 +241,22 @@ function keywordReasons(text: SearchedText, profile: MatchableProfile): MatchRea
     }
     return false;
   };
-  const reasons: MatchReason[] = [];
   keywords.forEach((_, index) => assign(index, new Set()));
-  keywords.forEach((keyword, index) => {
+  const counted = keywords.flatMap((keyword, index) => {
     const span = assigned.get(index);
-    if (span === undefined) return;
-    const points = reasons.length === 0 ? POINTS.keyword : 0;
-    reasons.push({ kind: "keyword", points, keyword: keyword.text, field: span.field });
+    return span === undefined ? [] : [{ keyword: keyword.text, field: span.field }];
   });
+  // The points go to the first keyword found in the title (full points), or
+  // to the first keyword when all are in the description (D-023, 2026-11-06).
+  const inTitle = counted.findIndex((hit) => hit.field === "title");
+  const scored = inTitle === -1 ? 0 : inTitle;
+  const points = inTitle === -1 ? POINTS.keywordInDescription : POINTS.keyword;
+  const reasons: MatchReason[] = counted.map((hit, index) => ({
+    kind: "keyword",
+    points: index === scored ? points : 0,
+    keyword: hit.keyword,
+    field: hit.field,
+  }));
   if (reasons.length > 1) {
     reasons.push({ kind: "more_keywords", points: POINTS.moreKeywords, count: reasons.length });
   }
