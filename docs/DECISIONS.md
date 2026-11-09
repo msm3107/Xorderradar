@@ -1554,8 +1554,13 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     (znana podatność zależności produkcyjnej = błąd; zależności tylko deweloperskie nie
     blokują CI — obejmuje je dalej pełny `pnpm audit` w Code & Safety Review,
     `docs/SECURITY.md` §13), wersja pnpm z `packageManager`. Klient `pg_dump`/`pg_restore`
-    z `postgresql-client`, z kontrolą wersji ≥ 16 — test backup/restore nie może się po cichu
-    pominąć w CI. Ten test działa w osobnym projekcie Vitest po wszystkich pozostałych
+    przypięty do wersji głównej serwera: `postgresql-client-16` z repozytorium PGDG
+    (apt.postgresql.org, dodanego skryptem z `postgresql-common`, bo Ubuntu 26.04 ma tylko
+    klienta 18; nie meta-pakiet `postgresql-client`, który daje najnowszego klienta),
+    `/usr/lib/postgresql/16/bin` na początku `PATH` i kontrola, że wersja główna to dokładnie
+    16 — `pg_dump` ≥ 17 zapisuje `SET transaction_timeout`, którego serwer 16 nie zna, więc
+    `pg_restore --exit-on-error --single-transaction` kończy się błędem; test backup/restore
+    nie może się też po cichu pominąć w CI. Ten test działa w osobnym projekcie Vitest po wszystkich pozostałych
     (`groupOrder`), bo introspekcja katalogu przez Migrator Kysely w innych plikach ściga się
     z relacjami usuwanymi przez restore w tej samej bazie.
 - **Odrzucone alternatywy:** alert z procesu `ingest`/`digest` (każda komenda musiałaby znać

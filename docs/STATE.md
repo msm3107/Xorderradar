@@ -794,6 +794,12 @@ review. D-023, D-024, D-028 updated.
   manual `digest` with no other `sent`/`pending` row of that profile and transport today;
   Code & Safety re-check PASS, its Low L1 („czyli jutro” too narrow when resolving between
   the 06:30 alert and the 7:30 cron) folded in by the coordinator (wording only).
+- CI fix (owner-approved addition to PR-09): the `ubuntu-latest` runner image moved to 26.04,
+  where `postgresql-client` gives client 18; pg_dump ≥ 17 writes `SET transaction_timeout`,
+  which the `postgres:16` service rejects, so the backup/restore test failed. `ci.yml` now
+  adds the PGDG repository (the runner has none; `apt.postgresql.org.sh -y` from
+  `postgresql-common`), installs `postgresql-client-16`, puts `/usr/lib/postgresql/16/bin` on `PATH` and requires
+  major 16; D-028 CI sentence updated. No code or test change.
 
 **PR-08 — Drugie źródło: Baza Konkurencyjności (adapter `bk`)** (`docs/PR_PLAN.md` → PR-08) —
 **MERGED in PR #14 (366618e)**; D-030 new.
@@ -925,6 +931,11 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
    (PR-08 is merged, 366618e): PR-07B checklist (`docs/DEPLOY.md` §13) if not done yet, then
    PR-08 AC1 and the `bk` backfill (Blockers). Follow-ups from the PR-08 reviews (owner to
    choose the PR):
+   - Backup client version (found by the PR-09 CI fix, later PR): README/D-028/RUNBOOK
+     „klient ≥ 16 / nie starszy niż serwer” and the version check in
+     `src/operations/backup.ts` are too permissive — a newer client (17+) makes a dump that a
+     16 server cannot restore (`SET transaction_timeout`); require the server's major or
+     document the restore-side limit.
    - Calibration aid (Quality Review of PR-09, out of scope): a `match:preview` counter of
      near misses — offers dropped only because the keyword was in the description (they would
      match with a title keyword) — for calibrating pilot profiles.
