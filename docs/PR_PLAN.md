@@ -732,7 +732,10 @@ ile, do kiedy, co i dlaczego.
    - „dziś” i „jutro”;
    - termin ≤ 2 dni wyróżniony słowem „PILNE”;
    - termin, który minął, oznaczony słowem „minął”;
-   - liczone w dniach kalendarzowych czasu polskiego od chwili renderowania.
+   - liczone w dniach kalendarzowych czasu polskiego od chwili renderowania;
+   - przykład `/przyklad` (`src/web/example.ts`) ma dziś stałe daty, już w przeszłości: z
+     tym stanem terminu liczyć je względem chwili renderowania (wymaga wstrzykiwanego zegara
+     w `WebServerOptions`; odłożone z przeglądu jakości PR-10, NIT 1).
 3. **Opis:** widoczne pierwsze ~300 znaków, cały opis w `<details>`. Kody CPV i techniczne
    powody (region nieznany, CPV spoza słownika) w `<details>` „Szczegóły dopasowania”.
 4. **„Dlaczego pasuje”:** jedno ludzkie zdanie, np. „Elektryka · słowo „oświetlenie” w

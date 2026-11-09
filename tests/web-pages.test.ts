@@ -33,7 +33,6 @@ const NO_MARKUP_FROM_DATA = /<script|<img|<b>|javascript:/i;
 const values: ProfileFormValues = {
   name: "Jan Kowalski",
   email: "kontakt@example.invalid",
-  emailConfirm: "",
   categories: ["elektryka", "it"],
   voivodeships: ["mazowieckie"],
   counties: "warszawski zachodni",
@@ -67,7 +66,7 @@ describe("settingsPage", () => {
     ]
       .map((match) => match[1] ?? "")
       .filter((id) => id !== "");
-    expect(ids).toHaveLength(6 + MVP_CATEGORIES.length + VOIVODESHIPS.length);
+    expect(ids).toHaveLength(5 + MVP_CATEGORIES.length + VOIVODESHIPS.length);
     for (const id of ids) {
       expect(html.match(new RegExp(`<label for="${id}">`, "g"))).toHaveLength(1);
     }
@@ -100,7 +99,7 @@ describe("settingsPage", () => {
   it("re-renders an invalid form as 400 with an error summary linking to the fields", () => {
     const page = settingsPage(values, "c", {
       name: ["Podaj nazwę firmy."],
-      emailConfirm: ["Wpisz nowy adres e-mail jeszcze raz."],
+      email: ["Podaj poprawny adres e-mail, na przykład nazwa@firma.pl."],
       categories: ["Wybierz co najmniej jedną kategorię."],
       includeKeywords: ["Wiersz 1: a", "Wiersz 2: b"],
     });
@@ -115,7 +114,7 @@ describe("settingsPage", () => {
       [...summary.matchAll(/<li><a href="#([^"]+)">([^<]+)<\/a><\/li>/g)].map((m) => [m[1], m[2]]),
     ).toEqual([
       ["nazwa", "Nazwa firmy: Podaj nazwę firmy."],
-      ["email-powtorz", "Powtórz adres e-mail: Wpisz nowy adres e-mail jeszcze raz."],
+      ["email", "Adres e-mail: Podaj poprawny adres e-mail, na przykład nazwa@firma.pl."],
       ["kategoria-1", "Kategorie: Wybierz co najmniej jedną kategorię."],
       ["slowa", "Słowa kluczowe: Wiersz 1: a"],
       ["slowa", "Słowa kluczowe: Wiersz 2: b"],
@@ -123,11 +122,11 @@ describe("settingsPage", () => {
     expect(tagWithId(html, "nazwa")).toContain(
       'aria-describedby="nazwa-opis nazwa-blad" aria-invalid="true"',
     );
-    expect(tagWithId(html, "email-powtorz")).toContain(
-      'aria-describedby="email-powtorz-opis email-powtorz-blad" aria-invalid="true"',
+    expect(tagWithId(html, "email")).toContain(
+      'aria-describedby="email-opis email-blad" aria-invalid="true"',
     );
     expect(tagWithId(html, "slowa")).toContain('aria-invalid="true"');
-    expect(tagWithId(html, "email")).not.toContain("aria-invalid");
+    expect(tagWithId(html, "powiaty")).not.toContain("aria-invalid");
     expect(tagWithId(html, "wykluczenia")).not.toContain("aria-invalid");
     expect(html).toContain(
       '<p class="error" id="slowa-blad"><span>Błąd: Wiersz 1: a</span><br><span>Błąd: Wiersz 2: b</span></p>',
@@ -143,7 +142,6 @@ describe("settingsPage", () => {
       {
         name: hostile,
         email: hostile,
-        emailConfirm: hostile,
         categories: [hostile],
         voivodeships: [hostile],
         counties: `</textarea>${hostile}`,

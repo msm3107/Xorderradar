@@ -70,6 +70,8 @@ export interface CompanyProfilesTable {
   active: boolean;
   created_at: Generated<Date>;
   updated_at: Generated<Date>;
+  /** A new address waiting for its confirmation link (migration 0008, D-031). */
+  pending_email: Generated<string | null>;
 }
 
 export interface IngestionRunsTable {
@@ -109,8 +111,8 @@ export interface DeliveriesTable {
   sent_at: Date | null;
 }
 
-/** Mirrors access_tokens_purpose_check (migration 0006, D-026). */
-export type AccessTokenPurpose = "login" | "unsubscribe";
+/** Mirrors access_tokens_purpose_check (migrations 0006 and 0008, D-026, D-031). */
+export type AccessTokenPurpose = "login" | "unsubscribe" | "email_change";
 
 export interface AccessTokensTable {
   id: Generated<string>;
@@ -120,8 +122,21 @@ export interface AccessTokensTable {
   purpose: AccessTokenPurpose;
   created_at: Generated<Date>;
   expires_at: Date;
-  /** Set once when a login token is used; always null for unsubscribe tokens. */
+  /** Set once when a login token is used; always null for the other purposes. */
   used_at: Date | null;
+  /** The pending address an `email_change` token confirms; null for the other purposes. */
+  email: Generated<string | null>;
+}
+
+/** Mirrors access_emails_kind_check (migration 0008, D-031). */
+export type AccessEmailKind = "login_link" | "email_change";
+
+/** One access e-mail sent to a profile, kept a day for the daily limits (D-031). */
+export interface AccessEmailsTable {
+  id: Generated<string>;
+  profile_id: string;
+  kind: AccessEmailKind;
+  created_at: Generated<Date>;
 }
 
 export interface SessionsTable {
@@ -141,4 +156,5 @@ export interface Database {
   deliveries: DeliveriesTable;
   access_tokens: AccessTokensTable;
   sessions: SessionsTable;
+  access_emails: AccessEmailsTable;
 }

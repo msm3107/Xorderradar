@@ -8,6 +8,7 @@ import { checkHealth } from "./health.js";
 import {
   ConfigError,
   loadConfig,
+  loadContactEmail,
   loadEmailConfig,
   loadOperatorEmail,
   loadPublicBaseUrl,
@@ -944,10 +945,12 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
   }
 
   let config: AppConfig;
-  // Only `digest` reads the e-mail variables, only `serve` the listener and
-  // only the link builders PUBLIC_BASE_URL; checked before the database is opened.
+  // Only `digest` and `serve` (the access e-mails, D-031) read the e-mail
+  // variables, only `serve` the listener and CONTACT_EMAIL and only the link
+  // builders PUBLIC_BASE_URL; checked before the database is opened.
   let emailConfig: EmailConfig | null = null;
   let webConfig: WebConfig | null = null;
+  let contactEmail: string | null = null;
   let publicBaseUrl: string | null = null;
   // Only `status --notify` reads OPERATOR_EMAIL (and then the e-mail variables),
   // only `status` BACKUP_DIR and HEARTBEAT_URL.
@@ -956,10 +959,15 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
   const notify = invocation.command === "status" && invocation.notify;
   try {
     config = loadConfig(io.env);
-    if (invocation.command === "digest" || notify) emailConfig = loadEmailConfig(io.env);
+    if (invocation.command === "digest" || invocation.command === "serve" || notify) {
+      emailConfig = loadEmailConfig(io.env);
+    }
     if (notify) operatorEmail = loadOperatorEmail(io.env);
     if (invocation.command === "status") statusConfig = loadStatusConfig(io.env);
-    if (invocation.command === "serve") webConfig = loadWebConfig(io.env);
+    if (invocation.command === "serve") {
+      webConfig = loadWebConfig(io.env);
+      contactEmail = loadContactEmail(io.env);
+    }
     if (invocation.command === "digest" || invocation.command === "access:link") {
       publicBaseUrl = loadPublicBaseUrl(io.env);
     }
@@ -1019,8 +1027,17 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
       case "deliveries:resolve":
         return await runDeliveriesResolve(invocation.resolve, database, io);
       case "serve":
-        if (webConfig === null) throw new Error("web configuration was not loaded");
-        return await runServe(config, webConfig, database, io, deps.web ?? defaultWebDeps);
+        if (webConfig === null || emailConfig === null) {
+          throw new Error("web configuration was not loaded");
+        }
+        return await runServe(
+          config,
+          { web: webConfig, email: emailConfig, contactEmail },
+          database,
+          io,
+          deps.web ?? defaultWebDeps,
+          (deps.digest ?? defaultDigestDeps).createSender,
+        );
       case "access:link":
         if (publicBaseUrl === null) throw new Error("PUBLIC_BASE_URL was not loaded");
         return await runAccessLink(invocation.profileId, publicBaseUrl, database, io);
@@ -1672,20 +1689,33 @@ function listenErrorCode(error: unknown): string | null {
   return typeof code === "string" && /^E[A-Z0-9_]{1,31}$/.test(code) ? code : null;
 }
 
+/** What `serve` reads from the environment besides AppConfig. */
+interface ServeConfig {
+  readonly web: WebConfig;
+  /** The transport of the access e-mails (D-031), the same as `digest`'s. */
+  readonly email: EmailConfig;
+  readonly contactEmail: string | null;
+}
+
 /**
  * `serve`: the web server (src/web) until SIGINT/SIGTERM, then a graceful
  * shutdown (open requests finish, bounded) and exit 0. Exit 1 when the
  * schema is not up to date, the database is unavailable or the address
  * cannot be bound. Logs one line per request (method, route name, status,
- * duration) on stderr; never a URL, token, cookie or address.
+ * duration) on stderr; never a URL, token, cookie or address. The access
+ * e-mails (D-031) go over the configured transport (EMAIL_MODE=test: the
+ * outbox); the sender is closed after the server, which waits for the
+ * e-mail being sent.
  */
 async function runServe(
   config: AppConfig,
-  webConfig: WebConfig,
+  serveConfig: ServeConfig,
   database: CliDatabase,
   io: CliIo,
   webDeps: CliWebDeps,
+  createSender: (config: EmailConfig) => EmailSender,
 ): Promise<ExitCode> {
+  const webConfig = serveConfig.web;
   if (database.startWebServer === undefined) throw new Error("database cannot serve");
   const logger = createLogger(config.logLevel, io.stderr);
   try {
@@ -1702,26 +1732,33 @@ async function runServe(
   }
   // Registered before listening, so a signal during startup is not lost.
   const shutdown = webDeps.waitForShutdown();
-  let server: WebServer;
+  const sender = createSender(serveConfig.email);
   try {
-    server = await database.startWebServer({
-      host: webConfig.host,
-      port: webConfig.port,
-      publicBaseUrl: webConfig.publicBaseUrl,
-      logger,
-    });
-  } catch (error: unknown) {
-    const code = listenErrorCode(error);
-    if (code === null) throw error;
-    io.stderr(`Serve failed: cannot listen on WEB_HOST:WEB_PORT (${code}).\n`);
-    return ExitCode.Failure;
+    let server: WebServer;
+    try {
+      server = await database.startWebServer({
+        host: webConfig.host,
+        port: webConfig.port,
+        publicBaseUrl: webConfig.publicBaseUrl,
+        logger,
+        sender,
+        contactEmail: serveConfig.contactEmail,
+      });
+    } catch (error: unknown) {
+      const code = listenErrorCode(error);
+      if (code === null) throw error;
+      io.stderr(`Serve failed: cannot listen on WEB_HOST:WEB_PORT (${code}).\n`);
+      return ExitCode.Failure;
+    }
+    logger.info("web server listening", { host: server.host, port: server.port });
+    await shutdown;
+    logger.info("web server stopping");
+    await server.close();
+    logger.info("web server stopped");
+    return ExitCode.Ok;
+  } finally {
+    sender.close();
   }
-  logger.info("web server listening", { host: server.host, port: server.port });
-  await shutdown;
-  logger.info("web server stopping");
-  await server.close();
-  logger.info("web server stopped");
-  return ExitCode.Ok;
 }
 
 /**

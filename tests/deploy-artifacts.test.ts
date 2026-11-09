@@ -6,6 +6,7 @@ import { parseEnv } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   loadConfig,
+  loadContactEmail,
   loadEmailConfig,
   loadOperatorEmail,
   loadPublicBaseUrl,
@@ -22,6 +23,7 @@ import { PROFILE_FORM_MAX_BYTES } from "../src/web/server.js";
 
 const read = (path: string) => readFileSync(join(process.cwd(), path), "utf8");
 const UNIT = read("deploy/systemd/radar-serve.service");
+const SMTP_DROP_IN = read("deploy/systemd/radar-serve.service.d/smtp.conf");
 const CRON = read("deploy/cron/radar");
 const LOGROTATE = read("deploy/logrotate/radar");
 const CADDYFILE = read("deploy/caddy/Caddyfile");
@@ -83,6 +85,7 @@ describe("deploy/radar.env.example", () => {
     expect(loadOperatorEmail(ENV)).toBe("operator@example.invalid");
     expect(loadPublicBaseUrl(ENV)).toBe("https://radar.example.invalid");
     expect(loadWebConfig(ENV)).toMatchObject({ host: "127.0.0.1", port: 3000 });
+    expect(loadContactEmail(ENV)).toBe("kontakt@example.invalid");
     // HEARTBEAT_URL ships empty (no heartbeat until DEPLOY.md point 10).
     expect(loadStatusConfig(ENV)).toEqual({ backupDir: "/var/backups/radar", heartbeatUrl: null });
     expect(
@@ -118,13 +121,33 @@ describe("deploy/systemd/radar-serve.service", () => {
     expect(unitValue("Restart")).toBe("on-failure");
   });
 
-  it("is hardened, without write access and without MemoryDenyWriteExecute (V8's JIT)", () => {
+  // PR-10 (D-031): serve sends the access e-mails — into the outbox in
+  // EMAIL_MODE=test, its only writable path, or to the SMTP server.
+  it("is hardened, writing only to the outbox and without MemoryDenyWriteExecute (V8's JIT)", () => {
     expect(unitValue("NoNewPrivileges")).toBe("yes");
     expect(unitValue("ProtectSystem")).toBe("strict");
     expect(unitValue("CapabilityBoundingSet")).toBe("");
-    expect(unitValue("ReadWritePaths")).toBeUndefined();
+    expect(unitEntries(UNIT).filter(([name]) => name === "ReadWritePaths")).toEqual([
+      ["ReadWritePaths", `-${String(ENV.EMAIL_OUTBOX_DIR)}`],
+    ]);
     expect(unitValue("MemoryDenyWriteExecute")).toBeUndefined();
     expect(unitValue("EnvironmentFile")).toBeUndefined();
+  });
+
+  it("reaches the loopback only: EMAIL_MODE=test, the default, needs no egress", () => {
+    expect(ENV.EMAIL_MODE).toBe("test");
+    expect(unitEntries(UNIT).filter(([name]) => name.startsWith("IPAddress"))).toEqual([
+      ["IPAddressDeny", "any"],
+      ["IPAddressAllow", "localhost"],
+    ]);
+  });
+
+  // PR-10 (D-031): EMAIL_MODE=smtp sends the access e-mails to the provider.
+  it("ships the smtp drop-in, which only resets the deny list", () => {
+    const lines = SMTP_DROP_IN.split("\n").filter((line) => line !== "" && !line.startsWith("#"));
+    expect(lines).toEqual(["[Service]", "IPAddressDeny="]);
+    expect(SMTP_DROP_IN).toContain("/etc/systemd/system/radar-serve.service.d/");
+    expect(SMTP_DROP_IN).toContain("systemctl daemon-reload && systemctl restart radar-serve");
   });
 });
 
@@ -195,7 +218,7 @@ describe("deploy/caddy/Caddyfile", () => {
   });
 
   it("keeps the token paths out of the access log, adds no HSTS, and allows the profile form", () => {
-    expect(CADDYFILE).toMatch(/^\t@token path \/dostep\/\* \/wypis\/\*$/m);
+    expect(CADDYFILE).toMatch(/^\t@token path \/dostep\/\* \/wypis\/\* \/potwierdz-email\/\*$/m);
     expect(CADDYFILE).toMatch(/^\tlog_skip @token$/m);
     expect(CADDYFILE.toLowerCase()).not.toMatch(/^[^#]*strict-transport-security/m);
     const maxSize = /^\t\tmax_size (\d+)KB$/m.exec(CADDYFILE)?.[1];
@@ -215,7 +238,7 @@ describe("deploy/caddy/Caddyfile", () => {
     return filter[2] ?? "";
   };
   // Plain quotes: Go's `${1}` must not become a template interpolation.
-  const REDACT = '"(?i)/(dostep|wypis)/[^?#]*" "/${1}/REDACTED"';
+  const REDACT = '"(?i)/(dostep|wypis|potwierdz-email)/[^?#]*" "/${1}/REDACTED"';
 
   for (const [name, opening] of [
     ["the default logger (errors, redirects)", /^\tlog default \{$/m],
@@ -235,10 +258,12 @@ describe("deploy/caddy/Caddyfile", () => {
 
   it("uses a pattern that removes the token and keeps the rest", () => {
     // The same rewrite in JS: (?i) → flag i, Go's ${1} → $1.
-    const redact = (value: string) => value.replace(/\/(dostep|wypis)\/[^?#]*/giu, "/$1/REDACTED");
+    const redact = (value: string) =>
+      value.replace(/\/(dostep|wypis|potwierdz-email)\/[^?#]*/giu, "/$1/REDACTED");
     const token = "Kq3-not-a-real-token_x";
     expect(redact(`/dostep/${token}`)).toBe("/dostep/REDACTED");
     expect(redact(`/wypis/${token}?x=1`)).toBe("/wypis/REDACTED?x=1");
+    expect(redact(`/potwierdz-email/${token}`)).toBe("/potwierdz-email/REDACTED");
     expect(redact(`/DOSTEP/${token}`)).toBe("/DOSTEP/REDACTED");
     expect(redact(`https://radar.example.invalid/dostep/${token}`)).toBe(
       "https://radar.example.invalid/dostep/REDACTED",
@@ -256,6 +281,7 @@ describe("docs", () => {
     for (const path of [
       "deploy/cron/radar",
       "deploy/systemd/radar-serve.service",
+      "deploy/systemd/radar-serve.service.d/smtp.conf",
       "deploy/caddy/Caddyfile",
       "deploy/logrotate/radar",
       "deploy/radar.env.example",

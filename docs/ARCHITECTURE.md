@@ -84,12 +84,15 @@ src/
 ├── notifications/          # digest.ts (szablon, czysty), sender.ts (outbox/SMTP), [PR-05]
 │                           # run.ts (wybór ofert, idempotencja, blokada digest; D-024)
 │                           # candidates.ts: kandydaci i dopasowanie (digest + web) [PR-06B]
+│                           # access-emails.ts: treść e-maili dostępu (czysta)    [PR-10]
 ├── operations/             # status.ts (raport i alert operatora, czysty),      [PR-07A]
 │                           # backup.ts (pg_dump/pg_restore jako procesy potomne; D-028)
 │                           # heartbeat.ts (ping HEARTBEAT_URL po status; D-029) [PR-07B]
 └── web/                    # serve: node:http, strony SSR, sesja, CSRF, wypis  [PR-06A]
                             # server.ts, pages.ts, session.ts, links.ts, multipart.ts
                             # profile-form.ts: formularz profilu, polskie błędy  [PR-06B]
+                            # access-mail.ts, mail-queue.ts: e-maile dostępu po    [PR-10]
+                            # odpowiedzi; rate-limit.ts: limit na IP; example.ts: /przyklad
 .github/workflows/ci.yml   # CI: pnpm check z PostgreSQL 16 (wymagane testy z bazą) [PR-07A]
 deploy/                    # wdrożenie na VPS (docs/DEPLOY.md, D-029)               [PR-07B]
                            # systemd/radar-serve.service, cron/radar, caddy/Caddyfile,
@@ -116,11 +119,16 @@ z jednym wyjątkiem (D-023): może importować czyste helpery `sources/normalize
 (PR-06A: `access-repository.ts`; od PR-06B także `company-profiles-repository.ts`).
 `cli`/`web` składają zależności (proste wstrzykiwanie przez parametry, bez kontenera DI).
 `notifications` importuje z `web` wyłącznie `web/links.ts` (czyste budowanie URL-i tras
-`/dostep/…` i `/wypis/…`, bez I/O) — trasy definiuje `web`. W drugą stronę (PR-06B, D-027)
-`web` importuje z `notifications` wyłącznie `candidates.ts` (odczyt kandydatów i
-dopasowanie — te same reguły co digest) oraz czyste `digest.ts` (`digestItemView`,
-`digestOrder`, `plural`), a z `sources` tylko czysty `normalize/warsaw-time.ts`; nic z
-`sender.ts` ani `run.ts` — proces `serve` nigdy nie wysyła e-maili.
+`/dostep/…`, `/wypis/…` i od PR-10 `/potwierdz-email/…`, bez I/O) — trasy definiuje `web`.
+W drugą stronę (PR-06B, D-027) `web` importuje z `notifications` wyłącznie `candidates.ts`
+(odczyt kandydatów i dopasowanie — te same reguły co digest) oraz czyste `digest.ts`
+(`digestItemView`, `digestOrder`, `plural`; także `/przyklad`), a z `sources` tylko czysty
+`normalize/warsaw-time.ts`; nic z `run.ts`. Od PR-10 (D-031) `serve` wysyła e-maile dostępu
+(„Wyślij mi link”, potwierdzenie zmiany adresu i powiadomienie na stary adres):
+`web/access-mail.ts` importuje czyste `notifications/access-emails.ts` (treść) i z
+`sender.ts` interfejs nadawcy oraz `EmailSendError`; sam nadawca (`createEmailSender`) jest
+tworzony w `cli`.
+`notifications/access-emails.ts` buduje linki przez `web/links.ts`, jak digest.
 `operations` (PR-07A) czyta przez własne repozytoria (`status-repository.ts`,
 `maintenance-repository.ts`) i bierze z `notifications/run.ts` tylko stałe (`DIGEST_LOCK_KEY`,
 `DIGEST_MAX_ATTEMPTS`); alert wysyła `cli` przez `notifications/sender.ts`.
@@ -575,55 +583,89 @@ Szczegóły i uzasadnienie: D-010 (SMTP, biblioteka) i D-024 (wybór ofert, idem
   stopki pokazuje krótkie teksty linków („Otwórz swój profil”, „Wypisz się z powiadomień”);
   część tekstowa nadal zawiera pełne URL-e, a e-mail bez `PUBLIC_BASE_URL` się nie zmienia.
 
-### 4.6 Web (PR-06A, PR-06B, zaimplementowany)
+### 4.6 Web (PR-06A, PR-06B, PR-10, zaimplementowany)
 
-Szczegóły i uzasadnienie: D-025 (`node:http`, limity), D-026 (tokeny, sesja, CSRF, wypis) i
-D-027 (ekrany klienta, zmiana e-maila, login-CSRF).
+Szczegóły i uzasadnienie: D-025 (`node:http`, limity), D-026 (tokeny, sesja, CSRF, wypis),
+D-027 (ekrany klienta, login-CSRF) i D-031 („Wyślij mi link”, zmiana e-maila z potwierdzeniem).
 
-- `startWebServer({ db, publicBaseUrl, logger, host, port, cleanupIntervalMs, … })`
-  (`server.ts`) → `{ host, port, close() }`. Stała tabela tras:
+- `startWebServer({ db, publicBaseUrl, logger, host, port, sender, contactEmail,
+cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender` — nadawca
+  e-maili dostępu (`null`: niewysyłane, log `not_sent`), `contactEmail` — `CONTACT_EMAIL` na
+  stronie głównej, stronach 409 i 429 i w powiadomieniu na stary adres (`null`: bez kontaktu). Stała tabela tras:
 
-  | Trasa (nazwa w logu)                      | Metody          | Działanie                                            |
-  | ----------------------------------------- | --------------- | ---------------------------------------------------- |
-  | `/` (`home`)                              | GET, HEAD       | strona główna                                        |
-  | `/styl.css` (`stylesheet`)                | GET, HEAD       | arkusz stylów (jedyna odpowiedź z cache, 1 h)        |
-  | `/zdrowie` (`health`)                     | GET, HEAD       | `select 1` ≤ 2 s → 200 `ok` / 503 (tekst, bez sesji) |
-  | `/dostep/<token>` (`login_link`)          | GET, HEAD       | sprawdza token (bez zużycia) → strona z przyciskiem  |
-  | `/dostep` (`login`)                       | POST            | zużywa token, tworzy sesję → 303 `/profil`           |
-  | `/profil` (`profile`)                     | GET, HEAD       | nazwa, status, komunikat, linki, formularze (sesja)  |
-  | `/profil/ustawienia` (`profile_settings`) | GET, HEAD, POST | formularz profilu; POST: zapis (sesja + CSRF)        |
-  | `/profil/wypisz` (`profile_unsubscribe`)  | POST            | `active = false` (sesja + CSRF) → 303 `/profil`      |
-  | `/profil/wlacz` (`profile_resubscribe`)   | POST            | `active = true` (sesja + CSRF) → 303 `/profil`       |
-  | `/dopasowania` (`matches`)                | GET, HEAD       | pasujące oferty profilu (sesja)                      |
-  | `/wyloguj` (`logout`)                     | POST            | usuwa sesję i ciasteczko (sesja + CSRF) → 303 `/`    |
-  | `/wypis/<token>` (`unsubscribe`)          | GET, HEAD, POST | GET: strona z nazwą firmy i przyciskiem; POST: wypis |
+  | Trasa (nazwa w logu)                            | Metody          | Działanie                                            |
+  | ----------------------------------------------- | --------------- | ---------------------------------------------------- |
+  | `/` (`home`)                                    | GET, HEAD       | strona główna z formularzem „Wyślij mi link”         |
+  | `/przyklad` (`example`)                         | GET, HEAD       | przykładowy digest (stałe dane, bez bazy)            |
+  | `/wyslij-link` (`link_request`)                 | POST            | „Wyślij mi link”: ta sama strona dla każdego adresu  |
+  | `/styl.css` (`stylesheet`)                      | GET, HEAD       | arkusz stylów (jedyna odpowiedź z cache, 1 h)        |
+  | `/zdrowie` (`health`)                           | GET, HEAD       | `select 1` ≤ 2 s → 200 `ok` / 503 (tekst, bez sesji) |
+  | `/dostep/<token>` (`login_link`)                | GET, HEAD       | sprawdza token (bez zużycia) → strona z przyciskiem  |
+  | `/dostep` (`login`)                             | POST            | zużywa token, tworzy sesję → 303 `/profil`           |
+  | `/profil` (`profile`)                           | GET, HEAD       | nazwa, status, komunikat, linki, formularze (sesja)  |
+  | `/profil/ustawienia` (`profile_settings`)       | GET, HEAD, POST | formularz profilu; POST: zapis (sesja + CSRF)        |
+  | `/profil/wypisz` (`profile_unsubscribe`)        | POST            | `active = false` (sesja + CSRF) → 303 `/profil`      |
+  | `/profil/wlacz` (`profile_resubscribe`)         | POST            | `active = true` (sesja + CSRF) → 303 `/profil`       |
+  | `/profil/anuluj-email` (`profile_cancel_email`) | POST            | anuluje zmianę adresu (sesja + CSRF) → 303 `/profil` |
+  | `/dopasowania` (`matches`)                      | GET, HEAD       | pasujące oferty profilu (sesja)                      |
+  | `/wyloguj` (`logout`)                           | POST            | usuwa sesję i ciasteczko (sesja + CSRF) → 303 `/`    |
+  | `/wypis/<token>` (`unsubscribe`)                | GET, HEAD, POST | GET: strona z nazwą firmy i przyciskiem; POST: wypis |
+  | `/potwierdz-email/<token>` (`email_confirm`)    | GET, HEAD, POST | GET: strona z przyciskiem; POST: zmiana adresu       |
 
   Inna ścieżka → 404 (`not_found`), inna metoda → 405 z `Allow`. POST: `Origin` (poza
   wypisem) → typ treści (urlencoded; dla wypisu także `multipart/form-data`) → rozmiar
-  (8 KB; `/profil/ustawienia` 64 KB i najwyżej 64 pary pól) → trasa; `/dostep` dodatkowo
-  sprawdza login-CSRF: `Origin` równy `PUBLIC_BASE_URL` albo, gdy `Origin` brak, nagłówek
+  (8 KB; `/profil/ustawienia` 64 KB i najwyżej 64 pary pól; `/wyslij-link` 1 KiB) → trasa;
+  formularze bez sesji (`/dostep`, `/wyslij-link`, `/potwierdz-email/<token>`) dodatkowo
+  sprawdzają login-CSRF: `Origin` równy `PUBLIC_BASE_URL` albo, gdy `Origin` brak, nagłówek
   `Sec-Fetch-Site: same-origin`; inaczej 403, a token nie jest zużywany. Błąd bazy → 500 i
   log bez szczegółów. Każda odpowiedź ma `Referrer-Policy: strict-origin` (od PR-06B;
   `no-referrer` sprawiał, że przeglądarki wysyłały w formularzach `Origin: null`, odrzucany
   przez kontrolę `Origin`; `Referer` niesie tylko origin, nigdy ścieżkę z tokenem).
 
-- Formularz profilu (`profile-form.ts`, `settingsPage`): pola nazwy, e-maila (+ powtórzenie
-  przy zmianie), kategorii i województw (pola wyboru), powiatów i słów (pola tekstowe, jeden
-  wpis w wierszu). Walidacja wyłącznie schematem domeny (`companyProfileSettingsSchema` =
-  schemat profilu bez `active`), błędy po polsku przy polach (numer wiersza dla list) i w
-  podsumowaniu z odnośnikami; `label`, `fieldset`/`legend`, `aria-describedby`,
-  `aria-invalid`. Błąd → 400 z wysłanymi wartościami; zapis → 303 `/profil`. Komunikat po
-  przekierowaniu niesie ciasteczko `__Host-radar_komunikat` (jedno słowo z zamkniętej listy,
-  60 s), które `/profil` pokazuje raz i usuwa. Równoczesne zapisy: wygrywa ostatni.
-- Zmiana e-maila (`updateProfileSettings`, jedna transakcja): `SELECT … FOR NO KEY UPDATE`
-  wiersza profilu → bieżąca sesja `FOR KEY SHARE` (`lockLiveSession`; usunięta lub wygasła →
-  wycofanie, 401) → jeśli adres się zmienił, `revokeOtherAccess`: usunięcie wszystkich
-  tokenów profilu i wszystkich jego sesji poza bieżącą → `UPDATE` profilu na końcu. Ta
-  kolejność nie tworzy cyklu z logowaniem (`consumeLoginToken`), wylogowaniem,
-  `revokeProfileAccess` (też najpierw blokuje profil) ani z `issueDigestTokens` (digest:
-  `FOR SHARE` profilu z warunkiem adresu, inaczej status `address_changed`); po 40P01 (np.
-  z godzinnym sprzątaniem) jedna ponowna próba (D-027). Inne zmiany niczego nie
-  unieważniają. Adres używany przez inny profil (UNIQUE) → błąd przy polu e-mail.
+- Formularz profilu (`profile-form.ts`, `settingsPage`): pola nazwy, e-maila (bez powtórzenia od
+  PR-10: nowy adres i tak wymaga potwierdzenia), kategorii i województw (pola wyboru), powiatów i
+  słów (pola tekstowe, jeden wpis w wierszu). Walidacja wyłącznie schematem domeny
+  (`companyProfileSettingsSchema` = schemat profilu bez `active`), błędy po polsku przy polach
+  (numer wiersza dla list) i w podsumowaniu z odnośnikami; `label`, `fieldset`/`legend`,
+  `aria-describedby`, `aria-invalid`. Błąd → 400 z wysłanymi wartościami; zapis → 303 `/profil`.
+  Komunikat po przekierowaniu niesie ciasteczko `__Host-radar_komunikat` (jedno słowo z zamkniętej
+  listy, 60 s), które `/profil` pokazuje raz i usuwa. Równoczesne zapisy: wygrywa ostatni.
+- „Wyślij mi link” (`POST /wyslij-link`, D-031): najpierw limit na IP (`rate-limit.ts`,
+  najwyżej 10 na godzinę, okno stałe, w pamięci, najwyżej 10 000 kluczy — najstarszy
+  wypada; adres IP: ostatni wpis `X-Forwarded-For`, gdy rozmówca to loopback (Caddy), inaczej
+  adres gniazda; klucz `rateLimitKey`: IPv4 — adres, IPv6 — prefiks /64) → 429; potem
+  formularz (adres niepoprawny → 400 z błędem przy polu). Każdy
+  poprawny adres dostaje od razu tę samą stronę; wyszukanie profilu, limit i wysyłka biegną po
+  odpowiedzi w kolejce `mail-queue.ts` (jedno zadanie naraz, najwyżej 20 czekających;
+  przepełnienie → zadanie odrzucone z logiem `dropped`). `requestLoginLink` (jedna transakcja):
+  wiersz profilu o bieżącym adresie `FOR NO KEY UPDATE` → licznik `access_emails` z 24 h
+  (najwyżej 3 na profil i rodzaj, `claimAccessEmail` pod blokadą wiersza — atomowo) → nowy
+  token logowania (7 dni, jednorazowy, także dla profilu nieaktywnego). Adres oczekujący na
+  potwierdzenie nie jest wyszukiwany. Każdy wynik to jedna linia logu „access mail” (rodzaj,
+  wynik, najwyżej id profilu i kod błędu).
+- Zmiana e-maila (D-031, zastępuje natychmiastową zmianę z D-027): zapis formularza z nowym
+  adresem (`updateProfileSettings`, jedna transakcja: profil `FOR NO KEY UPDATE` → bieżąca
+  sesja `FOR KEY SHARE` (`lockLiveSession`; usunięta lub wygasła → wycofanie, 401) →
+  `requestEmailChange`: limit 3 potwierdzeń na 24 h, usunięcie poprzedniego tokenu
+  `email_change`, nowy token (24 h, jednorazowy, związany z adresem) → `UPDATE` profilu na
+  końcu) zapisuje adres w `pending_email`; `email`, sesje i linki zostają. Po odpowiedzi
+  najpierw powiadomienie bez linków idzie na stary adres, potem potwierdzenie na nowy (także
+  gdy powiadomienie nie wyszło). Limit przekroczony →
+  400 z błędem przy polu, nic nie zapisane. Zajętość adresu nie jest sprawdzana przy zapisie
+  (brak wyroczni). `/profil` pokazuje „Oczekuje na potwierdzenie” (po wygaśnięciu linku: że
+  link wygasł) i „Anuluj zmianę”
+  (`cancelEmailChange`: czyści `pending_email`, usuwa token). `GET /potwierdz-email/<token>`
+  tylko sprawdza token (`isUsableEmailChangeToken`), `POST` to `confirmEmailChange` (jedna
+  transakcja): profil `FOR NO KEY UPDATE` → ponowny odczyt tokenu pod blokadą → sesja
+  przeglądarki `FOR KEY SHARE`, gdy należy do profilu → usunięcie wszystkich tokenów profilu
+  (także tego) i wszystkich jego sesji poza tą → `UPDATE` (`email = pending_email`,
+  `pending_email = NULL`) na końcu. Przegrany wyścig, token nieznany, wygasły, zużyty,
+  anulowany lub zastąpiony → 404 `invalidLinkPage`; adres zajęty w międzyczasie (UNIQUE) →
+  409 neutralna strona, nic się nie zmienia. Ta kolejność blokad (D-027) nie tworzy cyklu z
+  logowaniem (`consumeLoginToken`), wylogowaniem, `revokeProfileAccess`, „Wyślij mi link” (też
+  najpierw blokują profil) ani z `issueDigestTokens` (digest: `FOR SHARE` profilu z warunkiem
+  adresu, inaczej status `address_changed`); po 40P01 (np. z godzinnym sprzątaniem) zapis i
+  potwierdzenie próbują jeszcze raz. Inne zmiany niczego nie unieważniają.
 - Strona dopasowań (`/dopasowania`): `readDigestCandidates` + `matchingItems` (jak digest),
   kolejność `digestOrder` (najbliższy termin), najwyżej 50 (`MATCHES_SHOWN`) + „I N
   kolejnych…”, pola jak w e-mailu (`digestItemView`), link do źródła tylko `http(s)` z
@@ -652,22 +694,35 @@ D-027 (ekrany klienta, zmiana e-maila, login-CSRF).
   odczyt (tylko wartość w kształcie tokenu), CSRF (HMAC z id sesji, `timingSafeEqual`),
   kontrola `Origin`. `multipart.ts` — minimalny ścisły parser `multipart/form-data` tylko dla
   wypisu RFC 8058 (boundary według RFC 2046, jedno pole; D-026). `links.ts` —
-  `loginUrl`/`unsubscribeUrl` (czyste; używa też `notifications` i `access:link`).
+  `loginUrl`/`unsubscribeUrl`/`emailConfirmUrl` (czyste; używa też `notifications` i
+  `access:link`). `example.ts` — dane `/przyklad` (stałe, zmyślone oferty w szablonie digestu).
+  `access-mail.ts` — e-maile dostępu po odpowiedzi (`createAccessMailer`: kolejka, jedna próba
+  wysyłki, log „access mail”; przy zamknięciu serwera czekające zadania wypadają z logiem,
+  a na bieżące serwer czeka najwyżej 5 s — `MAIL_SHUTDOWN_DEADLINE_MS` — po czym je porzuca
+  z logiem `access_mail_shutdown_timeout`; porzucone nie zaczyna już kolejnej wysyłki).
 - Dane: `src/infrastructure/db/access-repository.ts` (`issueAccessToken`,
   `isUsableAccessToken`, `consumeLoginToken`, `findSessionProfile`, `deleteSession`,
   `deactivateProfile`, `activateProfile`, `unsubscribeWithToken`,
-  `unsubscribeTokenProfileName`, `getProfileStatus`, `revokeOtherAccess`,
-  `deleteExpiredAccess`) i `company-profiles-repository.ts` (`getProfileSettings`,
-  `updateProfileSettings`, `getCompanyProfile`). Strona profilu czyta tylko `name`, `email`
-  (pokazywany jako „Adres powiadomień”) i `active`,
+  `unsubscribeTokenProfileName`, `getProfileStatus`, `pendingEmailLinkLive`,
+  `lockLiveSession`, `requestLoginLink`,
+  `requestEmailChange`, `isUsableEmailChangeToken`, `confirmEmailChange`, `cancelEmailChange`,
+  `deleteExpiredAccess`, `deleteOldAccessEmails`) i `company-profiles-repository.ts`
+  (`getProfileSettings`, `updateProfileSettings`, `getCompanyProfile`). Strona profilu czyta
+  tylko `name`, `email` (pokazywany jako „Adres powiadomień”), `pending_email` i `active`,
   a formularz surowe wartości (bez schematu domenowego), więc wypis i poprawka działają także
-  dla wiersza, którego schemat by nie przyjął.
-- Sprzątanie wygasłych tokenów i sesji: przy starcie i co godzinę w procesie `serve`, po 1000
-  wierszy na tabelę, bez nakładania się (`cleanupIntervalMs: null` w testach wyłącza timer).
+  dla wiersza, którego schemat by nie przyjął. Obie strony biorą w tym samym `SELECT`
+  (podzapytanie `EXISTS`, `pendingEmailLinkLive`) to, czy oczekujący adres ma jeszcze
+  niewygasły link `email_change`: jeśli nie (wygasł, `access:revoke`), mówią, że link wygasł,
+  zamiast „Oczekuje na potwierdzenie”.
+- Sprzątanie wygasłych tokenów i sesji oraz wpisów `access_emails` starszych niż 24 h: przy
+  starcie i co godzinę w procesie `serve`, po 1000 wierszy na tabelę, bez nakładania się
+  (`cleanupIntervalMs: null` w testach wyłącza timer). Zamknięcie serwera czeka też,
+  równolegle, na trwające sprzątanie (oba zapytania, `Promise.allSettled` — pula nie jest
+  zamykana pod zapytaniem w toku) i na e-mail dostępu w toku (najwyżej 5 s).
 
 ## 5. Model danych
 
-Stan zgodny z migracjami `0001_core_schema` … `0006_access`
+Stan zgodny z migracjami `0001_core_schema` … `0008_self_service_access`
 (`src/infrastructure/db/migrations.ts`) — źródłem
 prawdy są migracje. Wszystkie kolumny czasu to `timestamptz`; `id` typu uuid generuje
 `gen_random_uuid()`. Statusy to `text` + `CHECK` (a nie typ `enum` PostgreSQL): dodanie
@@ -800,7 +855,10 @@ tego terminu i nowego `fetched_at` — ponowne pobranie oryginału nie cofa prze
 `company_profiles_email_check`: zapisany w postaci znormalizowanej `lower(btrim(email))`),
 `name text`, `categories`, `include_keywords`, `exclude_keywords`, `voivodeships`, `counties`
 (wszystkie `text[] NOT NULL DEFAULT '{}'`), `active bool` (domyślnie `true`), `created_at`,
-`updated_at`. Wszystkie kolumny `NOT NULL`. Przy tworzeniu profilu kod wymaga podania
+`updated_at`. Wszystkie kolumny `NOT NULL` poza `pending_email text` (migracja
+`0008_self_service_access`, D-031): nowy adres czekający na potwierdzenie, `NULL` — brak
+zmiany; `company_profiles_pending_email_check` (postać znormalizowana, niepusty), bez UNIQUE
+(zajętość wychodzi dopiero przy potwierdzeniu). Przy tworzeniu profilu kod wymaga podania
 wszystkich pól (bez ukrytych wartości domyślnych); schemat domeny (PR-04, D-023) wymaga co
 najmniej jednej kategorii z listy MVP i kanonicznych nazw województw — bez CHECK w bazie, więc
 odczyt waliduje wiersz (`invalid_stored_row`). Jedna tabela zamiast osobnych encji
@@ -858,28 +916,41 @@ dostał dziś digest”. Nigdy treść e-maila, adres ani komunikat serwera.
 
 ### `access_tokens` i `sessions` (PR-06A, migracja `0006_access`, D-026)
 
-`access_tokens` — tokeny z linków (logowanie, wypis); sam sekret nigdy nie jest zapisywany:
+`access_tokens` — tokeny z linków (logowanie, wypis, od PR-10 potwierdzenie adresu); sam
+sekret nigdy nie jest zapisywany:
 
-| Kolumna      | Typ                        | Null | Uwagi                                                     |
-| ------------ | -------------------------- | ---- | --------------------------------------------------------- |
-| `id`         | uuid                       | nie  | PK, `gen_random_uuid()`                                   |
-| `token_hash` | text                       | nie  | SHA-256 tokenu, hex (64 znaki), unikalny                  |
-| `profile_id` | uuid FK → company_profiles | nie  | `ON DELETE CASCADE`                                       |
-| `purpose`    | text + CHECK               | nie  | `login` (jednorazowy, ≤ 7 dni) / `unsubscribe` (≤ 60 dni) |
-| `created_at` | timestamptz                | nie  | domyślnie `now()`                                         |
-| `expires_at` | timestamptz                | nie  | `> created_at` i nie dalej niż limit celu                 |
-| `used_at`    | timestamptz                | tak  | zużycie tokenu logowania; dla `unsubscribe` zawsze `NULL` |
+| Kolumna      | Typ                        | Null | Uwagi                                                                                     |
+| ------------ | -------------------------- | ---- | ----------------------------------------------------------------------------------------- |
+| `id`         | uuid                       | nie  | PK, `gen_random_uuid()`                                                                   |
+| `token_hash` | text                       | nie  | SHA-256 tokenu, hex (64 znaki), unikalny                                                  |
+| `profile_id` | uuid FK → company_profiles | nie  | `ON DELETE CASCADE`                                                                       |
+| `purpose`    | text + CHECK               | nie  | `login` (jednorazowy, ≤ 7 dni) / `unsubscribe` (≤ 60 dni) / `email_change` (≤ 24 h, 0008) |
+| `email`      | text                       | tak  | adres potwierdzany tokenem `email_change` (znormalizowany); dla innych celów `NULL`       |
+| `created_at` | timestamptz                | nie  | domyślnie `now()`                                                                         |
+| `expires_at` | timestamptz                | nie  | `> created_at` i nie dalej niż limit celu                                                 |
+| `used_at`    | timestamptz                | tak  | zużycie tokenu logowania; dla `unsubscribe` i `email_change` zawsze `NULL`                |
 
 Ograniczenia: `access_tokens_token_hash_key`, `access_tokens_profile_id_fkey`,
 `access_tokens_token_hash_check`, `access_tokens_purpose_check`,
-`access_tokens_expiry_check`, `access_tokens_used_at_check`; indeksy
-`access_tokens_profile_id_idx` i `access_tokens_expires_at_idx` (sprzątanie).
+`access_tokens_expiry_check`, `access_tokens_used_at_check`, `access_tokens_email_check`
+(`(purpose = 'email_change') = (email IS NOT NULL)`, postać znormalizowana); indeksy
+`access_tokens_profile_id_idx` i `access_tokens_expires_at_idx` (sprzątanie). Token
+`email_change` jest zużywany przez usunięcie (potwierdzenie usuwa wszystkie tokeny profilu).
 
 `sessions` — sesje przeglądarki: `id`, `token_hash` (SHA-256 id sesji z ciasteczka,
 unikalny, `sessions_token_hash_key`, `sessions_token_hash_check`), `profile_id` (FK →
 `company_profiles`, `ON DELETE CASCADE`, `sessions_profile_id_fkey`), `created_at`,
 `expires_at` (`sessions_expiry_check`: `> created_at`, najwyżej 30 dni); indeksy
 `sessions_profile_id_idx` i `sessions_expires_at_idx`. Wszystkie kolumny `NOT NULL`.
+
+### `access_emails` (PR-10, migracja `0008_self_service_access`, D-031)
+
+Wysłane (zlecone) e-maile dostępu, tylko na potrzeby dziennych limitów: `id uuid` (PK),
+`profile_id` (FK → `company_profiles`, `ON DELETE CASCADE`, `access_emails_profile_id_fkey`),
+`kind` (`access_emails_kind_check`: `login_link` / `email_change`), `created_at` (domyślnie
+`now()`). Wszystkie kolumny `NOT NULL`; nigdy adres ani token. Indeksy
+`access_emails_profile_kind_created_at_idx (profile_id, kind, created_at)` (licznik z 24 h) i
+`access_emails_created_at_idx` (sprzątanie wierszy starszych niż 24 h w `serve`).
 
 ### Później
 
@@ -968,7 +1039,8 @@ release failed`. `ingest` i `digest` nie blokują się wzajemnie.
   (domyślnie `127.0.0.1:3000`) za reverse proxy z TLS (PR-07). Kolejność kontroli:
   konfiguracja (`PUBLIC_BASE_URL` wymagany, `WEB_HOST`, `WEB_PORT`; kod 1) → baza (oczekujące
   migracje → kod 1) → nasłuch (zajęty port → kod 1). SIGINT/SIGTERM → łagodne zatrzymanie
-  (otwarte połączenia zamykane najpóźniej po 10 s), kod 0.
+  (otwarte połączenia zamykane najpóźniej po 10 s, e-mail dostępu w toku najwyżej 5 s więcej
+  — razem poniżej `TimeoutStopSec=20` unitu), kod 0.
 - `access:link <profileId>` (PR-06A) — wydaje link logowania (jednorazowy, 7 dni) i wypisuje
   `{"status":"ok","url":…,"expiresAt":…}` na stdout (ostrzeżenie „link jest sekretem” na
   stderr). Wymaga `PUBLIC_BASE_URL`; nieznany profil → kod 1. Link jest tylko na stdout.
@@ -1046,19 +1118,19 @@ release failed`. `ingest` i `digest` nie blokują się wzajemnie.
 Wszystkie limity są stałymi w kodzie (nie w konfiguracji). Ponowienia są ograniczone; nic
 nie ponawia się w nieskończoność.
 
-| Miejsce                                       | Limit czasu                                                                                                                                                                                           | Ponowienia                                                                                                                                        |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SafeHttpClient` (źródła)                     | połączenie + TLS 10 s, jedna wymiana (DNS, nagłówki, całe ciało) 30 s; ciało ≤ 5 MiB                                                                                                                  | najwyżej 2 (429/502/503/504, zerwane połączenie), backoff 1 s·2ⁿ z jitterem, `Retry-After` ≤ 60 s; ≥ 2 s między żądaniami hosta; budżet 10 błędów |
-| `source:preview`                              | 5 min na przebieg                                                                                                                                                                                     | — (tylko klient HTTP)                                                                                                                             |
-| `ingest`                                      | 15 min na źródło i dzień                                                                                                                                                                              | nieudany dzień — następne uruchomienie (nadrabianie, D-021); po 2 nieudanych pierwszych dniach źródła reszta `notRun`                             |
-| Pula PostgreSQL (`database.ts`)               | połączenie 5 s, `statement_timeout` 30 s (+ 35 s po stronie klienta), bezczynne 10 s, keepalive TCP 10 s                                                                                              | brak (komenda kończy się kodem 1)                                                                                                                 |
-| Blokady ingest/digest                         | sprawdzanie połączenia co 5 s                                                                                                                                                                         | brak — utrata blokady przerywa przebieg                                                                                                           |
-| SMTP (`digest`, `status --notify`)            | połączenie 10 s, powitanie 10 s, gniazdo 30 s, DNS 10 s                                                                                                                                               | chwilowe błędy: najwyżej 2 w przebiegu (po 2 s i 10 s); `failed` — kolejne uruchomienia do 3 prób na ofertę; `uncertain` nigdy                    |
-| `serve`                                       | nagłówki 10 s, żądanie 15 s, keep-alive 5 s, zamknięcie po SIGTERM ≤ 10 s                                                                                                                             | —                                                                                                                                                 |
-| `/dopasowania`                                | czekanie w kolejce ≤ 3 s (≤ 8 czekających) → 503; ≤ 2 żądania na sesję → 429                                                                                                                          | — (klient ponawia po `Retry-After: 5`)                                                                                                            |
-| `/zdrowie`                                    | czekanie na `select 1` ≤ 2 s → 503; jedno zapytanie naraz, wspólne dla równoległych żądań (zawieszone zostaje wspólne, aż skończy je limit puli)                                                      | — (kolejne żądanie sprawdza ponownie)                                                                                                             |
-| `pg_dump` / `pg_restore` (`backup`/`restore`) | 30 min, potem SIGTERM, po 5 s SIGKILL; połączenie 10 s (`PGCONNECT_TIMEOUT`)                                                                                                                          | brak                                                                                                                                              |
-| Heartbeat (`status`, `HEARTBEAT_URL`)         | 10 s na całość (połączenie, TLS, żądanie, nagłówki odpowiedzi); ogranicza wynik, nie czas życia procesu (trwający `getaddrinfo` może go przedłużyć do limitu resolvera; kod wyjścia i logi bez zmian) | brak (kolejny `status` wyśle nowy ping)                                                                                                           |
+| Miejsce                                                     | Limit czasu                                                                                                                                                                                           | Ponowienia                                                                                                                                        |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SafeHttpClient` (źródła)                                   | połączenie + TLS 10 s, jedna wymiana (DNS, nagłówki, całe ciało) 30 s; ciało ≤ 5 MiB                                                                                                                  | najwyżej 2 (429/502/503/504, zerwane połączenie), backoff 1 s·2ⁿ z jitterem, `Retry-After` ≤ 60 s; ≥ 2 s między żądaniami hosta; budżet 10 błędów |
+| `source:preview`                                            | 5 min na przebieg                                                                                                                                                                                     | — (tylko klient HTTP)                                                                                                                             |
+| `ingest`                                                    | 15 min na źródło i dzień                                                                                                                                                                              | nieudany dzień — następne uruchomienie (nadrabianie, D-021); po 2 nieudanych pierwszych dniach źródła reszta `notRun`                             |
+| Pula PostgreSQL (`database.ts`)                             | połączenie 5 s, `statement_timeout` 30 s (+ 35 s po stronie klienta), bezczynne 10 s, keepalive TCP 10 s                                                                                              | brak (komenda kończy się kodem 1)                                                                                                                 |
+| Blokady ingest/digest                                       | sprawdzanie połączenia co 5 s                                                                                                                                                                         | brak — utrata blokady przerywa przebieg                                                                                                           |
+| SMTP (`digest`, `status --notify`, e-maile dostępu `serve`) | połączenie 10 s, powitanie 10 s, gniazdo 30 s, DNS 10 s                                                                                                                                               | chwilowe błędy: najwyżej 2 w przebiegu (po 2 s i 10 s); `failed` — kolejne uruchomienia do 3 prób na ofertę; `uncertain` nigdy                    |
+| `serve`                                                     | nagłówki 10 s, żądanie 15 s, keep-alive 5 s, zamknięcie po SIGTERM: żądania ≤ 10 s, potem e-mail dostępu w toku ≤ 5 s                                                                                 | —                                                                                                                                                 |
+| `/dopasowania`                                              | czekanie w kolejce ≤ 3 s (≤ 8 czekających) → 503; ≤ 2 żądania na sesję → 429                                                                                                                          | — (klient ponawia po `Retry-After: 5`)                                                                                                            |
+| `/zdrowie`                                                  | czekanie na `select 1` ≤ 2 s → 503; jedno zapytanie naraz, wspólne dla równoległych żądań (zawieszone zostaje wspólne, aż skończy je limit puli)                                                      | — (kolejne żądanie sprawdza ponownie)                                                                                                             |
+| `pg_dump` / `pg_restore` (`backup`/`restore`)               | 30 min, potem SIGTERM, po 5 s SIGKILL; połączenie 10 s (`PGCONNECT_TIMEOUT`)                                                                                                                          | brak                                                                                                                                              |
+| Heartbeat (`status`, `HEARTBEAT_URL`)                       | 10 s na całość (połączenie, TLS, żądanie, nagłówki odpowiedzi); ogranicza wynik, nie czas życia procesu (trwający `getaddrinfo` może go przedłużyć do limitu resolvera; kod wyjścia i logi bez zmian) | brak (kolejny `status` wyśle nowy ping)                                                                                                           |
 
 ## 7. Obserwowalność
 

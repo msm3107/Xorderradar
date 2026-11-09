@@ -149,6 +149,27 @@ describe("serve", () => {
     expect(result.calls.closed).toBe(1);
   });
 
+  it("gives the server the e-mail transport and CONTACT_EMAIL (D-031)", async () => {
+    const without = await run(["serve"], { env: { PUBLIC_BASE_URL: BASE } });
+    expect(without.calls.started[0]?.contactEmail).toBeNull();
+    expect(without.calls.started[0]?.sender?.transport).toBe("test");
+    const contact = await run(["serve"], {
+      env: { PUBLIC_BASE_URL: BASE, CONTACT_EMAIL: "kontakt@example.invalid" },
+    });
+    expect(contact.code).toBe(ExitCode.Ok);
+    expect(contact.calls.started[0]?.contactEmail).toBe("kontakt@example.invalid");
+  });
+
+  it("refuses an invalid CONTACT_EMAIL before opening the database (exit 1)", async () => {
+    const result = await run(["serve"], {
+      env: { PUBLIC_BASE_URL: BASE, CONTACT_EMAIL: "kontakt(at)example.invalid" },
+    });
+    expect(result.code).toBe(ExitCode.Failure);
+    expect(result.stderr).toBe("Invalid e-mail configuration: CONTACT_EMAIL\n");
+    expect(result.calls.started).toHaveLength(0);
+    expect(result.calls.closed).toBe(0);
+  });
+
   it("takes no arguments", async () => {
     const result = await run(["serve", "--port", "1"], { env: { PUBLIC_BASE_URL: BASE } });
     expect(result.code).toBe(ExitCode.Usage);

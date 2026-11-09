@@ -279,6 +279,12 @@ Baza Konkurencyjności (`bk`, PR-08, D-030):
   identyfikatory (`sourceId`, `runId`), statusy, kody błędów, czasy i liczby — nigdy adresów
   e-mail, tytułów ofert, nazw firm, treści profili, URL-i z tokenami ani komunikatów serwera
   (test: brak `@`, `<`, `>` w treści).
+- E-maile dostępu z `serve` (PR-10, D-031; `src/notifications/access-emails.ts`): link
+  logowania na prośbę („Wyślij mi link”), potwierdzenie nowego adresu i powiadomienie na stary
+  adres — tym samym transportem i nadawcą co `digest`, zwykły tekst bez HTML, bez
+  `List-Unsubscribe` (nikt ich nie subskrybuje), stałe tematy, bez nazwy firmy i danych profilu
+  (dwa pierwsze mogą trafić pod wpisany z błędem adres). Powiadomienie na stary adres nie ma
+  linku ani nowego adresu. Wysyłane po odpowiedzi HTTP, każde raz (bez ponawiania).
 - Testy nie wysyłają prawdziwych e-maili: fałszywy sender, outbox w katalogu tymczasowym albo
   lokalny serwer na `127.0.0.1`; adresy wyłącznie pseudonimizowane (`*.invalid`).
 
@@ -290,13 +296,15 @@ Baza Konkurencyjności (`bk`, PR-08, D-030):
 
 Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
 
-- **Bez haseł.** Dostęp przez link z e-maila `digest` albo z `access:link <profileId>`
-  (operator). Link jest sekretem: kto ma e-mail lub wydruk komendy, ma dostęp do profilu.
+- **Bez haseł.** Dostęp przez link z e-maila `digest`, z „Wyślij mi link” (PR-10) albo z
+  `access:link <profileId>` (operator). Link jest sekretem: kto ma e-mail lub wydruk komendy,
+  ma dostęp do profilu.
 - **Tokeny:** 256 bitów z CSPRNG, base64url; w bazie tylko SHA-256 (`access_tokens`,
   `sessions`), ważność według zegara bazy. Logowanie: jednorazowe, 7 dni, GET niczego nie
   zużywa (strona z przyciskiem), POST zużywa atomowo (warunkowy `UPDATE … RETURNING`) i
-  otwiera sesję. Wypis: wielokrotny, 60 dni. Każdy nieważny token → ta sama neutralna
-  strona 404. Usunięcie profilu usuwa tokeny i sesje (`ON DELETE CASCADE`). Unieważnienie
+  otwiera sesję. Wypis: wielokrotny, 60 dni. Potwierdzenie adresu (`email_change`, PR-10):
+  jednorazowe, 24 h, związane z adresem z `pending_email`. Każdy nieważny token → ta sama
+  neutralna strona 404. Usunięcie profilu usuwa tokeny i sesje (`ON DELETE CASCADE`). Unieważnienie
   na żądanie: `access:revoke <profileId>` usuwa w jednej transakcji wszystkie tokeny i sesje
   profilu (przekazany e-mail, zgubione urządzenie); profil bez zmian, na stdout tylko liczby.
 - **Sesja:** `__Host-radar_sesja`, `HttpOnly; Secure; SameSite=Lax; Path=/`, 30 dni od
@@ -314,21 +322,49 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   `Sec-Fetch-Site` o wartości `same-origin`. Wartości `cross-site`, `same-site` i `none`,
   `Origin` równy `null`, obcy `Origin` oraz brak obu nagłówków → 403, token nie jest
   zużywany. Klient bez obu nagłówków (bardzo stara przeglądarka, skrypt) nie zaloguje się —
-  świadomy koszt.
-- **Zmiana e-maila (PR-06B, D-027):** zapis nowego adresu i unieważnienie dostępu w jednej
-  transakcji: wszystkie tokeny profilu (logowanie i wypis, także w e-mailach wysłanych na
-  stary adres) oraz wszystkie sesje profilu poza bieżącą są usuwane; profil nie zmienia
-  `active`. Zmiana innych pól niczego nie unieważnia. **Nowy adres nie jest potwierdzany
-  wiadomością:** kto ma sesję (np. przekazany link), może przekierować powiadomienia na
-  dowolny adres; formularz wymaga wpisania adresu dwa razy (ochrona przed literówką, nie przed
-  nadużyciem). Adres zajęty przez inny profil → błąd przy polu, co ujawnia posiadaczowi
-  sesji, że adres jest w systemie (bez nazwy tego profilu). W transakcji zmiany bieżąca sesja
+  świadomy koszt. Od PR-10 tę samą kontrolę mają pozostałe formularze bez sesji:
+  `POST /wyslij-link` i `POST /potwierdz-email/<token>` (obca strona nie wyśle w imieniu
+  przeglądarki ofiary prośby o link ani potwierdzenia).
+- **„Wyślij mi link” (PR-10, D-031):** `POST /wyslij-link`, jedno pole `email`, ciało ≤ 1 KiB.
+  Bez wyroczni: każdy poprawny adres dostaje od razu identyczną odpowiedź (status, treść,
+  nagłówki) — adres z profilem, bez profilu, profil wyłączony i po limicie; zły zapis adresu →
+  400 z błędem formularza, bez bazy. Wyszukanie profilu, limit i wysyłka idą po odpowiedzi
+  (`src/web/access-mail.ts`, `src/web/mail-queue.ts`: jedno zadanie naraz, najwyżej 20
+  czekających, nadmiar odrzucony z kodem w logu), więc czas odpowiedzi też niczego nie mówi.
+  Link idzie wyłącznie na **bieżący** adres profilu (nigdy na adres z żądania ani na
+  oczekujący). Limity: ≤ 3 e-maile na profil w 24 h (`access_emails`, licznik i zapis pod
+  blokadą wiersza profilu — współbieżne żądania nie przekroczą limitu) i ≤ 10 żądań na adres
+  IP na godzinę (`src/web/rate-limit.ts`, w pamięci, stałe okno, najwyżej 10 000 kluczy,
+  najstarsze usuwane) → 429. Adres IP: z gniazda; gdy połączenie przychodzi z loopback
+  (Caddy na tym samym hoście) — ostatni wpis `X-Forwarded-For` (ten, który dopisało nasze
+  proxy; wpisy od klienta są wcześniej). Klucz limitu: IPv4 — adres (także IPv4 zapisany jako
+  IPv6, `::ffff:a.b.c.d`); IPv6 — prefiks **/64** (pierwsze 4 grupy po pełnym rozwinięciu,
+  więc każdy zapis adresu daje ten sam klucz): klient z całą siecią /64 nie obejdzie limitu
+  zmianą adresu ani nie zapełni nimi mapy limitu i kolejki e-maili. Limit na IP chroni przed zalewem, nie
+  przed rozproszonym atakiem — ten zatrzymuje limit profilu (najwyżej 3 e-maile na dobę na
+  adres).
+- **Zmiana e-maila (PR-06B, D-027; od PR-10 z potwierdzeniem, D-031):** zapis formularza z
+  nowym adresem nie zmienia `email`: adres trafia do `pending_email`, a na niego link
+  potwierdzający (`/potwierdz-email/<token>`, 24 h, jednorazowy); na stary adres idzie
+  powiadomienie bez linków i bez nowego adresu. Do potwierdzenia digest, linki i logowanie
+  używają starego adresu, tokeny i sesje zostają. Kolejna zmiana usuwa poprzedni link; ≤ 3
+  linki potwierdzające na profil w 24 h (potem błąd formularza — to sesja właściciela);
+  „Anuluj zmianę” (`POST /profil/anuluj-email`, sesja + CSRF) usuwa `pending_email` i link.
+  `GET` linku pokazuje tylko przycisk (skaner poczty niczego nie zmienia); `POST` (login-CSRF
+  jak wyżej) w jednej transakcji ustawia `email = pending_email` i usuwa wszystkie tokeny
+  profilu oraz wszystkie jego sesje poza sesją potwierdzającej przeglądarki, jeśli należy do
+  tego profilu. Dwa równoległe potwierdzenia: zmienia jedno, drugie dostaje stronę nieważnego
+  linku. **Bez wyroczni „adres zajęty”** w formularzu: każdy poprawny adres przechodzi do
+  potwierdzenia; adres zajęty w chwili potwierdzenia → neutralna strona (409) bez zmian i bez
+  danych innego profilu. Przejęcie powiadomień wymaga teraz dostępu do nowej skrzynki **i**
+  sesji, a właściciel starego adresu dostaje powiadomienie. W transakcji zapisu bieżąca sesja
   jest sprawdzana ponownie (usunięta lub wygasła w międzyczasie → nic nie zapisane, 401).
   Digest wydaje linki tylko, gdy profil wciąż ma adres, na który wysyła (inaczej status
   `address_changed` i brak e-maila), więc po zmianie nie wyśle na stary adres nowych tokenów;
-  bez `PUBLIC_BASE_URL` (e-mail bez linków) przebieg trwający w chwili zmiany może jeszcze
-  wysłać jeden e-mail na stary adres. Kolejność blokad zmiany adresu jest bez cyklu
-  względem logowania, wylogowania, `access:revoke` i digestu (D-027). `/profil` pokazuje
+  bez `PUBLIC_BASE_URL` (e-mail bez linków) przebieg trwający w chwili potwierdzenia może
+  jeszcze wysłać jeden e-mail na stary adres. Kolejność blokad zapisu, potwierdzenia,
+  anulowania i „Wyślij mi link” jest bez cyklu względem logowania, wylogowania,
+  `access:revoke` i digestu (D-027, D-031). `/profil` pokazuje
   bieżący adres powiadomień (zescapowany, z bazy dla profilu sesji), nigdy dawnego.
 - **Formularz profilu (PR-06B):** sesja + CSRF + `Origin`, ciało ≤ 64 KB (tylko ta trasa) i
   ≤ 64 pary pól, tylko znane pola (pola pojedyncze dokładnie raz), walidacja schematem domeny;
@@ -360,43 +396,54 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   (błąd przy polu) i w `profile:create` (ścieżka pola, bez wartości); znaki na brzegach są
   przycinane jak dotąd. Schematy wierszy zapisanych w bazie się nie zmieniają (stary wiersz
   dalej się wczytuje); wyjście i tak przechodzi przez `escapeHtml`/`cleanText`.
-- **Bez limitu żądań w aplikacji:** tokenów 256-bitowych nie da się zgadnąć, a każde żądanie jest
-  ograniczone rozmiarem i czasem; zalew żądań zatrzymuje reverse proxy (PR-07). Wyjątek kosztowy
-  (PR-06B, D-027): `/dopasowania` liczy dopasowanie na żądanie w wątku procesu `serve` (zmierzone
-  lokalnie: ok. 0,8 s przy 5 000 kandydatów i typowym profilu, do kilkunastu sekund przy limicie 10
-  000 i maksymalnym profilu). Liczenie oddaje pętlę zdarzeń po każdych ok. 20 ms pracy, więc
-  pozostałe żądania są obsługiwane, a proces liczy najwyżej jedną listę naraz. Kolejne żądanie
+- **Bez ogólnego limitu żądań w aplikacji:** tokenów 256-bitowych nie da się zgadnąć, a każde
+  żądanie jest ograniczone rozmiarem i czasem; zalew żądań zatrzymuje reverse proxy (PR-07).
+  Wyjątki: „Wyślij mi link” (limit na IP i na profil, wyżej) i niżej `/dopasowania`. Wyjątek
+  kosztowy (PR-06B, D-027): `/dopasowania` liczy dopasowanie na żądanie w wątku procesu `serve`
+  (zmierzone lokalnie: ok. 0,8 s przy 5 000 kandydatów i typowym profilu, do kilkunastu sekund przy
+  limicie 10 000 i maksymalnym profilu). Liczenie oddaje pętlę zdarzeń po każdych ok. 20 ms pracy,
+  więc pozostałe żądania są obsługiwane, a proces liczy najwyżej jedną listę naraz. Kolejne żądanie
   czeka w ograniczonej kolejce FIFO (najwyżej 8 żądań i 3 s; rozłączony klient wypada z niej bez
   liczenia, bez pozostawionych timerów i nasłuchów); pełna kolejka albo upływ czasu → 503 z
   `Retry-After`. To jedno miejsce jest **wspólne dla wszystkich klientów**: posiadacz sesji
   ponawiający żądania może je zajmować i inni klienci czekają wtedy albo dostają 503 (reszta stron
-  działa). Od PR-07A jedna sesja ma naraz najwyżej 2 żądania `/dopasowania` w toku lub w
-  kolejce; trzecie → od razu 429 z `Retry-After` (licznik po id sesji z bazy, nigdy po wartości
-  ciasteczka; D-028) — jeden klient nie zajmie całej kolejki, ale wiele sesji nadal może.
-  Dostępne tylko z sesją. Limitu na proxy pilot nie ma (Caddy wymaga do tego zewnętrznego
-  modułu — poza zakresem PR-07B, D-029). Funkcja „wyślij mi link e-mailem”
-  (otwarta decyzja właściciela) będzie wymagać limitu.
-- **Reverse proxy (PR-07):** `serve` słucha domyślnie na `127.0.0.1:3000` czystym HTTP; TLS,
-  HSTS i przekierowanie z `http` robi proxy. Tokeny są w ścieżkach `/dostep/…` i `/wypis/…`
-  — proxy **nie może** zapisywać tych ścieżek w logach dostępu (wyłączony log albo ścieżka
-  przycięta). Pilot (PR-07B): `deploy/caddy/Caddyfile` — `log_skip` dla obu ścieżek w logu
-  dostępu, a ponieważ `log_skip` nie obejmuje innych logów (log błędów w journalu, np. 502 z
-  `reverse_proxy` przy restarcie `serve`; serwer przekierowania HTTP → HTTPS), **każdy** log
-  Caddy (domyślny i dostępu) ma `format filter`, który w `request>uri` i
-  `request>headers>Referer` zamienia `/dostep/<token>` i `/wypis/<token>` na `…/REDACTED`
-  (obrona w głąb; aplikacja wysyła też `Referrer-Policy: strict-origin`, więc przeglądarki nie
-  podają ścieżki). Po instalacji i każdej zmianie Caddyfile obowiązkowa kontrola z
-  `docs/DEPLOY.md` punkt 8 (`grep -c` testowego tokenu w journalu i logu dostępu = 0). Nagłówki
-  `Cookie`/`Authorization` maskowane przez Caddy, limit ciała żądania 128 KB i timeouty
-  odczytu; HSTS tylko z aplikacji. `serve` jako unit systemd z hardeningiem (bez uprawnień,
-  tylko odczyt systemu plików, ruch sieciowy tylko z/do `localhost`). Firewall hosta: z
-  zewnątrz tylko 22/80/443; PostgreSQL tylko na `localhost`.
+  działa). Od PR-07A jedna sesja ma naraz najwyżej 2 żądania `/dopasowania` w toku lub w kolejce;
+  trzecie → od razu 429 z `Retry-After` (licznik po id sesji z bazy, nigdy po wartości ciasteczka;
+  D-028) — jeden klient nie zajmie całej kolejki, ale wiele sesji nadal może. Dostępne tylko z
+  sesją. Limitu na proxy pilot nie ma (Caddy wymaga do tego zewnętrznego modułu — poza zakresem
+  PR-07B, D-029).
+- **Reverse proxy (PR-07):** `serve` słucha domyślnie na `127.0.0.1:3000` czystym HTTP; TLS, HSTS i
+  przekierowanie z `http` robi proxy. Tokeny są w ścieżkach `/dostep/…`, `/wypis/…` i
+  `/potwierdz-email/…` (PR-10) — proxy **nie może** zapisywać tych ścieżek w logach dostępu
+  (wyłączony log albo ścieżka przycięta). Pilot (PR-07B): `deploy/caddy/Caddyfile` — `log_skip` dla
+  tych trzech ścieżek w logu dostępu, a ponieważ `log_skip` nie obejmuje innych logów (log błędów w
+  journalu, np. 502 z `reverse_proxy` przy restarcie `serve`; serwer przekierowania HTTP → HTTPS),
+  **każdy** log Caddy (domyślny i dostępu) ma `format filter`, który w `request>uri` i
+  `request>headers>Referer` zamienia `/dostep/<token>`, `/wypis/<token>` i
+  `/potwierdz-email/<token>` na `…/REDACTED` (obrona w głąb; aplikacja wysyła też
+  `Referrer-Policy: strict-origin`, więc przeglądarki nie podają ścieżki). Po instalacji i każdej zmianie Caddyfile
+  obowiązkowa kontrola z `docs/DEPLOY.md` punkt 8 (`grep -c` testowego tokenu w journalu i logu
+  dostępu = 0). Nagłówki `Cookie`/`Authorization` maskowane przez Caddy, limit ciała żądania 128 KB
+  i timeouty odczytu; HSTS tylko z aplikacji. Caddy ustawia `X-Forwarded-For` sam (bez
+  `trusted_proxies` nagłówek od klienta jest zastępowany), a `serve` bierze z niego ostatni wpis
+  tylko przy połączeniu z loopback — nie dodawaj `trusted_proxies` bez proxy przed Caddy. `serve`
+  jako unit systemd z hardeningiem (bez uprawnień, tylko odczyt systemu plików poza outboxem
+  `EMAIL_MODE=test`) i z filtrem IP tylko na loopback (`IPAddressDeny=any`,
+  `IPAddressAllow=localhost`) — w domyślnym `EMAIL_MODE=test` `serve` nie ma żadnego wyjścia. Od
+  PR-10 `serve` wysyła e-maile dostępu; w `EMAIL_MODE=smtp` obowiązkowy drop-in
+  `deploy/systemd/radar-serve.service.d/smtp.conf` zeruje `IPAddressDeny=` (adresy dostawcy SMTP
+  się zmieniają): systemd nie ogranicza wtedy wcale ruchu wychodzącego `serve` (dowolny host i
+  port) — jak dla digestu i alertów z crona, które działają bez filtra systemd; ograniczyć go
+  może tylko firewall hosta z regułami wyjścia. Jedyne połączenia wychodzące `serve` to PostgreSQL i `SMTP_URL` —
+  nie pobiera źródeł ani żadnych URL-i. Firewall hosta: z zewnątrz tylko 22/80/443; PostgreSQL
+  tylko na `localhost`.
 - **`/zdrowie` (PR-07B, D-029):** bez uwierzytelnienia — `GET`/`HEAD`,
   stała treść (`ok` / `niedostępne`), bez danych, bez sesji i CSRF, `no-store`. Jedno sprawdzenie
   bazy naraz, wspólne dla równoległych żądań (zalew zajmuje najwyżej jedno połączenie z puli);
   zawieszone zostaje wspólne do ok. 40 s (5 s na połączenie z puli + 35 s `query_timeout`),
   a żądania dostają w tym czasie `503` po 2 s. Limit żądań na proxy — poza PR-07B.
-- **Sprzątanie:** `serve` co godzinę usuwa wygasłe tokeny i sesje (po 1000 na przebieg).
+- **Sprzątanie:** `serve` co godzinę usuwa wygasłe tokeny i sesje oraz zapisy limitu e-maili
+  dostępu (`access_emails`) starsze niż doba (po 1000 na przebieg i tabelę).
 
 ## 12. Logging policy
 
@@ -425,8 +472,9 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   `SMTP_URL`. Pliki outboxu (tryb `test`) zawierają adres i treść — katalog `0700`, pliki
   `0600`, `outbox/` w `.gitignore`. Linki z tokenami (PR-06A) nie trafiają do logów. Plik
   `.eml` to cały e-mail, więc **zawiera sekretne linki** (`/dostep/<token>`,
-  `/wypis/<token>`); czytelna kopia `.json` ma je zredagowane (`/dostep/[token]`,
-  `/wypis/[token]`).
+  `/wypis/<token>`, od PR-10 też `/potwierdz-email/<token>` z e-maili dostępu `serve`);
+  czytelna kopia `.json` ma je zredagowane (`/dostep/[token]`, `/wypis/[token]`,
+  `/potwierdz-email/[token]`).
 - `serve` (od PR-06A) loguje jedno zdarzenie na żądanie (`http request`): metoda (znana albo
   `OTHER`), nazwa trasy (`home`, `login_link`, `unsubscribe`, `not_found`…), status i czas.
   Nigdy URL, ścieżki ani zapytania (zawierają tokeny), ciasteczek, nagłówków, treści
@@ -435,7 +483,13 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   przerwał połączenie w trakcie wysyłania ciała (albo został odcięty przez timeout), →
   `http request aborted` (poziom `info`, tylko `route` i `reason: "aborted"`) — nie jest
   błędem bazy ani odpowiedzią 500. `access:link` wypisuje link
-  wyłącznie na stdout (ostrzeżenie na stderr), nigdy do logu.
+  wyłącznie na stdout (ostrzeżenie na stderr), nigdy do logu. E-maile dostępu (PR-10,
+  D-031) — jedna linia `access mail` na zadanie: `kind` (`login_link`, `email_change`,
+  `email_change_notice`), `outcome`, najwyżej `profileId` i kod błędu (wysyłki jak w `digest`,
+  bazy jak wyżej, `access_mail_queue_full`, `access_mail_shutdown`,
+  `access_mail_shutdown_timeout`). Nigdy adresu e-mail
+  (także z żądania „Wyślij mi link”), tokenu, linku ani adresu IP klienta (test na zapisanych
+  liniach logu).
 - `status` (od PR-07A) wypisuje i loguje wyłącznie identyfikatory źródeł i przebiegów,
   statusy, kody błędów, czasy i liczby (wysyłki — tylko liczniki i kody, bez `profileId`);
   `backup`/`restore` — ścieżkę pliku, rozmiar, schemat, liczby tabel/wierszy i stały powód

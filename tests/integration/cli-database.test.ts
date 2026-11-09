@@ -53,6 +53,7 @@ describe.skipIf(skipWithoutDatabase)("CLI with a real database (PostgreSQL)", ()
           "0005_deliveries",
           "0006_access",
           "0007_bk_source",
+          "0008_self_service_access",
         ],
       },
     });
@@ -78,6 +79,7 @@ describe.skipIf(skipWithoutDatabase)("CLI with a real database (PostgreSQL)", ()
         "0005_deliveries",
         "0006_access",
         "0007_bk_source",
+        "0008_self_service_access",
       ],
     });
 

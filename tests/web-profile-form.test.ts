@@ -19,7 +19,6 @@ function values(overrides: Partial<ProfileFormValues> = {}): ProfileFormValues {
   return {
     name: "Jan Kowalski Elektryka",
     email: CURRENT,
-    emailConfirm: "",
     categories: ["elektryka"],
     voivodeships: ["mazowieckie"],
     counties: "",
@@ -29,8 +28,8 @@ function values(overrides: Partial<ProfileFormValues> = {}): ProfileFormValues {
   };
 }
 
-function errorsOf(input: ProfileFormValues, current = CURRENT) {
-  const result = validateProfileForm(input, current);
+function errorsOf(input: ProfileFormValues) {
+  const result = validateProfileForm(input);
   if (result.ok) throw new Error("expected the form to be invalid");
   return result.errors;
 }
@@ -44,7 +43,6 @@ describe("validateProfileForm", () => {
         includeKeywords: "oświetlenie\n\n  latarnie uliczne  \n",
         excludeKeywords: "dostawa paliwa",
       }),
-      CURRENT,
     );
     expect(result).toEqual({
       ok: true,
@@ -63,7 +61,6 @@ describe("validateProfileForm", () => {
   it("accepts empty region and keyword lists (no restriction)", () => {
     const result = validateProfileForm(
       values({ voivodeships: [], counties: " \n ", includeKeywords: "" }),
-      CURRENT,
     );
     expect(result.ok).toBe(true);
   });
@@ -139,7 +136,6 @@ describe("validateProfileForm", () => {
       values({
         counties: "m. st. Warszawa\npowiat piaseczyński\nKraków (miasto na prawach powiatu)",
       }),
-      CURRENT,
     );
     expect(accepted.ok).toBe(true);
     // An entry the schema already refuses gets the schema's message only.
@@ -172,10 +168,8 @@ describe("validateProfileForm", () => {
     });
     // A control character only around an entry is trimmed away, as before.
     expect(
-      validateProfileForm(
-        values({ name: "\tJan Kowalski\t", includeKeywords: "\toświetlenie" }),
-        CURRENT,
-      ).ok,
+      validateProfileForm(values({ name: "\tJan Kowalski\t", includeKeywords: "\toświetlenie" }))
+        .ok,
     ).toBe(true);
     // An entry that is only a control character gets one message, not also the county one.
     expect(errorsOf(values({ counties: "\u0001" }))).toEqual({
@@ -207,42 +201,17 @@ describe("validateProfileForm", () => {
     expect(FIELD_ORDER.filter((field) => field in errors)).toEqual(Object.keys(errors));
   });
 
-  describe("the e-mail confirmation", () => {
-    const next = "biuro@example.invalid";
-
-    it("is not needed while the address stays the same (after normalization)", () => {
-      expect(validateProfileForm(values({ email: ` ${CURRENT.toUpperCase()} ` }), CURRENT)).toEqual(
-        expect.objectContaining({ ok: true }),
-      );
-    });
-
-    it("must repeat a new address", () => {
-      expect(errorsOf(values({ email: next }))).toEqual({
-        emailConfirm: ["Wpisz nowy adres e-mail jeszcze raz."],
-      });
-      expect(errorsOf(values({ email: next, emailConfirm: "biuro@example.invalid.pl" }))).toEqual({
-        emailConfirm: ["Adresy e-mail różnią się. Wpisz nowy adres dwa razy tak samo."],
-      });
-    });
-
-    it("is compared after normalization", () => {
-      const result = validateProfileForm(
-        values({ email: next, emailConfirm: "  BIURO@example.invalid " }),
-        CURRENT,
-      );
+  // D-031: a new address is confirmed by the link sent to it, not by typing it twice.
+  describe("a new e-mail address", () => {
+    it("is accepted alone, normalized like the stored one", () => {
+      const result = validateProfileForm(values({ email: "  BIURO@example.invalid " }));
       if (!result.ok) throw new Error("expected the form to be valid");
-      expect(result.settings.email).toBe(next);
+      expect(result.settings.email).toBe("biuro@example.invalid");
     });
 
-    it("is checked even when another field is invalid", () => {
-      expect(errorsOf(values({ email: next, name: "" }))).toEqual({
+    it("gets only its own message while it is invalid", () => {
+      expect(errorsOf(values({ email: "biuro@", name: "" }))).toEqual({
         name: ["Podaj nazwę firmy."],
-        emailConfirm: ["Wpisz nowy adres e-mail jeszcze raz."],
-      });
-    });
-
-    it("is not asked for while the new address itself is invalid", () => {
-      expect(errorsOf(values({ email: "biuro@" }))).toEqual({
         email: ["Podaj poprawny adres e-mail, na przykład nazwa@firma.pl."],
       });
     });
@@ -250,7 +219,7 @@ describe("validateProfileForm", () => {
 });
 
 describe("form values", () => {
-  it("show the stored lists one per line, with an empty confirmation", () => {
+  it("show the stored lists one per line", () => {
     expect(
       formValuesFromStored({
         name: "Jan Kowalski",
@@ -264,7 +233,6 @@ describe("form values", () => {
     ).toEqual({
       name: "Jan Kowalski",
       email: CURRENT,
-      emailConfirm: "",
       categories: ["elektryka", "it"],
       voivodeships: [],
       counties: "warszawski zachodni\npiaseczyński",
@@ -280,7 +248,6 @@ describe("form values", () => {
           csrf: "c",
           name: "n",
           email: "e",
-          email_confirm: "ec",
           counties: "co",
           include_keywords: "ik",
           exclude_keywords: "ek",
@@ -290,7 +257,6 @@ describe("form values", () => {
     ).toEqual({
       name: "n",
       email: "e",
-      emailConfirm: "ec",
       categories: ["it"],
       voivodeships: ["opolskie"],
       counties: "co",

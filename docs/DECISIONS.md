@@ -1244,7 +1244,7 @@ YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
 
 ## D-026 — Dostęp do profilu: tokeny z e-maila, sesja w ciasteczku, CSRF, wypis jednym kliknięciem
 
-- **Status:** Accepted (PR-06A)
+- **Status:** Accepted (PR-06A; uzupełniona w PR-10 — D-031)
 - **Kontekst:** klient nie ma hasła ani konta; dostęp do profilu i wypis muszą działać z
   e-maila (PR_PLAN PR-06A). Skanery poczty otwierają linki z wiadomości (GET), więc GET nie
   może niczego zużywać ani zmieniać.
@@ -1298,6 +1298,18 @@ YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
   jest ograniczone rozmiarem i czasem (D-025). Ochrona przed zalewem żądań należy do reverse
   proxy (PR-07). Wrócić do tego, gdy pojawi się „wyślij mi link e-mailem” (wysyłka na
   żądanie wymaga limitu) — decyzja właściciela, poza PR-06A.
+- **Uzupełnienie (PR-10, D-031):**
+  - nowy cel tokenu `email_change` (migracja `0008_self_service_access`): jednorazowy, 24 h,
+    związany z adresem w nowej kolumnie `access_tokens.email` (`access_tokens_email_check`:
+    adres ⇔ cel `email_change`); zużywany przez usunięcie, więc `used_at` zostaje kolumną
+    tylko dla `login`. GET `/potwierdz-email/<token>` niczego nie zmienia, zmienia POST;
+  - token logowania wydaje też „Wyślij mi link” (na bieżący adres profilu, także
+    nieaktywnego); TTL bez zmian (7 / 60 / 30 dni);
+  - „Brak limitu żądań” nie obowiązuje już dla „Wyślij mi link”: najwyżej 3 linki na profil w
+    24 h (w bazie) i 10 żądań na IP na godzinę (w pamięci) — D-031. Pozostałe trasy dalej
+    bez limitu w aplikacji;
+  - login-CSRF (D-027) obejmuje też `/wyslij-link` i `POST /potwierdz-email/<token>`;
+  - sprzątanie `serve` usuwa też wpisy `access_emails` starsze niż 24 h.
 - **Odrzucone alternatywy:** hasła/konta (poza zakresem MVP); JWT lub podpisane ciasteczko
   bez tabeli (brak natychmiastowego wylogowania i unieważnienia); token zużywany na GET
   (zużyłby go skaner poczty); token CSRF w osobnym ciasteczku (double submit — więcej stanu,
@@ -1325,7 +1337,7 @@ YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
 
 ## D-027 — Ekrany klienta: formularz profilu, zmiana e-maila, dopasowania, login-CSRF
 
-- **Status:** Accepted (PR-06B; rozwija D-025 i D-026)
+- **Status:** Accepted (PR-06B; rozwija D-025 i D-026; zmiana e-maila zastąpiona przez D-031)
 - **Kontekst:** po PR-06A klient widzi tylko stan profilu i może się wypisać. PR-06B dodaje
   edycję profilu, podgląd dopasowań i ponowne włączenie powiadomień — nadal bez JavaScriptu,
   na `node:http` (D-025), z profilem wyłącznie z sesji (D-026). Przegląd PR-06A wskazał też
@@ -1436,6 +1448,20 @@ YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
   e-mail (bez linków) na stary adres; z linkami — nie. Pełne listy (100 + 100 + 100 długich wpisów z
   polskimi znakami) mogą przekroczyć 64 KB → 413. Klient bez `Origin` i bez `Sec-Fetch-Site` nie
   zaloguje się.
+- **Zmiana (PR-10, D-031)** — część „Zmiana e-maila” zastąpiona:
+  - koniec natychmiastowej zmiany adresu: nowy adres czeka w `pending_email` na potwierdzenie
+    linkiem wysłanym na niego; `email`, sesje i linki zostają do potwierdzenia. Unieważnienie
+    tokenów i sesji oraz kolejność blokad z tej decyzji wykonuje teraz potwierdzenie
+    (`confirmEmailChange`), z jedną ponowną próbą po 40P01;
+  - pole powtórzenia adresu (`email_confirm`) usunięte — literówkę wyłapuje potwierdzenie;
+  - błąd „adres zajęty” przy polu usunięty (brak wyroczni): zajętość wychodzi dopiero przy
+    potwierdzeniu, neutralną stroną bez zmiany;
+  - „Zależności warstw”: `web` używa interfejsu nadawcy z `notifications/sender.ts` i czystego
+    `notifications/access-emails.ts` — `serve` wysyła e-maile dostępu (nadal nigdy `run.ts`);
+  - odrzucona tu alternatywa „potwierdzanie nowego adresu e-mailem” jest przyjęta;
+  - konsekwencja „kto ma sesję, może przejąć powiadomienia” zostaje (sesja + nowa skrzynka
+    wystarczą), ale stary adres dostaje powiadomienie i może anulować zmianę przed
+    potwierdzeniem.
 
 ## D-028 — Gotowość operacyjna: `status`, alert operatora, backup/restore, CI, twardnienie web
 
@@ -1972,3 +1998,139 @@ YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
   - Wartość `bk` nie mówi, czy jest netto, czy brutto. Gdy wartość będzie pokazywana
     (dziś nie jest), etykieta ma brzmieć „wartość szacunkowa (źródło nie podaje, netto czy
     brutto)”.
+
+## D-031 — Samoobsługowe wejście („Wyślij mi link”) i potwierdzanie zmiany adresu
+
+- **Status:** Accepted (PR-10; decyzja właściciela z 2026-11-06; zmienia D-026 i D-027)
+- **Kontekst:** klient, który zgubił albo zużył link (działa raz, D-026), musiał prosić
+  operatora o nowy. Zmiana adresu działała od razu (D-027): literówka odcinała digest i
+  wszystkie linki, a formularz mówił, że adres jest zajęty przez inny profil (wyrocznia).
+  Strona główna nie mówiła, czym jest serwis i skąd ma dane.
+- **Decyzja:**
+  - **„Wyślij mi link”** (`POST /wyslij-link`, formularz z jednym polem na `/` i na stronie
+    nieważnego linku): login-CSRF jak `/dostep` (D-027), ciało ≤ 1 KiB, adres walidowany tym
+    samym schematem co profil (niepoprawny → 400 z błędem przy polu, bez bazy). Każdy
+    poprawny adres dostaje od razu tę samą odpowiedź (status, treść, nagłówki): „Jeśli adres
+    jest w bazie, link przyjdzie w ciągu kilku minut. Sprawdź też folder spam.” — dla adresu
+    istniejącego, nieistniejącego, profilu nieaktywnego i po wyczerpaniu limitu.
+  - **Bez wyroczni czasowej:** odpowiedź nie czeka na bazę ani na wysyłkę. Wyszukanie profilu,
+    limit i wysyłka biegną po odpowiedzi w kolejce w pamięci procesu `serve`
+    (`src/web/mail-queue.ts`): jedno zadanie naraz, najwyżej 20 czekających; nadmiar jest
+    odrzucany z kodem `access_mail_queue_full` w logu; przy zamknięciu serwera czekające
+    zadania wypadają (`access_mail_shutdown`, ten sam kod dla żądania odrzuconego przez
+    zamkniętą kolejkę), a na bieżące serwer czeka najwyżej 5 s: potem je porzuca
+    (`access_mail_shutdown_timeout`; nie zaczyna kolejnej wysyłki), żeby zatrzymanie (≤ 10 s
+    na żądania + 5 s) zmieściło się w `TimeoutStopSec=20`. Kolejka, a nie wysyłka w
+    żądaniu: czas odpowiedzi nie zależy od tego, czy adres ma profil, a SMTP nie blokuje
+    pętli zdarzeń. Jedna próba wysyłki, bez ponawiania (klient może poprosić znowu; ponowienie
+    mogłoby zdublować wiadomość przyjętą przez serwer).
+  - **Link:** zwykły token logowania (jednorazowy, 7 dni, D-026), także dla profilu z
+    `active = false` (sam o niego prosi i bez niego nie włączy e-maili). Idzie wyłącznie na
+    bieżący adres profilu; adres oczekujący na potwierdzenie nie jest wyszukiwany. Temat
+    „Radar Zamówień: link do profilu”, treść: link, „działa raz przez 7 dni”, „Jeśli to nie
+    Ty — zignoruj tę wiadomość”. Ten sam nadawca (`EMAIL_FROM`) i transport (`EMAIL_MODE`)
+    co digest (D-024), bez nagłówków wypisu (to nie lista mailingowa).
+  - **Limity:**
+    - na profil: najwyżej 3 linki w 24 h (`ACCESS_EMAILS_PER_DAY`), liczone w bazie w tabeli
+      `access_emails` (profil, rodzaj, czas — nigdy adres ani token). Licznik i wpis biegną w
+      jednej transakcji pod blokadą wiersza profilu (`FOR NO KEY UPDATE`), więc równoległe
+      żądania są liczone po kolei (atomowo). Wpis powstaje przed wysyłką: nieudana wysyłka też
+      się liczy (ochrona skrzynki ważniejsza niż jeden zgubiony link);
+    - na IP: najwyżej 10 żądań na godzinę (okno stałe), w pamięci, najwyżej 10 000 kluczy,
+      przy pełnej mapie wypada klucz z najstarszym oknem. Liczone przed walidacją formularza,
+      tylko po IP (nie po adresie e-mail). Przekroczenie → 429 ze stroną po polsku;
+    - **klucz limitu:** IPv4 — adres (także IPv4 zapisany jako IPv6, `::ffff:a.b.c.d`); IPv6
+      — prefiks /64 (pierwsze 4 grupy po pełnym rozwinięciu, więc `::`, zera wiodące,
+      wielkość liter i identyfikator strefy nie zmieniają klucza). /64 to najmniejszy blok,
+      jaki dostawca daje jednemu klientowi: klient zmieniający adresy w swojej sieci nie obejdzie
+      limitu, nie wypełni mapy i nie zapcha kolejki e-maili (odrzucając wiadomości innych);
+    - **źródło IP:** gdy rozmówca TCP to loopback (Caddy na tym samym hoście) — ostatni wpis
+      `X-Forwarded-For` (ten, który dopisał Caddy; Caddy bez `trusted_proxies` zastępuje
+      nagłówek klienta); inaczej adres gniazda, a nagłówek klienta jest ignorowany. Brak lub
+      niepoprawny nagłówek za loopbackiem → adres gniazda (wspólny licznik).
+  - **Zmiana adresu z potwierdzeniem** (zastępuje część D-027): pole `email_confirm` znika.
+    Nowy adres trafia do `company_profiles.pending_email` (znormalizowany, bez UNIQUE); profil,
+    sesje i linki zostają, a digest, linki i logowanie idą na stary adres do potwierdzenia. Na
+    nowy adres idzie link `/potwierdz-email/<token>` (cel `email_change`, jednorazowy, 24 h,
+    związany z adresem), na stary — powiadomienie bez linków i bez nowego adresu („Jeśli to
+    nie Ty, zaloguj się i anuluj zmianę”; drogą do profilu jest link „Twój profil” z digestu
+    albo „Wyślij mi link”, a po potwierdzeniu — operator, z `CONTACT_EMAIL`, gdy ustawiony).
+    Powiadomienie idzie pierwsze, potem link (także gdy powiadomienie nie wyszło): błąd
+    wysyłki linku ani zatrzymanie `serve` w jej trakcie nie odbiera staremu adresowi
+    ostrzeżenia; zadanie porzucone przy powiadomieniu nie wysyła już linku. Kolejna zmiana zastępuje oczekującą (stary token
+    usunięty); zapis z niezmienionym adresem zostawia oczekującą zmianę. Najwyżej 3
+    potwierdzenia na profil w 24 h (ten sam licznik `access_emails`, rodzaj `email_change`);
+    ponad limit formularz pokazuje błąd i niczego nie zapisuje (sesja właściciela — nic nie
+    ujawnia). `/profil` i formularz pokazują „Oczekuje na potwierdzenie: <adres>” (po
+    wygaśnięciu linku — że link wygasł i jak dostać nowy) z
+    przyciskiem „Anuluj zmianę” (`POST /profil/anuluj-email`, sesja + CSRF; czyści
+    `pending_email` i usuwa token; idempotentne).
+  - **Brak wyroczni przy zmianie:** zapis formularza nie sprawdza, czy inny profil ma adres —
+    każdy poprawny adres przechodzi do potwierdzenia.
+  - **Potwierdzenie:** GET (i HEAD) tylko sprawdza token i pokazuje stronę z przyciskiem
+    (skaner poczty niczego nie zmienia); POST (login-CSRF) w jednej transakcji: wiersz
+    profilu `FOR NO KEY UPDATE` → ponowny odczyt tokenu pod blokadą (musi wskazywać bieżący
+    `pending_email`) → sesja przeglądarki `FOR KEY SHARE`, gdy należy do profilu → usunięcie
+    wszystkich tokenów profilu (także tego — zużycie) i wszystkich jego sesji poza tą →
+    `UPDATE email = pending_email, pending_email = NULL` na końcu. Kolejność blokad z D-027;
+    `UPDATE` klucza unikalnego bierze blokadę siły `FOR UPDATE`, ale logowanie, które mogłoby
+    na nią czekać, trzyma już tylko wiersz tokenu, na który usuwanie tokenów zaczekało
+    wcześniej. Po 40P01 jedna ponowna próba. Wyścig dwóch potwierdzeń: drugie czeka na
+    wiersz profilu i znajduje token usunięty → neutralna strona nieważnego linku (404).
+    Adres zajęty w chwili potwierdzenia (`company_profiles_email_key`) → wycofanie i
+    neutralna strona 409, bez zmiany. Przeglądarka z sesją profilu zostaje zalogowana (303
+    na `/profil` z komunikatem), inna dostaje stronę „Adres zmieniony” bez sesji.
+  - **Strona główna `/`:** czym jest serwis (codzienny e-mail z zamówieniami dopasowanymi do
+    profilu firmy), skąd dane (BZP — e-Zamówienia — i Baza Konkurencyjności), jak zacząć
+    (obecnie przez operatora), formularz „Wyślij mi link”, link do `/przyklad`, kontakt.
+    `/przyklad` renderuje przykładowy digest widokiem `/dopasowania` ze stałych,
+    pseudonimizowanych danych w kodzie (`src/web/example.ts`), bez bazy. `CONTACT_EMAIL` —
+    opcjonalny, walidowany przy starcie `serve` (niepoprawny → kod 1); pokazywany na `/`, na
+    stronach 409 i 429 i w powiadomieniu na stary adres, bez niego kontakt nie jest
+    pokazywany.
+  - **Logi:** każdy wynik e-maila dostępu to jedna linia „access mail” z rodzajem
+    (`login_link`, `email_change`, `email_change_notice`), wynikiem (`sent`, `no_profile`,
+    `limit_reached`, `send_failed`, `dropped`, `failed`, `not_sent`) i najwyżej id profilu i
+    kodem błędu — nigdy adres, token, link ani IP.
+  - **Wdrożenie:** `serve` czyta konfigurację e-maila (`EMAIL_MODE`, `EMAIL_FROM`, `SMTP_URL`,
+    `EMAIL_OUTBOX_DIR`); `radar-serve.service` dostaje `ReadWritePaths=` na outbox i zachowuje
+    filtr IP tylko na loopback (`IPAddressDeny=any`, `IPAddressAllow=localhost`) — domyślny
+    `EMAIL_MODE=test` nie potrzebuje wyjścia. Dla `EMAIL_MODE=smtp` obowiązkowy drop-in
+    `deploy/systemd/radar-serve.service.d/smtp.conf` zeruje `IPAddressDeny=` (adresy dostawcy
+    SMTP są zmienne); systemd nie ogranicza wtedy wcale ruchu wychodzącego `serve` (dowolny
+    host i port), jak dla digestu i alertów z crona, które działają bez sandboksu systemd —
+    ograniczyć go może tylko firewall hosta z regułami wyjścia. Caddy pomija i redaguje ścieżki
+    `/potwierdz-email/…` jak `/dostep/…`.
+- **Odrzucone alternatywy:**
+  - wysyłka w obsłudze żądania (czas odpowiedzi zdradza, czy adres ma profil; SMTP trzyma
+    żądanie);
+  - kolejka w bazie albo osobny proces wysyłki (więcej ruchomych części bez potrzeby przy
+    10–100 klientach; utrata kilku czekających zadań przy restarcie jest akceptowalna — klient
+    poprosi znowu);
+  - limit na IP w bazie (zapis przy każdym żądaniu anonimowym; limit chroniący skrzynkę i tak
+    jest w bazie) albo na reverse proxy (moduł spoza dystrybucji Caddy — etap 5 pkt 1);
+  - licznik limitu przez warunkowy `INSERT … SELECT` bez blokady profilu (dwa równoległe
+    żądania w READ COMMITTED widzą ten sam stan); blokada wiersza, którą i tak biorą
+    wszystkie zapisy dostępu profilu, jest prostsza;
+  - token potwierdzenia z `used_at` (unieważnienie i tak usuwa wszystkie tokeny profilu);
+  - UNIQUE na `pending_email` (byłby wyrocznią przy zapisie formularza);
+  - CAPTCHA (poza zakresem; zasady zbierania danych i UX), samodzielna rejestracja (poza
+    zakresem PR-10).
+- **Konsekwencje i znane ograniczenia:**
+  - limit na IP i kolejka żyją w pamięci: restart `serve` je zeruje, a czekające e-maile
+    przepadają (log `dropped`); limit na profil w bazie zostaje;
+  - wiele firm za jednym NAT-em (albo w jednej sieci IPv6 /64) dzieli limit 10 na godzinę;
+  - nieudana wysyłka zużywa jedno z 3 dziennych miejsc profilu;
+  - po wygaśnięciu tokenu `email_change` (albo `access:revoke`) `pending_email` zostaje, aż
+    klient anuluje albo zapisze adres ponownie (nowy link); `/profil` i ustawienia mówią
+    wtedy, że link wygasł (podzapytanie `EXISTS` w tym samym odczycie profilu), zamiast
+    „Oczekuje na potwierdzenie”;
+  - `email_change` odrzucony z pełnej kolejki albo przy zatrzymaniu liczy się do limitu 3
+    potwierdzeń na dobę (zapis i licznik są przed kolejką), choć e-mail nie wyszedł;
+  - kto ma sesję i dostęp do innej skrzynki, nadal może przenieść powiadomienia (D-027), ale
+    stary adres dostaje powiadomienie;
+  - `serve` potrzebuje wyjścia do SMTP w trybie `smtp` (drop-in `smtp.conf`); porzucona przy
+    zatrzymaniu wysyłka może jeszcze trzymać proces do zamknięcia gniazda SMTP, najdłużej do
+    `TimeoutStopSec` (serwer HTTP, transport SMTP i pula połączeń z bazą są już zamknięte);
+  - teoretyczny cykl blokad z godzinnym sprzątaniem: zapis i potwierdzenie ponawiają raz,
+    „Wyślij mi link” nie (błąd → log `failed`, klient prosi znowu).

@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
-import { sql } from "kysely";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { migrateToLatest } from "../../src/infrastructure/db/database.js";
+import { migrations } from "../../src/infrastructure/db/migrations.js";
 import { getSource, upsertSource } from "../../src/infrastructure/db/sources-repository.js";
 import type { HttpResponse } from "../../src/infrastructure/http/safe-http-client.js";
 import { createLogger } from "../../src/infrastructure/logger.js";
@@ -145,8 +145,11 @@ describe.skipIf(skipWithoutDatabase)("bk source (PostgreSQL)", () => {
       baseUrl: "https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl/",
       enabled: true,
     });
-    await sql`DELETE FROM kysely_migration WHERE name = '0007_bk_source'`.execute(schema.db);
-    expect(await migrateToLatest(schema.db)).toEqual(["0007_bk_source"]);
+    // Its own up() again: a later migration is applied already, and the
+    // migrator refuses to re-run one out of order.
+    const bkMigration = migrations["0007_bk_source"];
+    if (bkMigration === undefined) throw new Error("migration 0007_bk_source missing");
+    await bkMigration.up(schema.db);
     expect(await getSource(schema.db, "bk")).toMatchObject({ enabled: true });
   });
 

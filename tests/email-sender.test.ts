@@ -545,6 +545,15 @@ describe("redactTokenLinks", () => {
     expect(redactTokenLinks(`/dostep/${token.slice(1)}`)).toBe(`/dostep/${token.slice(1)}`);
     expect(redactTokenLinks("bez linków")).toBe("bez linków");
   });
+
+  it("replaces the token of an address confirmation link too (D-031)", () => {
+    expect(redactTokenLinks(`https://x.invalid/potwierdz-email/${token}\n`)).toBe(
+      "https://x.invalid/potwierdz-email/[token]\n",
+    );
+    expect(redactTokenLinks(`/potwierdz-email/${token.slice(1)}`)).toBe(
+      `/potwierdz-email/${token.slice(1)}`,
+    );
+  });
 });
 
 describe("an operator e-mail (status --notify, PR-07A)", () => {

@@ -113,6 +113,7 @@ describe.skipIf(skipWithoutDatabase || !toolsUsable)("backup and restore (Postgr
       "deliveries",
       "access_tokens",
       "sessions",
+      "access_emails",
     ] as const;
     const result: Record<string, unknown[]> = {};
     for (const table of tables) {
@@ -204,6 +205,10 @@ describe.skipIf(skipWithoutDatabase || !toolsUsable)("backup and restore (Postgr
     await issueAccessToken(schema.db, profile.id, "unsubscribe");
     const login = await issueAccessToken(schema.db, profile.id, "login");
     expect(await consumeLoginToken(schema.db, login.token)).not.toBeNull();
+    await schema.db
+      .insertInto("access_emails")
+      .values({ profile_id: profile.id, kind: "login_link" })
+      .execute();
 
     before = await snapshot();
     for (const rowsOfTable of Object.values(before)) expect(rowsOfTable.length).toBeGreaterThan(0);
@@ -224,7 +229,7 @@ describe.skipIf(skipWithoutDatabase || !toolsUsable)("backup and restore (Postgr
       status: "ok",
       file: join(dir, "radar-20261102T070000Z.dump"),
       schema: schemaName,
-      tables: 9,
+      tables: 10,
     });
     file = String(output.file);
     const info = await stat(file);
@@ -303,6 +308,7 @@ describe.skipIf(skipWithoutDatabase || !toolsUsable)("backup and restore (Postgr
         deliveries: 1,
         access_tokens: 2,
         sessions: 1,
+        access_emails: 1,
       },
     });
     // Every row and column as it was: arrays, jsonb, timestamps, numerics.

@@ -14,3 +14,8 @@ export function loginUrl(publicBaseUrl: string, token: string): string {
 export function unsubscribeUrl(publicBaseUrl: string, token: string): string {
   return `${publicBaseUrl}/wypis/${token}`;
 }
+
+/** Confirmation of a new address (D-031): GET shows a button, its form POSTs. */
+export function emailConfirmUrl(publicBaseUrl: string, token: string): string {
+  return `${publicBaseUrl}/potwierdz-email/${token}`;
+}

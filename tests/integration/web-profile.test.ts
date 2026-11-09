@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { CompanyProfile, CompanyProfileInput } from "../../src/domain/company-profile.js";
 import type { OpportunityDraft } from "../../src/domain/opportunity.js";
 import {
+  confirmEmailChange,
   consumeLoginToken,
   findSessionProfile,
   hashSecretToken,
@@ -20,6 +21,7 @@ import { upsertOpportunity } from "../../src/infrastructure/db/opportunities-rep
 import type { Database } from "../../src/infrastructure/db/schema.js";
 import { upsertSource } from "../../src/infrastructure/db/sources-repository.js";
 import { createLogger } from "../../src/infrastructure/logger.js";
+import type { EmailSender, OutgoingEmail } from "../../src/notifications/sender.js";
 import { csrfTokenFor, NOTICE_COOKIE, SESSION_COOKIE } from "../../src/web/session.js";
 import {
   MATCHES_RETRY_AFTER_SECONDS,
@@ -36,9 +38,10 @@ import {
 } from "./test-database.js";
 
 /*
- * PR-06B with PostgreSQL: the profile form, the e-mail change revocation,
- * the page of matches and re-enabling, through a real server on 127.0.0.1.
- * Pseudonymised data only; nothing leaves the machine.
+ * PR-06B with PostgreSQL: the profile form, the e-mail change (pending until
+ * confirmed since PR-10, D-031) and its revocation, the page of matches and
+ * re-enabling, through a real server on 127.0.0.1. Pseudonymised data only;
+ * nothing leaves the machine: the e-mails go to an in-memory sender.
  */
 
 const BASE = "https://radar.example.invalid";
@@ -75,7 +78,6 @@ function settingsForm(csrf: string, overrides: Readonly<Record<string, string>> 
     csrf,
     name: "Jan Kowalski Elektryka",
     email: EMAIL,
-    email_confirm: "",
     counties: "warszawski zachodni",
     include_keywords: "oświetlenie\r\nlatarnie",
     exclude_keywords: "",
@@ -119,6 +121,17 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
   let server: WebServer;
   let url = "";
   let profile: CompanyProfile;
+  /** What the server's access e-mails sent, and its log lines. */
+  const mails: OutgoingEmail[] = [];
+  const logs: string[] = [];
+  const sender: EmailSender = {
+    transport: "test",
+    send(email) {
+      mails.push(email);
+      return Promise.resolve();
+    },
+    close() {},
+  };
 
   beforeAll(async () => {
     schema = await createTestSchema();
@@ -132,10 +145,11 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
     server = await startWebServer({
       db: schema.db,
       publicBaseUrl: BASE,
-      logger: createLogger("error", () => undefined),
+      logger: createLogger("info", (line) => logs.push(line)),
       host: "127.0.0.1",
       port: 0,
       cleanupIntervalMs: null,
+      sender,
     });
     url = `http://127.0.0.1:${String(server.port)}`;
   });
@@ -147,6 +161,7 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
     await sql`DELETE FROM opportunities`.execute(schema.db);
     await sql`DELETE FROM company_profiles`.execute(schema.db);
     profile = await createCompanyProfile(schema.db, profileInput);
+    mails.length = 0;
   });
 
   function post(path: string, body: string, headers: Record<string, string> = {}) {
@@ -176,6 +191,40 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
     const row = await getCompanyProfile(schema.db, profileId);
     if (row === null) throw new Error("profile missing");
     return row;
+  }
+
+  async function pendingEmail(profileId = profile.id) {
+    const row = await schema.db
+      .selectFrom("company_profiles")
+      .select("pending_email")
+      .where("id", "=", profileId)
+      .executeTakeFirstOrThrow();
+    return row.pending_email;
+  }
+
+  /** The access e-mails are sent after the response (D-031): waits for `count` of them. */
+  async function sentMails(count: number): Promise<readonly OutgoingEmail[]> {
+    for (let waited = 0; mails.length < count; waited += 10) {
+      if (waited > 5000) throw new Error(`${String(mails.length)} of ${String(count)} e-mails`);
+      await delay(10);
+    }
+    return mails;
+  }
+
+  /**
+   * The token of the last confirmation link sent (to the new address). The notice
+   * to the old address goes out first and has no link, so this waits for the mail
+   * that carries one, not for a mail count.
+   */
+  async function confirmationToken(): Promise<string> {
+    for (let waited = 0; ; waited += 10) {
+      const token = mails
+        .flatMap((mail) => /\/potwierdz-email\/([A-Za-z0-9_-]{43})/.exec(mail.text)?.[1] ?? [])
+        .at(-1);
+      if (token !== undefined) return token;
+      if (waited > 5000) throw new Error("no confirmation link sent");
+      await delay(10);
+    }
   }
 
   describe("profile settings form", () => {
@@ -320,27 +369,39 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       expect(await stored()).toEqual(before);
     });
 
-    it("shows a duplicate address as a field error", async () => {
+    // PR-10 (D-031) replaced the field error of PR-06B: the form must not tell
+    // whether another profile uses an address. The confirmation finds it out.
+    it("answers an address another profile uses like any new one (no oracle)", async () => {
       await createCompanyProfile(schema.db, {
         ...profileInput,
         email: NEW_EMAIL,
         name: "Anna Nowak",
       });
       const { cookie, csrf } = await login();
-      const response = await post(
+      const taken = await post("/profil/ustawienia", settingsForm(csrf, { email: NEW_EMAIL }), {
+        cookie,
+      });
+      expect(await pendingEmail()).toBe(NEW_EMAIL);
+      const free = await post(
         "/profil/ustawienia",
-        settingsForm(csrf, { email: NEW_EMAIL, email_confirm: NEW_EMAIL }),
+        settingsForm(csrf, { email: "wolny@example.invalid" }),
         { cookie },
       );
-      expect(response.status).toBe(400);
-      const html = await response.text();
-      expect(html).toContain(
-        "Ten adres e-mail jest już przypisany do innego profilu. Jeśli to Twój drugi profil, " +
-          "odpowiedz na ostatnią wiadomość.",
-      );
-      expect(html).toContain('aria-describedby="email-opis email-blad" aria-invalid="true"');
-      expect(html).not.toContain("Anna Nowak");
+      for (const response of [taken, free]) {
+        expect(response.status).toBe(303);
+        expect(response.headers.get("location")).toBe("/profil");
+        expect(cookiePair(response)).toBe(`${NOTICE_COOKIE}=wyslano_potwierdzenie`);
+        expect(await response.text()).toBe("");
+      }
       expect((await stored()).email).toBe(EMAIL);
+      expect(await pendingEmail()).toBe("wolny@example.invalid");
+      // Both notices and both confirmations were sent alike, each notice first.
+      expect((await sentMails(4)).map((mail) => mail.to)).toEqual([
+        EMAIL,
+        NEW_EMAIL,
+        EMAIL,
+        "wolny@example.invalid",
+      ]);
     });
 
     it("refuses a county entry that is no county name, saving nothing", async () => {
@@ -358,16 +419,52 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       expect(await stored()).toEqual(before);
     });
 
-    it("needs the new address typed twice", async () => {
-      const { cookie, csrf } = await login();
+    // PR-10 (D-031) replaced „type the new address twice”: it is confirmed by
+    // a link sent to it instead, and one field is enough.
+    it("keeps a new address pending, the current one in use, until it is confirmed", async () => {
+      const current = await login();
+      const otherDevice = await login();
+      const loginLink = await issueAccessToken(schema.db, profile.id, "login");
       const response = await post(
         "/profil/ustawienia",
-        settingsForm(csrf, { email: NEW_EMAIL, email_confirm: "inny@example.invalid" }),
-        { cookie },
+        settingsForm(current.csrf, { email: ` ${NEW_EMAIL.toUpperCase()}`, name: "Nowa nazwa" }),
+        { cookie: current.cookie },
       );
-      expect(response.status).toBe(400);
-      expect(await response.text()).toContain("Adresy e-mail różnią się.");
-      expect((await stored()).email).toBe(EMAIL);
+      expect(response.status).toBe(303);
+      expect(cookiePair(response)).toBe(`${NOTICE_COOKIE}=wyslano_potwierdzenie`);
+      // The other fields are saved; the address waits, normalized.
+      expect(await stored()).toMatchObject({ name: "Nowa nazwa", email: EMAIL });
+      expect(await pendingEmail()).toBe(NEW_EMAIL);
+      // Nothing is revoked yet: the other device and the old link still work.
+      expect(
+        (await fetch(`${url}/profil`, { headers: { cookie: otherDevice.cookie } })).status,
+      ).toBe(200);
+      expect((await fetch(`${url}/dostep/${loginLink.token}`)).status).toBe(200);
+
+      // A notice without links goes to the current address first, then the
+      // confirmation to the new one.
+      const [notice, confirmation] = await sentMails(2);
+      expect(confirmation?.to).toBe(NEW_EMAIL);
+      expect(confirmation?.text).toContain(`${BASE}/potwierdz-email/`);
+      expect(notice?.to).toBe(EMAIL);
+      expect(notice?.text).not.toContain("http");
+      expect(notice?.text).not.toContain(NEW_EMAIL);
+      expect(mails).toHaveLength(2);
+
+      // /profil says so once, and shows the current address and the pending one.
+      const page = await fetch(`${url}/profil`, {
+        headers: { cookie: `${current.cookie}; ${cookiePair(response)}` },
+      });
+      const html = await page.text();
+      expect(html).toContain("Na nowy adres wysłaliśmy link potwierdzający, ważny 24 godziny.");
+      expect(html).toContain(`<p>Adres powiadomień: <strong>${EMAIL}</strong></p>`);
+      expect(html).toContain(`Oczekuje na potwierdzenie: <strong>${NEW_EMAIL}</strong>`);
+      expect(html).toContain('<form method="post" action="/profil/anuluj-email">');
+      const settings = await (
+        await fetch(`${url}/profil/ustawienia`, { headers: { cookie: current.cookie } })
+      ).text();
+      expect(settings).toContain(`Oczekuje na potwierdzenie: <strong>${NEW_EMAIL}</strong>`);
+      expect(settings).toContain(`name="email" value="${EMAIL}"`);
     });
   });
 
@@ -386,7 +483,9 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       return { tokens: tokens.length, sessions: sessions.length };
     }
 
-    it("revokes every link and every other session of the profile, and nothing else", async () => {
+    // PR-10 (D-031): the revocation of D-027 now happens at the confirmation,
+    // not at the save; what it revokes is unchanged.
+    it("revokes every link and every other session of the profile at the confirmation, and nothing else", async () => {
       const current = await login();
       const otherDevice = await login();
       const loginLink = await issueAccessToken(schema.db, profile.id, "login");
@@ -403,17 +502,21 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       const otherLink = await issueAccessToken(schema.db, other.id, "unsubscribe");
       const otherBefore = await accessRows(other.id);
 
-      const response = await post(
+      const saved = await post(
         "/profil/ustawienia",
-        settingsForm(current.csrf, {
-          email: ` ${NEW_EMAIL.toUpperCase()}`,
-          email_confirm: NEW_EMAIL,
-        }),
+        settingsForm(current.csrf, { email: ` ${NEW_EMAIL.toUpperCase()}` }),
         { cookie: current.cookie },
       );
+      expect(saved.status).toBe(303);
+      expect((await stored()).email).toBe(EMAIL);
+      const response = await post(`/potwierdz-email/${await confirmationToken()}`, "", {
+        cookie: current.cookie,
+      });
       expect(response.status).toBe(303);
+      expect(response.headers.get("location")).toBe("/profil");
       expect(cookiePair(response)).toBe(`${NOTICE_COOKIE}=zmieniono_email`);
       expect((await stored()).email).toBe(NEW_EMAIL);
+      expect(await pendingEmail()).toBeNull();
       // Only the session that made the change is left.
       expect(await accessRows(profile.id)).toEqual({ tokens: 0, sessions: 1 });
 
@@ -537,26 +640,32 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       // Before the fix the change locked the profile FOR UPDATE and changed the
       // address before deleting the tokens: a login holding its token row and
       // waiting for the profile's KEY SHARE closed a cycle (40P01, HTTP 500).
+      // Since PR-10 (D-031) the address changes at its confirmation, which
+      // keeps that lock order: the race is now with confirmEmailChange.
       it.each(["token", "session"] as const)(
         "does not deadlock with a login on the same profile (login paused after its %s)",
         async (pauseAfter) => {
           const current = await login();
-          const link = await issueAccessToken(schema.db, profile.id, "login");
-          const racing = pausedLogin(link.token, pauseAfter);
-          const loginPid = await racing.pid;
-
-          const change = updateProfileSettings(
+          const saved = await updateProfileSettings(
             schema.db,
             profile.id,
             newEmailSettings,
             current.token,
           );
-          // The change waits for the login's token row (it deletes the tokens).
+          if (saved?.kind !== "saved" || saved.emailChange === null) {
+            throw new Error("no pending address");
+          }
+          const link = await issueAccessToken(schema.db, profile.id, "login");
+          const racing = pausedLogin(link.token, pauseAfter);
+          const loginPid = await racing.pid;
+
+          const change = confirmEmailChange(schema.db, saved.emailChange.link.token, current.token);
+          // The confirmation waits for the login's token row (it deletes the tokens).
           await waitUntilBlockedBy(schema.db, loginPid);
           racing.resume();
-          // The login never waits for the change: it commits well before
+          // The login never waits for the confirmation: it commits well before
           // PostgreSQL would even look for a deadlock, so the single retry on
-          // 40P01 in updateProfileSettings cannot be what makes this pass.
+          // 40P01 in confirmEmailChange cannot be what makes this pass.
           const limit = (await deadlockTimeoutMs()) / 2;
           const finished = await Promise.race([
             racing.done.then(() => "login committed"),
@@ -564,8 +673,12 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
           ]);
           expect(finished).toBe("login committed");
 
-          const saved = await change;
-          expect(saved).toMatchObject({ emailChanged: true, profile: { email: NEW_EMAIL } });
+          expect(await change).toEqual({
+            kind: "changed",
+            profileId: profile.id,
+            keptSession: true,
+          });
+          expect((await stored()).email).toBe(NEW_EMAIL);
           // The login committed first, so its session is revoked with the others.
           expect(await findSessionProfile(schema.db, racing.sessionToken)).toBeNull();
           expect(await findSessionProfile(schema.db, current.token)).toBe(profile.id);
@@ -665,7 +778,7 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
         );
         const response = await post(
           "/profil/ustawienia",
-          settingsForm(csrf, { email: NEW_EMAIL, email_confirm: NEW_EMAIL }),
+          settingsForm(csrf, { email: NEW_EMAIL }),
           { cookie },
         );
         expect(response.status).toBe(401);
