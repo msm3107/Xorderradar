@@ -122,6 +122,11 @@ describe.skipIf(skipWithoutDatabase || !toolsUsable)("backup and restore (Postgr
       `.execute(schema.db);
       result[table] = rows;
     }
+    // No id column (PR-12): ordered by its primary key.
+    const { rows: feedback } = await sql<Record<string, unknown>>`
+      SELECT * FROM match_feedback ORDER BY profile_id, opportunity_id
+    `.execute(schema.db);
+    result.match_feedback = feedback;
     return result;
   }
 
@@ -202,6 +207,14 @@ describe.skipIf(skipWithoutDatabase || !toolsUsable)("backup and restore (Postgr
         sent_at: null,
       })
       .execute();
+    await schema.db
+      .insertInto("match_feedback")
+      .values({
+        profile_id: profile.id,
+        opportunity_id: opportunity.opportunity.id,
+        verdict: "not_relevant",
+      })
+      .execute();
     await issueAccessToken(schema.db, profile.id, "unsubscribe");
     const login = await issueAccessToken(schema.db, profile.id, "login");
     expect(await consumeLoginToken(schema.db, login.token)).not.toBeNull();
@@ -229,7 +242,7 @@ describe.skipIf(skipWithoutDatabase || !toolsUsable)("backup and restore (Postgr
       status: "ok",
       file: join(dir, "radar-20261102T070000Z.dump"),
       schema: schemaName,
-      tables: 10,
+      tables: 11,
     });
     file = String(output.file);
     const info = await stat(file);
@@ -309,6 +322,7 @@ describe.skipIf(skipWithoutDatabase || !toolsUsable)("backup and restore (Postgr
         access_tokens: 2,
         sessions: 1,
         access_emails: 1,
+        match_feedback: 1,
       },
     });
     // Every row and column as it was: arrays, jsonb, timestamps, numerics.

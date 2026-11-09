@@ -549,6 +549,80 @@ describe("web links in the digest (PR-06A)", () => {
   });
 });
 
+describe("rating links in the digest (PR-12)", () => {
+  const feedbackToken = "F".repeat(43);
+  const links = {
+    profileUrl: `https://radar.example.invalid/dostep/${"T".repeat(43)}`,
+    unsubscribeUrl: `https://radar.example.invalid/wypis/${"U".repeat(43)}`,
+    feedbackUrl: (id: string, verdict: "relevant" | "not_relevant") =>
+      `https://radar.example.invalid/ocena/${feedbackToken}/${id}/` +
+      (verdict === "relevant" ? "trafne" : "nietrafne"),
+  };
+  const footer =
+    "Linki „Trafne” i „Nietrafne” przy zamówieniach otwierają stronę, na której jednym " +
+    "przyciskiem zapiszesz ocenę (bez logowania, ważne 60 dni; ocenę możesz zmienić). " +
+    "Dzięki nim poprawiamy dopasowania.";
+
+  it("puts both rating links under every card of the text part", () => {
+    const one = item();
+    const two = item();
+    const { text } = buildDigest(profile, [one, two], NOW, { overflow: 0, links });
+    for (const value of [one, two]) {
+      const base = `https://radar.example.invalid/ocena/${feedbackToken}/${value.offer.id}`;
+      expect(text).toContain(
+        `   Oceń jako trafne: ${base}/trafne\n   Oceń jako nietrafne: ${base}/nietrafne\n`,
+      );
+    }
+    expect(text).toContain(footer);
+  });
+
+  it("makes them plain links in the HTML part, labelled with the offer for screen readers", () => {
+    const one = item({ title: 'Oświetlenie "LED" <i>& montaż</i>' });
+    const { html } = buildDigest(profile, [one], NOW, { overflow: 0, links });
+    const base = `https://radar.example.invalid/ocena/${feedbackToken}/${one.offer.id}`;
+    const title = "Oświetlenie &quot;LED&quot; &lt;i&gt;&amp; montaż&lt;/i&gt;";
+    // Outlined tap targets with a gap, secondary to the filled „Otwórz ogłoszenie” button.
+    const style =
+      "display:inline-block;padding:6px 12px;border:1px solid #1d5fb4;border-radius:4px;" +
+      "margin:6px 16px 0 0";
+    expect(html).toContain(
+      `<small>Czy to zamówienie pasuje?</small><br>` +
+        `<a href="${base}/trafne" aria-label="Trafne: ${title}" style="${style}">Trafne</a> ` +
+        `<a href="${base}/nietrafne" aria-label="Nietrafne: ${title}" style="${style}">` +
+        "Nietrafne</a>",
+    );
+    expect(html).not.toMatch(/aria-label="(Nie)?[Tt]rafne[^"]*" style="[^"]*background/);
+    expect(html).not.toContain("<form");
+    expect(html).not.toContain("<i>");
+    expect(html).toContain(footer);
+  });
+
+  it("adds no rating link or footer note without the rating link builder", () => {
+    const { text, html } = buildDigest(profile, [item()], NOW, {
+      overflow: 0,
+      links: { profileUrl: links.profileUrl, unsubscribeUrl: links.unsubscribeUrl },
+    });
+    for (const part of [text, html]) {
+      expect(part).not.toContain("/ocena/");
+      expect(part).not.toContain("Czy to zamówienie pasuje?");
+      expect(part).not.toContain("Oceń jako");
+      expect(part).not.toContain("Linki „Trafne”");
+    }
+  });
+
+  it("shows no rating link that is not http(s)", () => {
+    const { text, html } = buildDigest(profile, [item()], NOW, {
+      overflow: 0,
+      links: { ...links, feedbackUrl: () => "javascript:alert(1)" },
+    });
+    for (const part of [text, html]) {
+      expect(part).not.toContain("javascript:");
+      expect(part).not.toContain("Linki „Trafne”");
+    }
+    expect(text).not.toContain("Oceń jako");
+  });
+});
+
 describe("matchingItems (shared by the digest and /dopasowania)", () => {
   // Some match, some are in another region, some lack the keyword.
   const offers = Array.from({ length: 405 }, (_, index) =>

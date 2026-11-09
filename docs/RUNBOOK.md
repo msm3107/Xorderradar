@@ -352,7 +352,8 @@ Kto ma e-mail z linkiem albo sesję, ma dostęp do profilu. Odebranie dostępu:
 node dist/main.js access:revoke <profileId>   # {"status":"ok","tokens":…,"sessions":…}
 ```
 
-Unieważnia wszystkie linki (logowania, wypisu i potwierdzenia adresu) i sesje profilu naraz;
+Unieważnia wszystkie linki (logowania, wypisu, potwierdzenia adresu i ocen „Trafne”/„Nietrafne”
+z digestów) i sesje profilu naraz;
 profil i powiadomienia zostają (także adres oczekujący na potwierdzenie — klient anuluje go na
 `/profil` albo zapisuje ponownie). Zmiana adresu przez klienta wymaga potwierdzenia z nowej
 skrzynki (D-031), a stary adres dostaje powiadomienie. Gdy ktoś mimo to przejął powiadomienia
@@ -363,6 +364,40 @@ i nowy link dla właściciela:
 ```sh
 node dist/main.js access:link <profileId>     # link jest sekretem — tylko właścicielowi
 ```
+
+## Oceny trafności (`feedback:report`, D-032)
+
+Klienci oceniają zamówienia linkami „Trafne”/„Nietrafne” z digestu (bez logowania, 60 dni,
+tylko zamówienia wysłane tej firmie; GET pokazuje stronę z przyciskiem, zapisuje dopiero
+przycisk) i przyciskami na `/dopasowania`. Ocenę można zmienić; zostaje jedna na firmę i
+zamówienie (tabela `match_feedback`). Odczyt:
+
+```sh
+node dist/main.js feedback:report                      # wszystkie oceny
+node dist/main.js feedback:report --since 2026-11-02   # zmienione od tego dnia (czas polski)
+```
+
+Wypisuje jedną linię JSON: `total`, `profiles` (id profilu) i `categories` (kategoria MVP z
+kodów CPV oferty; oferta w dwóch kategoriach liczy się w obu, bez kategorii — `null`) — każda z
+`ratings`, `relevant`, `notRelevant` i `precision` (trafne / wszystkie, 3 miejsca po przecinku).
+**`precision: null` znaczy brak ocen, nie zero trafnych.** Bez adresów i tytułów — wynik można
+wkleić do notatek z pilotażu. Kody: `0` raport, `1` baza niedostępna albo schemat nieaktualny
+(`migrate`), `2` zły argument (`--since` musi być datą `YYYY-MM-DD`). Raport liczy oceny wg
+ostatniej zmiany: ocena zmieniona po `--since` liczy się z nowym werdyktem.
+
+Tydzień pilotażu (etap 4): `feedback:report --since <poniedziałek>`; trafność to
+`total.precision`. `total.precision` liczy wszystkie oceny razem, więc firma, która ocenia
+dużo, waży w nim najwięcej — do decyzji go/no-go patrz też na `precision` poszczególnych
+profili (`profiles[]`) albo ich medianę. Firma z wieloma „nietrafne” w jednej kategorii —
+sprawdź jej profil (`match:preview <profileId>`) i słowa wykluczające razem z firmą.
+
+Przy wdrażaniu firmy w pilotaż poleć ocenianie hurtem na `/dopasowania` (jedno kliknięcie na
+zamówienie, cała lista na jednej stronie) zamiast pojedynczych linków z e-maili — więcej ocen
+w krótszym czasie.
+
+Klient może też pobrać swoją listę dopasowań jako CSV („Pobierz listę jako plik CSV” na
+`/dopasowania`: te same zamówienia i limit co strona, separator `;`, UTF-8 z BOM — otwiera się
+w Excelu i Arkuszach Google).
 
 ## E-maile dostępu i kontakt (`serve`, D-031)
 
@@ -566,8 +601,9 @@ pusty. Kod `1` z `not_migrated` — backup sprzed nowszej wersji aplikacji: uruc
 
 ## Reverse proxy: logi
 
-Ścieżki `/dostep/…` (logowanie), `/wypis/…` (wypis) i `/potwierdz-email/…` (potwierdzenie nowego
-adresu) zawierają tokeny dające dostęp do profilu. **Proxy nie może zapisywać tych ścieżek w logach
+Ścieżki `/dostep/…` (logowanie), `/wypis/…` (wypis), `/potwierdz-email/…` (potwierdzenie nowego
+adresu) i `/ocena/…` (ocena zamówienia z digestu) zawierają tokeny dające dostęp do profilu albo
+jego ocen. **Proxy nie może zapisywać tych ścieżek w logach
 dostępu.** `deploy/caddy/Caddyfile` pomija je w logu dostępu (`log_skip`), a nagłówki
 `Cookie`/`Authorization` Caddy domyślnie maskuje. Przy zmianie konfiguracji proxy zachowaj oba; to
 samo dotyczy narzędzi monitoringu i APM przed aplikacją. HSTS ustawia sama aplikacja

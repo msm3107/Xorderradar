@@ -111,8 +111,8 @@ export interface DeliveriesTable {
   sent_at: Date | null;
 }
 
-/** Mirrors access_tokens_purpose_check (migrations 0006 and 0008, D-026, D-031). */
-export type AccessTokenPurpose = "login" | "unsubscribe" | "email_change";
+/** Mirrors access_tokens_purpose_check (migrations 0006, 0008 and 0009, D-026, D-031, D-032). */
+export type AccessTokenPurpose = "login" | "unsubscribe" | "email_change" | "feedback";
 
 export interface AccessTokensTable {
   id: Generated<string>;
@@ -148,6 +148,21 @@ export interface SessionsTable {
   expires_at: Date;
 }
 
+/** Mirrors match_feedback_verdict_check (migration 0009, D-032). */
+export type FeedbackVerdict = "relevant" | "not_relevant";
+
+/**
+ * A customer's rating of one offer for one profile (PR-12, D-032): one row
+ * per pair, changed in place by an upsert. No id column: the pair is the key.
+ */
+export interface MatchFeedbackTable {
+  profile_id: string;
+  opportunity_id: string;
+  verdict: FeedbackVerdict;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
 export interface Database {
   sources: SourcesTable;
   opportunities: OpportunitiesTable;
@@ -157,4 +172,5 @@ export interface Database {
   access_tokens: AccessTokensTable;
   sessions: SessionsTable;
   access_emails: AccessEmailsTable;
+  match_feedback: MatchFeedbackTable;
 }

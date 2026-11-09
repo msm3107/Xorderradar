@@ -218,7 +218,9 @@ describe("deploy/caddy/Caddyfile", () => {
   });
 
   it("keeps the token paths out of the access log, adds no HSTS, and allows the profile form", () => {
-    expect(CADDYFILE).toMatch(/^\t@token path \/dostep\/\* \/wypis\/\* \/potwierdz-email\/\*$/m);
+    expect(CADDYFILE).toMatch(
+      /^\t@token path \/dostep\/\* \/wypis\/\* \/potwierdz-email\/\* \/ocena\/\*$/m,
+    );
     expect(CADDYFILE).toMatch(/^\tlog_skip @token$/m);
     expect(CADDYFILE.toLowerCase()).not.toMatch(/^[^#]*strict-transport-security/m);
     const maxSize = /^\t\tmax_size (\d+)KB$/m.exec(CADDYFILE)?.[1];
@@ -238,7 +240,7 @@ describe("deploy/caddy/Caddyfile", () => {
     return filter[2] ?? "";
   };
   // Plain quotes: Go's `${1}` must not become a template interpolation.
-  const REDACT = '"(?i)/(dostep|wypis|potwierdz-email)/[^?#]*" "/${1}/REDACTED"';
+  const REDACT = '"(?i)/(dostep|wypis|potwierdz-email|ocena)/[^?#]*" "/${1}/REDACTED"';
 
   for (const [name, opening] of [
     ["the default logger (errors, redirects)", /^\tlog default \{$/m],
@@ -259,11 +261,17 @@ describe("deploy/caddy/Caddyfile", () => {
   it("uses a pattern that removes the token and keeps the rest", () => {
     // The same rewrite in JS: (?i) → flag i, Go's ${1} → $1.
     const redact = (value: string) =>
-      value.replace(/\/(dostep|wypis|potwierdz-email)\/[^?#]*/giu, "/$1/REDACTED");
+      value.replace(/\/(dostep|wypis|potwierdz-email|ocena)\/[^?#]*/giu, "/$1/REDACTED");
     const token = "Kq3-not-a-real-token_x";
     expect(redact(`/dostep/${token}`)).toBe("/dostep/REDACTED");
     expect(redact(`/wypis/${token}?x=1`)).toBe("/wypis/REDACTED?x=1");
     expect(redact(`/potwierdz-email/${token}`)).toBe("/potwierdz-email/REDACTED");
+    // A rating link (PR-12): the token and everything after it (offer id, verdict).
+    expect(redact(`/ocena/${token}/0a6b5c4d-1e2f-4a3b-8c7d-6e5f4a3b2c1d/nietrafne`)).toBe(
+      "/ocena/REDACTED",
+    );
+    // POST /dopasowania/ocena carries no token and is logged as is.
+    expect(redact("/dopasowania/ocena")).toBe("/dopasowania/ocena");
     expect(redact(`/DOSTEP/${token}`)).toBe("/DOSTEP/REDACTED");
     expect(redact(`https://radar.example.invalid/dostep/${token}`)).toBe(
       "https://radar.example.invalid/dostep/REDACTED",

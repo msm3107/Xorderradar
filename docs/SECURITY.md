@@ -303,8 +303,14 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   `sessions`), ważność według zegara bazy. Logowanie: jednorazowe, 7 dni, GET niczego nie
   zużywa (strona z przyciskiem), POST zużywa atomowo (warunkowy `UPDATE … RETURNING`) i
   otwiera sesję. Wypis: wielokrotny, 60 dni. Potwierdzenie adresu (`email_change`, PR-10):
-  jednorazowe, 24 h, związane z adresem z `pending_email`. Każdy nieważny token → ta sama
-  neutralna strona 404. Usunięcie profilu usuwa tokeny i sesje (`ON DELETE CASCADE`). Unieważnienie
+  jednorazowe, 24 h, związane z adresem z `pending_email`. Ocena trafności (`feedback`,
+  PR-12, D-032): wielokrotny, 60 dni, jeden na digest, ważny tylko dla ofert z `deliveries`
+  tego profilu (`pending`/`sent`); `GET /ocena/<token>/<oppId>/<werdykt>` niczego nie zapisuje
+  (strona z przyciskiem), POST robi atomowy upsert jednej oceny (para profil–oferta unikalna).
+  Każdy nieważny token → ta sama
+  neutralna strona 404 (na `/ocena/…` także zły kształt ścieżki, cudza lub nieistniejąca
+  oferta i nieznany werdykt — bez wyroczni; zdanie o ocenie po zalogowaniu zależy tylko od
+  trasy). Usunięcie profilu usuwa tokeny i sesje (`ON DELETE CASCADE`). Unieważnienie
   na żądanie: `access:revoke <profileId>` usuwa w jednej transakcji wszystkie tokeny i sesje
   profilu (przekazany e-mail, zgubione urządzenie); profil bez zmian, na stdout tylko liczby.
 - **Sesja:** `__Host-radar_sesja`, `HttpOnly; Secure; SameSite=Lax; Path=/`, 30 dni od
@@ -324,7 +330,8 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   zużywany. Klient bez obu nagłówków (bardzo stara przeglądarka, skrypt) nie zaloguje się —
   świadomy koszt. Od PR-10 tę samą kontrolę mają pozostałe formularze bez sesji:
   `POST /wyslij-link` i `POST /potwierdz-email/<token>` (obca strona nie wyśle w imieniu
-  przeglądarki ofiary prośby o link ani potwierdzenia).
+  przeglądarki ofiary prośby o link ani potwierdzenia), od PR-12 też
+  `POST /ocena/<token>/<oppId>/<werdykt>` (obca strona nie zapisze oceny za ofiarę).
 - **„Wyślij mi link” (PR-10, D-031):** `POST /wyslij-link`, jedno pole `email`, ciało ≤ 1 KiB.
   Bez wyroczni: każdy poprawny adres dostaje od razu identyczną odpowiedź (status, treść,
   nagłówki) — adres z profilem, bez profilu, profil wyłączony i po limicie; zły zapis adresu →
@@ -373,6 +380,21 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   `__Host-radar_komunikat` (`HttpOnly; Secure; SameSite=Lax`, 60 s), jedno słowo z
   zamkniętej listy — nigdy dane (także adres e-mail); podrobione ciasteczko może najwyżej
   wyświetlić „Zapisano”.
+- **Oceny trafności i eksport (PR-12, D-032):** `POST /dopasowania/ocena` — sesja + CSRF +
+  `Origin`, pola `csrf`, `oferta` (UUID), `werdykt` (`trafne`/`nietrafne`) i opcjonalne
+  `nastepna` (wybiera tylko kotwicę przekierowania; do `Location` trafia tylko po sprawdzeniu
+  wzorca uuid, inaczej jest ignorowane), nic więcej (400);
+  ocenić można tylko ofertę wysłaną do profilu sesji albo pasującą do niego teraz (regułami profilu,
+  niezależnie od wieku oferty — D-032) — inna
+  (także cudza) → 404. Zapis to jeden atomowy upsert (`match_feedback`, para profil–oferta
+  unikalna, `ON DELETE CASCADE` z obu stron); w bazie tylko id, werdykt i czasy. Oceny są
+  czytane wyłącznie dla profilu sesji. `GET /dopasowania.csv`: tylko z sesją, ta sama lista,
+  ten sam limit wierszy (`MATCHES_SHOWN`) i ten sam slot co `/dopasowania`,
+  `Content-Disposition: attachment`, `Cache-Control: no-store`; komórka zaczynająca się od
+  `=`, `+`, `-`, `@`, tabulatora lub CR dostaje prefiks `'` (OWASP CSV injection — `=1+1`
+  zostaje tekstem), cudzysłowy według RFC 4180, brak wartości → pusta komórka (nigdy `0`),
+  link tylko `http(s)`. `feedback:report` wypisuje wyłącznie id profili, klucze kategorii i liczby
+  (precyzja `null` przy zerze ocen).
 - **Twardnienie HTTP:** ciało ≤ 8 KB (413), tylko `application/x-www-form-urlencoded`
   (inaczej 415); wyjątek: POST wypisu RFC 8058 przyjmuje też `multipart/form-data` (RFC 8058
   §3.2 — SHOULD), czytany własnym ścisłym parserem bez zależności (`src/web/multipart.ts`:
@@ -413,14 +435,14 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   sesją. Limitu na proxy pilot nie ma (Caddy wymaga do tego zewnętrznego modułu — poza zakresem
   PR-07B, D-029).
 - **Reverse proxy (PR-07):** `serve` słucha domyślnie na `127.0.0.1:3000` czystym HTTP; TLS, HSTS i
-  przekierowanie z `http` robi proxy. Tokeny są w ścieżkach `/dostep/…`, `/wypis/…` i
-  `/potwierdz-email/…` (PR-10) — proxy **nie może** zapisywać tych ścieżek w logach dostępu
+  przekierowanie z `http` robi proxy. Tokeny są w ścieżkach `/dostep/…`, `/wypis/…`,
+  `/potwierdz-email/…` (PR-10) i `/ocena/…` (PR-12) — proxy **nie może** zapisywać tych ścieżek w logach dostępu
   (wyłączony log albo ścieżka przycięta). Pilot (PR-07B): `deploy/caddy/Caddyfile` — `log_skip` dla
-  tych trzech ścieżek w logu dostępu, a ponieważ `log_skip` nie obejmuje innych logów (log błędów w
+  tych czterech ścieżek w logu dostępu, a ponieważ `log_skip` nie obejmuje innych logów (log błędów w
   journalu, np. 502 z `reverse_proxy` przy restarcie `serve`; serwer przekierowania HTTP → HTTPS),
   **każdy** log Caddy (domyślny i dostępu) ma `format filter`, który w `request>uri` i
-  `request>headers>Referer` zamienia `/dostep/<token>`, `/wypis/<token>` i
-  `/potwierdz-email/<token>` na `…/REDACTED` (obrona w głąb; aplikacja wysyła też
+  `request>headers>Referer` zamienia `/dostep/<token>`, `/wypis/<token>`,
+  `/potwierdz-email/<token>` i `/ocena/<token>` na `…/REDACTED` (obrona w głąb; aplikacja wysyła też
   `Referrer-Policy: strict-origin`, więc przeglądarki nie podają ścieżki). Po instalacji i każdej zmianie Caddyfile
   obowiązkowa kontrola z `docs/DEPLOY.md` punkt 8 (`grep -c` testowego tokenu w journalu i logu
   dostępu = 0). Nagłówki `Cookie`/`Authorization` maskowane przez Caddy, limit ciała żądania 128 KB
@@ -472,9 +494,10 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   `SMTP_URL`. Pliki outboxu (tryb `test`) zawierają adres i treść — katalog `0700`, pliki
   `0600`, `outbox/` w `.gitignore`. Linki z tokenami (PR-06A) nie trafiają do logów. Plik
   `.eml` to cały e-mail, więc **zawiera sekretne linki** (`/dostep/<token>`,
-  `/wypis/<token>`, od PR-10 też `/potwierdz-email/<token>` z e-maili dostępu `serve`);
-  czytelna kopia `.json` ma je zredagowane (`/dostep/[token]`, `/wypis/[token]`,
-  `/potwierdz-email/[token]`).
+  `/wypis/<token>`, od PR-10 też `/potwierdz-email/<token>` z e-maili dostępu `serve`, od
+  PR-12 `/ocena/<token>/…` z digestu); czytelna kopia `.json` ma je zredagowane
+  (`/dostep/[token]`, `/wypis/[token]`, `/potwierdz-email/[token]`, `/ocena/[token]/…` — id
+  oferty i werdykt zostają).
 - `serve` (od PR-06A) loguje jedno zdarzenie na żądanie (`http request`): metoda (znana albo
   `OTHER`), nazwa trasy (`home`, `login_link`, `unsubscribe`, `not_found`…), status i czas.
   Nigdy URL, ścieżki ani zapytania (zawierają tokeny), ciasteczek, nagłówków, treści

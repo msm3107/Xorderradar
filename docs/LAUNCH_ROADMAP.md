@@ -161,8 +161,14 @@ Szacunek: 4–8 tygodni.
 
 ### Zbieranie danych
 
-Oceny „trafne” i „nietrafne” zbiera produkt: przyciski w mailu i na `/dopasowania` (PR-12).
-Właściciel czyta je z `feedback:report`.
+Oceny „trafne” i „nietrafne” zbiera produkt: przyciski w mailu i na `/dopasowania` (PR-12,
+D-032). Link w mailu działa bez logowania przez 60 dni i ocenia tylko zamówienia wysłane tej
+firmie; ocenę można zmienić. Właściciel czyta je z `feedback:report` (liczby na profil i na
+kategorię oraz precyzja; tygodniowo: `feedback:report --since <poniedziałek>`, RUNBOOK).
+Precyzja `null` oznacza brak ocen, nie zero trafnych. Klient może pobrać swoją listę jako CSV
+(`/dopasowania.csv`). Przy wdrażaniu firmy poleć ocenianie hurtem na `/dopasowania` (jedno
+kliknięcie na zamówienie, cała lista na jednej stronie). Do decyzji go/no-go patrz też na
+precyzję poszczególnych profili albo jej medianę, nie tylko na łączną `total.precision`.
 
 Tygodniowa ankieta ma 2 pytania:
 

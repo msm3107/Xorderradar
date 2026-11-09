@@ -1,4 +1,5 @@
 import { CATEGORY_LABELS, VOIVODESHIPS, MVP_CATEGORIES } from "../domain/vocabulary.js";
+import type { FeedbackVerdict } from "../infrastructure/db/schema.js";
 import { escapeHtml } from "../infrastructure/html.js";
 import {
   FULL_DESCRIPTION_LABEL,
@@ -9,7 +10,8 @@ import {
   type CardRow,
   type OfferCard,
 } from "../notifications/card.js";
-import { plural } from "../notifications/digest.js";
+import { plural, RATE_NOT_RELEVANT_LABEL, RATE_RELEVANT_LABEL } from "../notifications/digest.js";
+import { verdictWord } from "./links.js";
 import {
   FIELD_LABELS,
   FIELD_ORDER,
@@ -77,6 +79,10 @@ input[type=text],input[type=email],textarea{box-sizing:border-box;width:100%;fon
 .matches details{margin:.4rem 0}
 .matches summary{cursor:pointer;color:var(--accent)}
 .matches ul{margin:.3rem 0;padding-left:1.2rem}
+.matches article.nietrafne{border-left-color:var(--line);background:var(--bg);color:var(--muted)}
+.matches .ocena{margin:.6rem 0 0}
+.matches .ocena p{margin:0 0 .3rem}
+.matches .ocena button{margin-right:.5rem}
 @media (max-width:30rem){.matches dl{grid-template-columns:1fr}.matches dd{margin-bottom:.4rem}}
 nav p{margin:1.5rem 0}
 h2{font-size:1.15rem;margin:1.5rem 0 .3rem}
@@ -106,6 +112,13 @@ const EMAIL_CHANGE_LINK_HINT =
   "Link potwierdzający nowy adres? Dopóki adres nie jest potwierdzony, wpisz dotychczasowy " +
   "adres profilu — wyślemy na niego link do profilu, a nowy adres zapiszesz ponownie " +
   "w ustawieniach.";
+
+/**
+ * The extra sentence of the 404 on the /ocena/… route (PR-12, decided by the
+ * route only): the same for every rating-link failure.
+ */
+const FEEDBACK_LINK_HINT =
+  "Zamówienia ocenisz też na stronie „Pasujące zamówienia” po zalogowaniu.";
 
 /** What every „Wyślij mi link” request is answered with (D-031), whatever the address. */
 export const LINK_REQUESTED_TEXT =
@@ -324,6 +337,8 @@ export function loginConfirmPage(token: string): Page {
 export interface InvalidLinkOptions {
   /** The route is /potwierdz-email/…: adds EMAIL_CHANGE_LINK_HINT. Never the token's state. */
   readonly emailChangeLink?: boolean;
+  /** The route is /ocena/…: adds FEEDBACK_LINK_HINT. Never the token's or the offer's state. */
+  readonly feedbackLink?: boolean;
 }
 
 /**
@@ -337,6 +352,7 @@ export function invalidLinkPage(options: InvalidLinkOptions = {}): Page {
       paragraph("Ten link nie działa."),
       paragraph(NEW_LINK_HINT),
       ...(options.emailChangeLink === true ? [paragraph(EMAIL_CHANGE_LINK_HINT)] : []),
+      ...(options.feedbackLink === true ? [paragraph(FEEDBACK_LINK_HINT)] : []),
       linkRequestForm(),
       homeLink(),
     ]),
@@ -723,12 +739,60 @@ export interface MatchesView {
   readonly stateAt: string;
   /** How many days back "new" goes (DIGEST_NEW_DAYS). */
   readonly windowDays: number;
-  /** The shown offers' cards, soonest deadline first. */
-  readonly items: readonly OfferCard[];
+  /** The shown offers' cards: soonest deadline first, those rated „Nietrafne” last. */
+  readonly items: readonly MatchesItem[];
   /** Matching offers beyond the shown ones. */
   readonly more: number;
   /** The candidate limit was reached: some offers were not considered. */
   readonly truncated: boolean;
+}
+
+/** The rating form of one card on /dopasowania (PR-12, D-032). */
+export interface CardFeedback {
+  readonly opportunityId: string;
+  /** The profile's current rating; null: not rated. */
+  readonly verdict: FeedbackVerdict | null;
+  /** The session's CSRF token. */
+  readonly csrf: string;
+  /**
+   * The id of the card shown after this one (null: the last): where the page
+   * returns after „Nietrafne”, which moves this card to the end (`nastepna`).
+   */
+  readonly next: string | null;
+}
+
+/** A card of /dopasowania: with the rating buttons when `feedback` is given. */
+export type MatchesItem = OfferCard & { readonly feedback?: CardFeedback };
+
+/**
+ * „Trafne” / „Nietrafne” under a card: one POST form (session and CSRF) with
+ * two submit buttons; each button's accessible name says which offer it rates.
+ * Once rated, both are toggle buttons: the current verdict's is pressed (and bold).
+ */
+function feedbackForm(title: string, feedback: CardFeedback): string {
+  const current =
+    feedback.verdict === null
+      ? "Czy to zamówienie pasuje?"
+      : `Twoja ocena: <strong>${verdictWord(feedback.verdict)}</strong>. Możesz ją zmienić.`;
+  const button = (verdict: FeedbackVerdict, label: string): string => {
+    const pressed = feedback.verdict === null ? "" : String(feedback.verdict === verdict);
+    return (
+      `<button type="submit" name="werdykt" value="${verdictWord(verdict)}" ` +
+      `aria-label="${escapeHtml(`${label}: ${title}`)}"` +
+      (pressed === "" ? "" : ` aria-pressed="${pressed}"`) +
+      `>${pressed === "true" ? `<strong>${label}</strong>` : label}</button>`
+    );
+  };
+  return (
+    '<form method="post" action="/dopasowania/ocena" class="ocena">' +
+    `<p>${current}</p>` +
+    hidden("csrf", feedback.csrf) +
+    hidden("oferta", feedback.opportunityId) +
+    (feedback.next === null ? "" : hidden("nastepna", feedback.next)) +
+    button("relevant", RATE_RELEVANT_LABEL) +
+    button("not_relevant", RATE_NOT_RELEVANT_LABEL) +
+    "</form>"
+  );
 }
 
 /** One row in the card's grid; `more` ends its value (the full description). */
@@ -743,7 +807,7 @@ function cardRow(row: CardRow, more = ""): string {
  * "Otwórz ogłoszenie" button and the match details, both disclosures native
  * <details> (no script).
  */
-function cardItem(card: OfferCard): string {
+function cardItem(card: MatchesItem): string {
   const full =
     card.fullDescription === null
       ? ""
@@ -761,9 +825,19 @@ function cardItem(card: OfferCard): string {
       ? ""
       : `<details><summary>${MATCH_DETAILS_LABEL}</summary><ul>` +
         `${card.matchDetails.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></details>`;
+  const { feedback } = card;
+  if (feedback === undefined) {
+    return (
+      `<li><article><h2>${escapeHtml(card.title)}</h2><dl>${rows.join("")}</dl>` +
+      `${button}${details}</article></li>`
+    );
+  }
+  // An anchor for the redirect after rating; a „Nietrafne” card is greyed (and listed last).
+  const greyed = feedback.verdict === "not_relevant" ? ' class="nietrafne"' : "";
   return (
-    `<li><article><h2>${escapeHtml(card.title)}</h2><dl>${rows.join("")}</dl>` +
-    `${button}${details}</article></li>`
+    `<li id="oferta-${escapeHtml(feedback.opportunityId)}"><article${greyed}>` +
+    `<h2>${escapeHtml(card.title)}</h2><dl>${rows.join("")}</dl>` +
+    `${button}${details}${feedbackForm(card.title, feedback)}</article></li>`
   );
 }
 
@@ -809,6 +883,16 @@ export function matchesPage(view: MatchesView): Page {
     body.push(
       paragraph(`${window} Najbliższy termin na górze. Stan na ${view.stateAt} (czas polski).`),
       paragraph("Lista obejmuje także zamówienia, które już wysłaliśmy e-mailem."),
+      paragraph(
+        "Oceń zamówienia przyciskami „Trafne” i „Nietrafne” — pomagasz nam lepiej je dobierać. " +
+          "Ocenione jako nietrafne są wyszarzone i na końcu listy.",
+      ),
+      `<p>${link("/dopasowania.csv", "Pobierz listę jako plik CSV")} (Excel, Arkusze Google)` +
+        (view.more > 0
+          ? ` (pierwsze ${String(view.items.length)} z ${String(view.items.length + view.more)} ` +
+            "— zawęź profil, aby mieć wszystkie)"
+          : "") +
+        ".</p>",
       `<ol class="matches">${view.items.map(cardItem).join("")}</ol>`,
     );
     if (view.more > 0) {
@@ -821,8 +905,9 @@ export function matchesPage(view: MatchesView): Page {
       body.push(
         paragraph(
           `I ${String(view.more)} ${plural(view.more, "kolejne", "kolejne", "kolejnych")} ` +
-            `${offers} z dalszym terminem. Aby lista była krótsza, zawęź profil, np. słowami ` +
-            "wykluczającymi.",
+            `${offers} z dalszym terminem lub ` +
+            `${plural(view.more, "ocenione", "ocenione", "ocenionych")} jako nietrafne. ` +
+            "Aby lista była krótsza, zawęź profil, np. słowami wykluczającymi.",
         ),
       );
     }
@@ -913,6 +998,70 @@ export function matchesTooManyPage(): Page {
       ),
       `<p>${link("/dopasowania", "Spróbuj ponownie")}</p>`,
       backLinks(),
+    ]),
+  };
+}
+
+/** What the page of a valid rating link shows (PR-12, D-032). */
+export interface FeedbackConfirmView {
+  readonly title: string;
+  /** The link's verdict. */
+  readonly verdict: FeedbackVerdict;
+  /** The profile's current rating of the offer; null: not rated. */
+  readonly current: FeedbackVerdict | null;
+  /** The link's own path (the form's action). */
+  readonly path: string;
+  /** The same link with the other verdict. */
+  readonly oppositePath: string;
+}
+
+/**
+ * GET /ocena/<token>/<offer>/<verdict> (PR-12, D-032): read-only (a mail
+ * scanner may open it); only the POST of the button stores the rating. When
+ * the offer already has the link's verdict, the only button is the other
+ * verdict's. Only for a valid link: every refused one is invalidLinkPage.
+ */
+export function feedbackConfirmPage(view: FeedbackConfirmView): Page {
+  const word = verdictWord(view.verdict);
+  const opposite = verdictWord(view.verdict === "relevant" ? "not_relevant" : "relevant");
+  const choice =
+    view.current === view.verdict
+      ? [
+          paragraph(`To zamówienie ma już ocenę: ${word}.`),
+          form(view.oppositePath, [], `Zmień ocenę na: ${opposite}`),
+        ]
+      : [
+          ...(view.current === null
+            ? []
+            : [paragraph(`Obecna ocena: ${verdictWord(view.current)}.`)]),
+          paragraph(`Kliknij przycisk, aby ocenić to zamówienie jako ${word}.`),
+          form(view.path, [], `Zapisz ocenę: ${word}`),
+        ];
+  return {
+    status: 200,
+    html: layout("Ocena zamówienia", [
+      `<p>Zamówienie: <strong>${escapeHtml(view.title)}</strong></p>`,
+      ...choice,
+      paragraph(
+        "Oceny pomagają nam lepiej dobierać zamówienia. Ocenę możesz zmienić drugim linkiem " +
+          "z wiadomości albo na stronie „Pasujące zamówienia” w profilu.",
+      ),
+    ]),
+  };
+}
+
+/** After the POST of a rating link: saved (or unchanged when it was the same). */
+export function feedbackSavedPage(verdict: FeedbackVerdict): Page {
+  return {
+    status: 200,
+    html: layout("Dziękujemy za ocenę", [
+      paragraph(`Zapisaliśmy ocenę: ${verdictWord(verdict)}.`),
+      paragraph(
+        "Ocenę możesz zmienić drugim linkiem z wiadomości albo na stronie „Pasujące " +
+          "zamówienia” w profilu.",
+      ),
+      paragraph("Możesz zamknąć tę kartę i wrócić do wiadomości."),
+      `<nav><p>${link("/dopasowania", "Pasujące zamówienia")} · ${link("/", "Strona główna")}</p></nav>`,
     ]),
   };
 }

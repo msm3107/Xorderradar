@@ -51,6 +51,7 @@ import {
   type ResolveRequest,
   type ResolveResult,
 } from "./infrastructure/db/deliveries-repository.js";
+import { countFeedback, type FeedbackCounts } from "./infrastructure/db/feedback-repository.js";
 import {
   listMatchCandidates,
   type MatchCandidates,
@@ -111,6 +112,7 @@ import {
   type RestoreResult,
   type ToolOptions,
 } from "./operations/backup.js";
+import { buildFeedbackReport } from "./operations/feedback-report.js";
 import { sendHeartbeat, type HeartbeatResult } from "./operations/heartbeat.js";
 import {
   BACKUP_STALE_AFTER_MS,
@@ -211,6 +213,12 @@ export interface CliDatabase {
    */
   backup?(dir: string, now: Date, options: ToolOptions): Promise<BackupResult>;
   restore?(file: string, options: ToolOptions): Promise<RestoreResult>;
+  /**
+   * The customers' ratings counted per profile and per CPV codes
+   * (`feedback:report`, PR-12). Optional only so that stubs for the other
+   * commands need not provide it.
+   */
+  countFeedback?(since: string | null): Promise<FeedbackCounts>;
 }
 
 /** What commands that read sources need; injected so tests run without the network. */
@@ -375,6 +383,7 @@ export function openCliDatabase(
     collectStatus: (now) => collectStatus(db, now),
     backup: (dir, now, toolOptions) => backupDatabase(db, databaseUrl, dir, now, toolOptions),
     restore: (file, toolOptions) => restoreDatabase(db, databaseUrl, file, toolOptions),
+    countFeedback: (since) => countFeedback(db, since),
   };
 }
 
@@ -470,7 +479,9 @@ Commands:
                         sent or written to the outbox
             --profile   only this profile (also when it has nothing new)
             With PUBLIC_BASE_URL set, every e-mail also carries a single-use login link
-            ("Twój profil", 7 days) and a one-click unsubscribe link (RFC 8058, 60 days).
+            ("Twój profil", 7 days), a one-click unsubscribe link (RFC 8058, 60 days) and
+            under every offer the rating links "Trafne"/"Nietrafne" (one multi-use link
+            token per e-mail, 60 days).
   deliveries:pending
             Print the deliveries waiting for an operator decision (status pending: a send
             with an unknown outcome or a run stopped between claim and send) as JSON, per
@@ -499,7 +510,7 @@ Commands:
             to the profile's owner. Requires PUBLIC_BASE_URL. Exit 1 when the profile
             does not exist.
   access:revoke <profileId>
-            End every login and unsubscribe link and every session of the profile at once
+            End every login, unsubscribe and rating link and every session of the profile at once
             (e.g. after a forwarded e-mail or a lost device) and print the counts as JSON.
             The profile and its notifications stay as they are; a new link comes from
             access:link or the next digest. Requires an up-to-date schema (migrate). Exit 1
@@ -521,6 +532,14 @@ Commands:
                       timestamps and counts only) to OPERATOR_EMAIL over EMAIL_MODE (test:
                       the outbox); exit 1 also when it cannot be sent. An unexpected error
                       of status itself is alerted as status_internal_error (no details).
+  feedback:report [--since YYYY-MM-DD]
+            Print the customers' ratings of offers ("Trafne"/"Nietrafne", from the e-mails
+            and the web list) as one JSON line: the counts and the precision (the relevant
+            share, null without ratings) in total, per profile (by id) and per category of
+            the rated offers (by their CPV codes; null: none of the categories). Ids,
+            categories and counts only, never addresses or titles. Read-only. Requires an
+            up-to-date schema (migrate).
+            --since  only ratings last set on or after this day (Poland's time)
   backup <dir>
             Dump the database schema (pg_dump >= 16, custom format, no owners or
             privileges) into a new file <dir>/radar-<UTC time>.dump readable by the owner
@@ -548,6 +567,7 @@ type Command =
   | "access:link"
   | "access:revoke"
   | "status"
+  | "feedback:report"
   | "backup"
   | "restore";
 const commands: readonly Command[] = [
@@ -565,6 +585,7 @@ const commands: readonly Command[] = [
   "access:link",
   "access:revoke",
   "status",
+  "feedback:report",
   "backup",
   "restore",
 ];
@@ -621,6 +642,7 @@ type Invocation =
   | { readonly command: "digest"; readonly digest: DigestArgs }
   | { readonly command: "deliveries:resolve"; readonly resolve: ResolveArgs }
   | { readonly command: "status"; readonly notify: boolean }
+  | { readonly command: "feedback:report"; readonly since: string | null }
   | { readonly command: "backup"; readonly dir: string }
   | { readonly command: "restore"; readonly file: string };
 
@@ -822,6 +844,27 @@ function parseResolveArgs(args: readonly string[]): ResolveArgs | string {
   return { profileId, outcome, digestDate };
 }
 
+/**
+ * `feedback:report [--since YYYY-MM-DD]`: the day (null: every rating) or a
+ * usage error message.
+ */
+function parseFeedbackReportArgs(
+  args: readonly string[],
+): { readonly since: string | null } | string {
+  let since: string | null = null;
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index] ?? "";
+    if (arg !== "--since") return `Unexpected argument: ${JSON.stringify(arg)}`;
+    if (since !== null) return "Option --since given twice.";
+    const value = args[index + 1];
+    if (value === undefined) return "Option --since needs a value.";
+    if (!isCalendarDate(value)) return "--since must be a calendar date YYYY-MM-DD.";
+    since = value;
+    index++;
+  }
+  return { since };
+}
+
 /** Returns the invocation or a usage error message. */
 function parseInvocation(
   command: Command,
@@ -870,6 +913,10 @@ function parseInvocation(
     }
     if (extra.length > 0) return `Unexpected argument: ${JSON.stringify(extra[0])}`;
     return { command, notify: option === "--notify" };
+  }
+  if (command === "feedback:report") {
+    const report = parseFeedbackReportArgs(rest);
+    return typeof report === "string" ? report : { command, since: report.since };
   }
   if (command === "backup" || command === "restore") {
     const [path, ...extra] = rest;
@@ -1024,6 +1071,8 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
         );
       case "deliveries:pending":
         return await runDeliveriesPending(database, io);
+      case "feedback:report":
+        return await runFeedbackReport(invocation.since, database, io);
       case "deliveries:resolve":
         return await runDeliveriesResolve(invocation.resolve, database, io);
       case "serve":
@@ -1616,6 +1665,35 @@ async function runDeliveriesPending(database: CliDatabase, io: CliIo): Promise<E
   io.stdout(
     `${JSON.stringify({ status: "ok", pending: pending.groups, truncated: pending.truncated })}\n`,
   );
+  return ExitCode.Ok;
+}
+
+/**
+ * `feedback:report` (PR-12, D-032): the ratings counted in total, per profile
+ * and per category, as one JSON line (ids, categories and counts — never
+ * addresses or titles). Read-only, no lock.
+ */
+async function runFeedbackReport(
+  since: string | null,
+  database: CliDatabase,
+  io: CliIo,
+): Promise<ExitCode> {
+  if (database.countFeedback === undefined) throw new Error("database cannot count feedback");
+  let counts: FeedbackCounts;
+  try {
+    const notReady = await schemaNotReady(database);
+    if (notReady !== null) {
+      io.stderr(`Cannot report feedback: ${notReady}.\n`);
+      return ExitCode.Failure;
+    }
+    counts = await database.countFeedback(since);
+  } catch (error: unknown) {
+    const failure = describeDatabaseFailure(error);
+    if (failure.reason === "unknown") throw error;
+    io.stderr(`Cannot report feedback: database ${formatDatabaseFailure(failure)}\n`);
+    return ExitCode.Failure;
+  }
+  io.stdout(`${JSON.stringify({ status: "ok", ...buildFeedbackReport(counts, since) })}\n`);
   return ExitCode.Ok;
 }
 
