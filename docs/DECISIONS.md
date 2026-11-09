@@ -833,7 +833,12 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     token tekstu pasuje do tokenu
     słowa kluczowego, gdy jest równy albo — dla tokenu słowa kluczowego o długości ≥ 4 —
     zaczyna się od tematu = token bez jednej końcowej samogłoski (`aeiouy`, po
-    `comparableText`). Tokeny krótsze niż 4 („bhp”, „it”, „gaz”) i tokeny bez litery
+    `comparableText`). Token słowa kluczowego o długości ≥ 6 kończący się na „nie”/„cie” (po
+    `comparableText`) pasuje też do tokenu tekstu równego mu bez końcowego „ie” — dopełniacz
+    liczby mnogiej „-eń”/„-ęć”, w którym znika ostatnia samogłoska tematu: „szkolenie” →
+    „szkoleń”, „oświetlenie” → „oświetleń”, „sprzątanie” → „sprzątań”, „zajęcie” → „zajęć”.
+    Tylko równość, nigdy prefiks: jako prefiks „malowan” łapałby też imiesłów „malowane”, a
+    „zarzadzan” — „zarządzanego”. Tokeny krótsze niż 4 („bhp”, „it”, „gaz”) i tokeny bez litery
     (liczby: „2024” ≠ „20245”) — tylko równe. Wykluczenia — ta sama reguła. Słowa o tym samym
     ciągu tokenów („Oświetlenie”, „oswietlenie”) liczą się raz, w kolejności profilu; tak
     samo słowo bez własnego dowodu: każde liczone słowo dostaje trafienie (ciąg tokenów tekstu),
@@ -849,7 +854,16 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     rozpoznawany („kabel” ≠ „kable”/„kabli”, „żłobek” ≠ „żłobka”, „węgiel” ≠ „węgla”);
     temat może zaczynać inne słowo („sala” → „salon”, „lampa” → „lampart”) — dotyczy to też
     słów wykluczających, gdzie skutkiem jest cichy brak alertu (wykluczenie „auto” usuwa
-    też „Automatyka budynkowa”). **Koszt:** tokeny tekstu × tokeny słowa na każde słowo,
+    też „Automatyka budynkowa”); dopełniacz liczby mnogiej powstaje tylko z formy „-nie”/„-cie”
+    samego słowa kluczowego — słowo „szkolenia” nie pasuje do „szkoleń”, a „danie” (5 znaków)
+    do „dań”; rzeczowniki na „-cie”, których bezokolicznik ma tę samą postać co dopełniacz
+    liczby mnogiej (np. „-ycie”, „-icie”, „-ucie”, „-ście”: pokrycie/pokryć, zatrucie/zatruć,
+    przejście/przejść, szycie/szyć), pasują też do bezokolicznika — „pokrycie” do „pokryć
+    (koszty)”, „przejście” do „przejść (weryfikację)”. Dla słowa kluczowego to wąskie, pokrewne
+    nadmiarowe dopasowanie, akceptowane; dla słowa wykluczającego (np. „pokrycie”,
+    „przejście”) opis z „pokryć koszty” albo „przejść weryfikację” po cichu usuwa trafną
+    ofertę — ten sam cichy brak alertu co przy tematach wyżej — więc takich słów jako
+    wykluczeń używać ostrożnie. **Koszt:** tokeny tekstu × tokeny słowa na każde słowo,
     ograniczone schematami (tytuł ≤ 1 000, opis ≤ 10 000 znaków, słowo ≤ 100 znaków i ≤ 10
     tokenów, ≤ 100 słów kluczowych i ≤ 100 wykluczających). Bez wzorców z nawrotami, więc
     tekst ze źródła sam niczego nie wydłuża; najgorszy przypadek wymaga też spreparowanego
@@ -1107,18 +1121,24 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     identyfikatory, daty i liczby, bez adresów i tytułów; bez blokady (sam odczyt). Operator
     sprawdza log serwera SMTP / skrzynkę wysłanych (tryb `test`: `EMAIL_OUTBOX_DIR`) dla
     profilu i daty, potem `deliveries:resolve <profileId> --sent|--failed [--date
-YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
+YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
     `attempts + 1`, `error_code` pusty; `--failed` (nie doręczono) → wiersze usunięte, więc
-    kolejny digest wyśle te oferty jak nowe, jeśli nadal się kwalifikują (7 dni, termin).
-    Zmieniane są wyłącznie wiersze `pending` wskazanego profilu (wszystkich transportów, jak
-    dawny SQL) i — z `--date` — tego dnia; jedna transakcja, która najpierw bierze bez
+    kolejny digest tym samym transportem wyśle te oferty jak nowe, jeśli nadal się kwalifikują
+    (warunki kandydata: RUNBOOK → „Wysyłki niepewne”).
+    Zmieniane są wyłącznie wiersze `pending` wskazanego profilu w jednym transporcie i — z
+    `--date` — tego dnia. Transport: `--transport`, domyślnie transport bieżącego `EMAIL_MODE`
+    (jak `digest`); czytane jest samo `EMAIL_MODE` (`loadEmailMode`, ten sam schemat), bez
+    `EMAIL_FROM`/`SMTP_URL`, błędne → kod 1 przed otwarciem bazy. (Przegląd właściciela PR-09:
+    wcześniej wszystkich transportów, jak dawny SQL — wiersze innego transportu to osobne
+    doręczenia, a decyzja dotyczy jednego z nich.) Jedna transakcja, która najpierw bierze bez
     czekania blokadę digestu (`pg_try_advisory_xact_lock(DIGEST_LOCK_KEY)`, zwalniana przy
     zatwierdzeniu): trwający `digest` (jego zarezerwowane wiersze są `pending` do zapisu
     wyniku) albo inne `deliveries:resolve` → odmowa, kod 1, nic nie zmienione („a digest run
     or another deliveries:resolve holds the lock”); `digest` startujący w tej chwili jest
-    pomijany (`skipped`) — RUNBOOK: nie uruchamiać o minucie crona `digest`. Brak pasujących wierszy `pending` → kod 1, nic nie zmienione.
-    Wynik: `{"status":"ok","outcome",…,"digestDate",…,"changed":N}`. Oba przełączniki, żaden,
-    powtórzony, zły uuid lub data → kod 2 (błąd wywołania jak w pozostałych komendach,
+    pomijany (`skipped`) — RUNBOOK: nie uruchamiać o minucie crona `digest`. Brak pasujących wierszy `pending` → kod 1, nic nie zmienione; komunikat podaje transport (wiersze drugiego mogą nadal czekać, np. po zmianie `EMAIL_MODE`).
+    Wynik: `{"status":"ok","outcome",…,"transport",…,"digestDate",…,"changed":N}`. Oba
+    przełączniki, żaden, powtórzony, zły uuid lub data, `--transport` powtórzony, bez wartości
+    lub inny niż `test`/`smtp` → kod 2 (błąd wywołania jak w pozostałych komendach,
     sprawdzany przed konfiguracją i bez otwierania bazy). Bez decyzji operatora oferty nie
     trafią do tego profilu, a profil z dzisiejszym `pending` nic dziś nie dostanie.
   - **Treść** (`buildDigest`, czyste, `src/notifications/digest.ts`; D-013 — po polsku): temat

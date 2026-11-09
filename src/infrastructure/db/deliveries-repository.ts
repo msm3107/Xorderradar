@@ -230,7 +230,9 @@ export async function listPendingDeliveries(db: Kysely<Database>): Promise<Pendi
 
 export interface ResolveRequest {
   readonly profileId: string;
-  /** `YYYY-MM-DD`; null: every pending row of the profile. */
+  /** Only rows of this transport change: the other transport's e-mails are separate deliveries. */
+  readonly transport: DeliveryTransport;
+  /** `YYYY-MM-DD`; null: every pending row of the profile and transport. */
   readonly digestDate: string | null;
   /**
    * `sent`: the e-mail arrived — the rows become `sent` (`sent_at` now,
@@ -248,8 +250,8 @@ export type ResolveResult =
 
 /**
  * The operator's decision on pending deliveries (`deliveries:resolve`,
- * D-024) in one transaction: only rows still `pending` of the profile (and
- * day) change. The digest lock is taken first without waiting
+ * D-024) in one transaction: only rows still `pending` of the profile and
+ * transport (and day) change. The digest lock is taken first without waiting
  * (`pg_try_advisory_xact_lock`, released at commit/rollback): while a digest
  * holds it — its claimed rows are `pending` until it records the outcome —
  * nothing changes (`lock_busy`, also while another resolve holds it); and
@@ -273,6 +275,7 @@ export async function resolvePendingDeliveries(
             .set({ status: "sent", sent_at: sql<Date>`now()`, error_code: null })
             .set((eb) => ({ attempts: eb("attempts", "+", 1) }))
             .where("profile_id", "=", request.profileId)
+            .where("transport", "=", request.transport)
             .where("status", "=", "pending")
             .$if(day !== null, (qb) => qb.where("digest_date", "=", sql<Date>`${day}::date`))
             .returning("id")
@@ -280,6 +283,7 @@ export async function resolvePendingDeliveries(
         : await trx
             .deleteFrom("deliveries")
             .where("profile_id", "=", request.profileId)
+            .where("transport", "=", request.transport)
             .where("status", "=", "pending")
             .$if(day !== null, (qb) => qb.where("digest_date", "=", sql<Date>`${day}::date`))
             .returning("id")

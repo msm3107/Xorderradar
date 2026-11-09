@@ -769,13 +769,13 @@ describe.skipIf(skipWithoutDatabase)("digest (PostgreSQL)", () => {
 
   describe("operator decision on pending deliveries (PR-09, D-024)", () => {
     /** Runs `deliveries:pending` or `deliveries:resolve` against the test schema. */
-    async function operator(args: string[]) {
+    async function operator(args: string[], env: Record<string, string> = {}) {
       let stdout = "";
       let stderr = "";
       const code = await runCli(
         args,
         {
-          env: { NODE_ENV: "test", DATABASE_URL: schema.url },
+          env: { NODE_ENV: "test", DATABASE_URL: schema.url, ...env },
           stdout: (text) => (stdout += text),
           stderr: (text) => (stderr += text),
         },
@@ -883,6 +883,7 @@ describe.skipIf(skipWithoutDatabase)("digest (PostgreSQL)", () => {
       expect(JSON.parse(result.stdout)).toEqual({
         status: "ok",
         outcome: "sent",
+        transport: "test",
         digestDate: "2026-10-31",
         changed: 2,
       });
@@ -933,6 +934,73 @@ describe.skipIf(skipWithoutDatabase)("digest (PostgreSQL)", () => {
       expect(left.filter((row) => row.status === "pending")).toHaveLength(1);
     });
 
+    it("changes only the chosen transport's rows: EMAIL_MODE's by default, else --transport", async () => {
+      const { other, offers } = await seed();
+      // The profile's pending smtp rows: separate deliveries of the same offers.
+      for (const [offer, day] of [
+        [offers[0], "2026-10-31"],
+        [offers[2], "2026-11-01"],
+      ] as const) {
+        await sql`
+          INSERT INTO deliveries (profile_id, opportunity_id, transport, digest_date, status)
+          VALUES (${profile.id}, ${offer ?? ""}, 'smtp', ${day}::date, 'pending')
+        `.execute(schema.db);
+      }
+      const pendingOf = async (profileId: string, transport: "test" | "smtp") =>
+        (
+          await schema.db
+            .selectFrom("deliveries")
+            .select("opportunity_id")
+            .where("profile_id", "=", profileId)
+            .where("transport", "=", transport)
+            .where("status", "=", "pending")
+            .execute()
+        )
+          .map((row) => row.opportunity_id)
+          .sort();
+      const testRows = [offers[0], offers[1], offers[2]].sort();
+
+      // EMAIL_MODE=smtp without EMAIL_FROM/SMTP_URL: the smtp row of that day only.
+      const smtpDay = await operator(
+        ["deliveries:resolve", profile.id, "--failed", "--date", "2026-10-31"],
+        { EMAIL_MODE: "smtp" },
+      );
+      expect(smtpDay.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(smtpDay.stdout)).toEqual({
+        status: "ok",
+        outcome: "failed",
+        transport: "smtp",
+        digestDate: "2026-10-31",
+        changed: 1,
+      });
+      expect(await pendingOf(profile.id, "smtp")).toEqual([offers[2]]);
+      expect(await pendingOf(profile.id, "test")).toEqual(testRows);
+
+      // EMAIL_MODE unset (test): the three test rows; the smtp row is left.
+      const byDefault = await operator(["deliveries:resolve", profile.id, "--sent"]);
+      expect(byDefault.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(byDefault.stdout)).toMatchObject({ transport: "test", changed: 3 });
+      expect(await pendingOf(profile.id, "test")).toEqual([]);
+      expect(await pendingOf(profile.id, "smtp")).toEqual([offers[2]]);
+
+      // --transport overrides EMAIL_MODE.
+      const flag = await operator(
+        ["deliveries:resolve", profile.id, "--sent", "--transport", "smtp"],
+        { EMAIL_MODE: "test" },
+      );
+      expect(flag.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(flag.stdout)).toMatchObject({ transport: "smtp", changed: 1 });
+      expect(await pendingOf(profile.id, "smtp")).toEqual([]);
+      const smtpRows = await schema.db
+        .selectFrom("deliveries")
+        .select(["opportunity_id", "status", "attempts"])
+        .where("transport", "=", "smtp")
+        .execute();
+      expect(smtpRows).toEqual([{ opportunity_id: offers[2], status: "sent", attempts: 1 }]);
+      // The other profile's row: untouched throughout.
+      expect(await pendingOf(other.id, "test")).toEqual([offers[0]]);
+    });
+
     it("exits 1 and changes nothing when no pending row matches", async () => {
       await seed();
       const before = await rows();
@@ -945,7 +1013,10 @@ describe.skipIf(skipWithoutDatabase)("digest (PostgreSQL)", () => {
       ]);
       expect(noDay.code).toBe(ExitCode.Failure);
       expect(noDay.stdout).toBe("");
-      expect(noDay.stderr).toContain("no pending deliveries of that day");
+      expect(noDay.stderr).toBe(
+        "Deliveries not resolved: the profile has no pending deliveries of that day over " +
+          'transport "test"; nothing was changed.\n',
+      );
       const unknown = await operator([
         "deliveries:resolve",
         "00000000-0000-4000-8000-00000000dead",
