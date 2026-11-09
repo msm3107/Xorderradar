@@ -3,7 +3,7 @@ import type { CompanyProfile } from "../src/domain/company-profile.js";
 import type { Opportunity } from "../src/domain/opportunity.js";
 import { MVP_CATEGORIES, VOIVODESHIPS } from "../src/domain/vocabulary.js";
 import { matchOpportunity } from "../src/matching/match.js";
-import { digestItemView } from "../src/notifications/digest.js";
+import { offerCard } from "../src/notifications/card.js";
 import {
   errorPage,
   invalidLinkPage,
@@ -198,6 +198,9 @@ describe("matchesPage", () => {
     updatedAt: new Date("2026-10-01T08:00:00.000Z"),
   };
   const reasons = matchOpportunity(offer, profile).reasons;
+  /** The render time: the deadline (5 November 12:00 in Poland) is 4 days away. */
+  const NOW = new Date("2026-11-01T06:00:00.000Z");
+  const cardOf = (value: Opportunity) => offerCard({ offer: value, reasons }, NOW);
 
   function view(overrides: Partial<MatchesView> = {}): MatchesView {
     return {
@@ -206,31 +209,32 @@ describe("matchesPage", () => {
       hasCounties: false,
       stateAt: "2026-11-02 07:00",
       windowDays: 7,
-      items: [digestItemView({ offer, reasons })],
+      items: [cardOf(offer)],
       more: 0,
       truncated: false,
       ...overrides,
     };
   }
 
-  it("shows each offer's title, buyer, location, deadline, publication date, reasons and source", () => {
+  it("shows each offer's title, value, deadline, buyer, location, publication date, reasons and source", () => {
     const page = matchesPage(view());
     expect(page.status).toBe(200);
     const { html } = page;
     expect(html).not.toMatch(NO_SCRIPT);
     expect(html).toContain('<ol class="matches"><li><article><h2>Modernizacja oświetlenia</h2>');
     for (const field of [
+      "<dt>Wartość szacunkowa:</dt><dd>nie podano</dd>",
+      "<dt>Termin składania ofert:</dt><dd>05.11.2026 (czw) 12:00 — za 4 dni</dd>",
       "<dt>Zamawiający:</dt><dd>Gmina Przykładowa</dd>",
       "<dt>Lokalizacja:</dt><dd>Przykładowo, woj. mazowieckie</dd>",
-      "<dt>Termin składania ofert:</dt><dd>2026-11-05 12:00 (czas polski)</dd>",
-      "<dt>Data publikacji:</dt><dd>2026-10-30</dd>",
-      "<dt>Dlaczego pasuje:</dt><dd>",
+      "<dt>Data publikacji:</dt><dd>30.10.2026</dd>",
+      "<dt>Dlaczego pasuje:</dt><dd>Elektryka · słowo „oświetlenie” w tytule · mazowieckie</dd>",
     ]) {
       expect(html).toContain(field);
     }
     expect(html).toContain(
-      '<a href="https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/id/1" ' +
-        'rel="noopener noreferrer">Otwórz ogłoszenie w źródle (ezamowienia.gov.pl)</a>',
+      '<p><a class="button" href="https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/id/1" ' +
+        'rel="noopener noreferrer">Otwórz ogłoszenie</a></p>',
     );
     expect(html).toContain("ostatnich 7 dni");
     expect(html).toContain("Stan na 2026-11-02 07:00 (czas polski).");
@@ -238,47 +242,74 @@ describe("matchesPage", () => {
     expect(html).toContain('<a href="/profil">Twój profil</a>');
   });
 
-  it("shows a compact card: the essentials at once, the other fields inside <details>", () => {
+  it("shows the card's rows in the digest's order, the button, then the match details", () => {
     const full: Opportunity = {
       ...offer,
+      estimatedValue: "120000.00",
+      currency: "PLN",
       description: "Wymiana opraw <LED> & słupów",
       contact: { name: "Anna Nowak", email: "zamowienia@example.invalid" },
     };
-    const { html } = matchesPage(view({ items: [digestItemView({ offer: full, reasons })] }));
+    const { html } = matchesPage(view({ items: [cardOf(full)] }));
     expect(html).not.toMatch(NO_SCRIPT);
     const card = /<li><article>(.*?)<\/article><\/li>/s.exec(html)?.[1] ?? "";
-    expect(card.match(/<details>/g)).toHaveLength(1);
-    const [visible = "", folded = ""] = card.split("<details>");
+    expect(card).toBe(
+      "<h2>Modernizacja oświetlenia</h2><dl>" +
+        "<dt>Wartość szacunkowa:</dt><dd>120\u00a0000,00 PLN (źródło nie podaje, netto czy brutto)</dd>" +
+        "<dt>Termin składania ofert:</dt><dd>05.11.2026 (czw) 12:00 — za 4 dni</dd>" +
+        "<dt>Zamawiający:</dt><dd>Gmina Przykładowa</dd>" +
+        "<dt>Lokalizacja:</dt><dd>Przykładowo, woj. mazowieckie</dd>" +
+        "<dt>Data publikacji:</dt><dd>30.10.2026</dd>" +
+        "<dt>Kontakt:</dt><dd>Anna Nowak, zamowienia@example.invalid</dd>" +
+        "<dt>Dlaczego pasuje:</dt><dd>Elektryka · słowo „oświetlenie” w tytule · mazowieckie</dd>" +
+        "<dt>Opis:</dt><dd>Wymiana opraw &lt;LED&gt; &amp; słupów</dd></dl>" +
+        '<p><a class="button" href="https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/id/1" ' +
+        'rel="noopener noreferrer">Otwórz ogłoszenie</a></p>' +
+        "<details><summary>Szczegóły dopasowania</summary><ul><li>CPV: 45310000-3</li></ul></details>",
+    );
+  });
 
-    // At once: title, buyer, location, deadline, reasons, source link, in this order.
-    const essentials = [
-      "<h2>Modernizacja oświetlenia</h2><dl>",
-      "<dt>Zamawiający:</dt><dd>Gmina Przykładowa</dd>",
-      "<dt>Lokalizacja:</dt><dd>Przykładowo, woj. mazowieckie</dd>",
-      "<dt>Termin składania ofert:</dt><dd>2026-11-05 12:00 (czas polski)</dd>",
-      "<dt>Dlaczego pasuje:</dt><dd>",
-      '<dt>Link:</dt><dd><a href="https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/id/1" ' +
-        'rel="noopener noreferrer">Otwórz ogłoszenie w źródle (ezamowienia.gov.pl)</a></dd></dl>',
-    ];
-    const positions = essentials.map((part) => visible.indexOf(part));
-    expect(positions.every((position) => position !== -1)).toBe(true);
-    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+  it("marks an urgent deadline with the visible word PILNE", () => {
+    const tomorrow: Opportunity = { ...offer, deadline: new Date("2026-11-02T09:00:00.000Z") };
+    const { html } = matchesPage(view({ items: [cardOf(tomorrow)] }));
+    expect(html).toContain(
+      '<dt>Termin składania ofert:</dt><dd><strong class="pilne">PILNE</strong> ' +
+        "02.11.2026 (pn) 10:00 — jutro</dd>",
+    );
+    expect(matchesPage(view()).html).not.toContain("PILNE");
+  });
 
-    // Folded: everything else, escaped, behind a native disclosure (no script).
-    expect(folded.startsWith("<summary>Szczegóły ogłoszenia</summary><dl>")).toBe(true);
-    expect(folded.endsWith("</dl></details>")).toBe(true);
-    expect(
-      folded.startsWith("<summary>Szczegóły ogłoszenia</summary><dl><dt>Data publikacji:"),
-    ).toBe(true);
-    for (const field of [
-      "<dt>Data publikacji:</dt><dd>2026-10-30</dd>",
-      "<dt>Kategoria:</dt><dd>",
-      "<dt>Opis:</dt><dd>Wymiana opraw &lt;LED&gt; &amp; słupów</dd>",
-      "<dt>Kontakt:</dt><dd>Anna Nowak, zamowienia@example.invalid</dd>",
-    ]) {
-      expect(folded).toContain(field);
-      expect(visible).not.toContain(field.slice(0, field.indexOf("</dt>")));
-    }
+  it("shows a long description's excerpt and the whole text inside <details>", () => {
+    const words = Array.from({ length: 80 }, (_, index) => `słowo${String(index)}`).join(" ");
+    const long: Opportunity = { ...offer, description: `${words} <b>` };
+    const { html } = matchesPage(view({ items: [cardOf(long)] }));
+    expect(html).not.toMatch(NO_SCRIPT);
+    const opis = /<dt>Opis:<\/dt><dd>(.*?)<\/dd>/s.exec(html)?.[1] ?? "";
+    const [excerpt = "", folded = ""] = opis.split("<details>");
+    expect(excerpt.endsWith("…")).toBe(true);
+    expect(words.startsWith(excerpt.slice(0, -1))).toBe(true);
+    expect(folded).toBe(`<summary>Pełny opis</summary><p>${words} &lt;b&gt;</p></details>`);
+    // A short one has nothing to unfold.
+    expect(matchesPage(view()).html).not.toContain("Pełny opis");
+  });
+
+  it("puts the technical reasons in the match details, not in the sentence", () => {
+    const unknownRegion: Opportunity = { ...offer, location: { city: "Wzorowo" } };
+    const value = { ...unknownRegion };
+    const { html } = matchesPage(
+      view({
+        items: [
+          offerCard({ offer: value, reasons: matchOpportunity(value, profile).reasons }, NOW),
+        ],
+      }),
+    );
+    expect(html).toContain(
+      "<dt>Dlaczego pasuje:</dt><dd>Elektryka · słowo „oświetlenie” w tytule</dd>",
+    );
+    expect(html).toContain(
+      "<details><summary>Szczegóły dopasowania</summary><ul><li>CPV: 45310000-3</li>" +
+        "<li>region: nieznany — źródło nie podaje województwa</li></ul></details>",
+    );
   });
 
   it("shows a Baza Konkurencyjności offer's attribution in the visible part, before the link", () => {
@@ -288,31 +319,29 @@ describe("matchesPage", () => {
       sourceUrl: "https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl/ogloszenia/296920",
       externalId: "296920",
     };
-    const { html } = matchesPage(view({ items: [digestItemView({ offer: bk, reasons })] }));
+    const { html } = matchesPage(view({ items: [cardOf(bk)] }));
     const [visible = "", folded = ""] = html.split("<details>");
     expect(visible).toContain(
       "<dt>Źródło:</dt><dd>Baza Konkurencyjności, Ministerstwo Funduszy i Polityki Regionalnej; " +
-        "pobrano 2026-10-30; dane przetworzone: skrócone i ujednolicone</dd>" +
-        '<dt>Link:</dt><dd><a href="https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl/ogloszenia/296920" ' +
-        'rel="noopener noreferrer">Otwórz ogłoszenie w źródle ' +
-        "(bazakonkurencyjnosci.funduszeeuropejskie.gov.pl)</a></dd></dl>",
+        "pobrano 2026-10-30; dane przetworzone: skrócone i ujednolicone</dd></dl>" +
+        '<p><a class="button" href="https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl/ogloszenia/296920" ' +
+        'rel="noopener noreferrer">Otwórz ogłoszenie</a></p>',
     );
     expect(folded).not.toContain("Źródło");
     // A BZP card has none.
     expect(matchesPage(view()).html).not.toContain("<dt>Źródło:</dt>");
   });
 
-  it("leaves a missing description and contact out of the details, as before", () => {
+  it("leaves a missing description and contact out of the card, as before", () => {
     const { html } = matchesPage(view());
-    const folded = html.split("<details>")[1] ?? "";
-    expect(folded).toContain("<dt>Data publikacji:</dt>");
+    expect(html).toContain("<dt>Data publikacji:</dt>");
     expect(html).not.toContain("<dt>Opis:</dt>");
     expect(html).not.toContain("<dt>Kontakt:</dt>");
   });
 
   it("shows a missing location as not given, in the visible part", () => {
     const nowhere: Opportunity = { ...offer, location: null };
-    const { html } = matchesPage(view({ items: [digestItemView({ offer: nowhere, reasons })] }));
+    const { html } = matchesPage(view({ items: [cardOf(nowhere)] }));
     const [visible = "", folded = ""] = html.split("<details>");
     expect(visible).toContain(
       "<dt>Zamawiający:</dt><dd>Gmina Przykładowa</dd><dt>Lokalizacja:</dt><dd>nie podano</dd>",
@@ -327,20 +356,18 @@ describe("matchesPage", () => {
       issuerName: "<b>Gmina</b>",
       sourceUrl: "javascript:alert(1)",
     };
-    const { html } = matchesPage(view({ items: [digestItemView({ offer: hostile, reasons })] }));
+    const { html } = matchesPage(view({ items: [cardOf(hostile)] }));
     expect(html).not.toMatch(NO_MARKUP_FROM_DATA);
     expect(html).not.toContain("<img");
     expect(html).toContain(
       "<h2>&lt;img src=x onerror=&quot;alert(1)&quot;&gt;&quot;&amp;&#39;</h2>",
     );
     expect(html).toContain("<dd>&lt;b&gt;Gmina&lt;/b&gt;</dd>");
-    expect(html).toContain("<dt>Link:</dt><dd>nie podano</dd>");
-    expect(html).not.toContain("w źródle (");
+    expect(html).toContain("<dt>Link:</dt><dd>nie podano</dd></dl>");
+    expect(html).not.toContain('class="button"');
 
     const quoted = { ...offer, sourceUrl: 'https://example.invalid/a?b="><script>' };
-    const quotedHtml = matchesPage(
-      view({ items: [digestItemView({ offer: quoted, reasons })] }),
-    ).html;
+    const quotedHtml = matchesPage(view({ items: [cardOf(quoted)] })).html;
     expect(quotedHtml).not.toMatch(NO_MARKUP_FROM_DATA);
     // The URL parser percent-encodes the quote and brackets; escaping is the second line.
     expect(quotedHtml).toContain('href="https://example.invalid/a?b=%22%3E%3Cscript%3E"');

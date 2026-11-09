@@ -316,6 +316,21 @@ Nieoczekiwany błąd wewnętrzny kończy komendę kodem `1` ze stałym komunikat
   link `https`, wyżej).
 - Nakładające się uruchomienia są bezpieczne: drugie kończy się
   `{"status":"skipped","reason":"lock_busy",…}`, komunikatem `Digest skipped: …` i kodem `0`.
+- **Karta oferty (PR-11, `src/notifications/card.ts`):** jedna czysta funkcja `offerCard`
+  dla tekstu i HTML e-maila, `/dopasowania` i `/przyklad`. Wiersze po kolei: tytuł,
+  „Wartość szacunkowa: 120 000,00 PLN (źródło nie podaje, netto czy brutto)” (brak →
+  „nie podano”, nigdy 0; D-030), „Termin składania ofert: 18.11.2026 (śr) 10:00 — za 12 dni”
+  (czas polski; „dziś”, „jutro”, „za N dni”, „minął”; 0–2 dni → przedrostek „PILNE”; brak →
+  „nie podano”), zamawiający, lokalizacja, data publikacji (DD.MM.RRRR), kontakt (gdy jest),
+  „Dlaczego pasuje” jednym zdaniem („Elektryka · słowo „oświetlenie” w tytule ·
+  mazowieckie”), opis (wyciąg do ok. 300 znaków, ucięty na granicy słowa, „…” tylko po
+  ucięciu; e-mail ma sam wyciąg), źródło (tylko oferty Bazy Konkurencyjności — atrybucja
+  wymagana regulaminem, D-030) i przycisk „Otwórz ogłoszenie” (tekst e-maila: „Link: …”).
+  Kody CPV i powody techniczne (np. nieznany region) — w „Szczegółach dopasowania” (ostatnia
+  linia karty w e-mailu). Dni liczy chwila przebiegu digestu (strona: chwila żądania).
+  **Temat:** „Radar Zamówień: 3 nowe, najbliższy termin 18.11” (1 nowe, 2–4 nowe, 5+ nowych
+  z polską odmianą; najbliższy termin nieminiony, bez niego samo „Radar Zamówień: 3 nowe”),
+  bez nazwy firmy i bez danych źródła.
 - **Termin:** „po terminie” liczy się z zapisanego terminu. Dla małych zamówień BZP i dni
   niepobranych w kolejności termin może być nieaktualny (przedłużenie nie dotarło) — taki
   przetarg może zostać pominięty. Odwołania postępowań (ogłoszenia BZP o unieważnieniu /
@@ -337,7 +352,11 @@ PUBLIC_BASE_URL=https://radar.example.invalid node dist/main.js serve
 
 - **Strona główna (PR-10):** `/` mówi, czym jest serwis, skąd ma dane (BZP i Baza
   Konkurencyjności) i jak zacząć (przez operatora), ma formularz „Wyślij mi link”, link do
-  `/przyklad` (przykładowy digest ze stałych, pseudonimizowanych danych w kodzie, bez bazy) i
+  `/przyklad` (przykładowe zestawienie z pseudonimizowanych danych w kodzie, bez bazy; daty
+  liczone od chwili wyświetlenia; na jednej stronie najważniejsze stany karty oferty: wartość
+  podana i „nie podano”, termin za kilka dni, jutro z „PILNE” i „nie podano”, opis ucięty,
+  krótki i brak opisu, nieznany region, kod CPV spoza listy kategorii, oferty BZP i Bazy
+  Konkurencyjności) i
   kontakt z `CONTACT_EMAIL` (bez tej zmiennej kontakt nie jest pokazywany).
 - **Dostęp:** klient loguje się linkiem z e-maila (`/dostep/<token>` → przycisk „Zaloguj
   się”; samo otwarcie linku, np. przez skaner poczty, go nie zużywa; link działa raz) albo
@@ -367,9 +386,11 @@ PUBLIC_BASE_URL=https://radar.example.invalid node dist/main.js serve
   - `/dopasowania` — oferty, które pasują do profilu teraz, tymi samymi regułami co digest
     (pierwszy zapis w ostatnich 7 dniach, bez ofert po terminie), najbliższy termin pierwszy,
     najwyżej 50, z powodami dopasowania i linkiem do źródła. Pokazuje też oferty już
-    wysłane e-mailem. Karta oferty pokazuje od razu zamawiającego, lokalizację, termin, powody,
-    źródło (tylko oferty Bazy Konkurencyjności — atrybucja wymagana regulaminem, D-030; tak
-    samo w e-mailu) i link; reszta pól pod „Szczegóły ogłoszenia”.
+    wysłane e-mailem. Ta sama karta oferty co w e-mailu (niżej, „Karta oferty”); pełny opis
+    pod „Pełny opis”, gdy wyciąg jest skrócony, kody CPV i powody techniczne pod „Szczegóły
+    dopasowania” (natywne `<details>`, bez JavaScriptu). Wygląd: nagłówek i stopka serwisu,
+    jeden kolor akcentu, schemat ciemny (`prefers-color-scheme`), widoczny fokus, przy
+    wąskim ekranie (np. 390 px) etykiety nad wartościami.
 - **Wypis:** `/wypis/<token>` — strona z przyciskiem; POST RFC 8058 z programu pocztowego
   (`multipart/form-data` albo `application/x-www-form-urlencoded`) wypisuje bez logowania i
   odpowiada 200, nigdy przekierowaniem. Ponowny wypis niczego nie zmienia.

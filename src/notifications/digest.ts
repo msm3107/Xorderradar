@@ -1,34 +1,37 @@
 import type { CompanyProfile } from "../domain/company-profile.js";
-import type {
-  Opportunity,
-  OpportunityContact,
-  OpportunityLocation,
-} from "../domain/opportunity.js";
-import { CATEGORY_LABELS } from "../domain/vocabulary.js";
 import { escapeHtml } from "../infrastructure/html.js";
-import { formatReasons } from "../matching/format.js";
-import type { MatchReason } from "../matching/match.js";
-import { ATTRIBUTION_LABEL, BK_SOURCE_ID, bkAttribution } from "../sources/bk/attribution.js";
-import { mvpCategoriesForCpv } from "../sources/normalize/cpv-categories.js";
-import { formatWarsawMinute, warsawDay } from "../sources/normalize/warsaw-time.js";
-import { cleanText } from "../sources/normalize/whitespace.js";
+import { formatWarsawMinute } from "../sources/normalize/warsaw-time.js";
+import {
+  LINK_LABEL,
+  MATCH_DETAILS_LABEL,
+  OPEN_LABEL,
+  URGENT_WORD,
+  formatPolishDayMonth,
+  offerCard,
+  plural,
+  safeLink,
+  snippet,
+  type CardRow,
+  type MatchedOffer,
+  type OfferCard,
+} from "./card.js";
 
 /** Re-exported: the escaping the digest uses (one implementation, src/infrastructure/html.ts). */
 export { escapeHtml };
+/** Re-exported: shared with the web pages and the tests (src/notifications/card.ts). */
+export { plural, snippet, SNIPPET_MAX_CHARS } from "./card.js";
 
 /**
  * The daily digest e-mail (docs/PRODUCT.md "Pojedynczy wynik w alercie",
- * "Digest"; D-024). Pure: no I/O, no clock — `now` is passed in. One model
- * is rendered twice, as plain text and as HTML, so both carry the same
- * content. Only what the source published is shown; a missing value is
- * omitted or "nie podano", never guessed.
+ * "Digest"; D-024). Pure: no I/O, no clock — `now` (the run time) is passed
+ * in. Each offer is the shared card (src/notifications/card.ts, PR-11),
+ * rendered twice, as plain text and as HTML, so both carry the same content
+ * as /dopasowania. Only what the source published is shown; a missing value
+ * is omitted or "nie podano", never guessed.
  */
 
 /** One matched offer and why it matched (matchOpportunity's reasons). */
-export interface DigestItem {
-  readonly offer: Opportunity;
-  readonly reasons: readonly MatchReason[];
-}
+export type DigestItem = MatchedOffer;
 
 export interface DigestOptions {
   /** Matching offers left out of this e-mail by the per-e-mail cap. */
@@ -52,26 +55,19 @@ export interface DigestEmail {
   readonly html: string;
 }
 
-/** Longest description snippet, in characters (graphemes). */
-export const SNIPPET_MAX_CHARS = 300;
-/** CPV codes shown per offer; the rest are counted. */
-const CPV_CODES_SHOWN = 5;
-/** Longest profile name put into the subject. */
-const SUBJECT_NAME_MAX_CHARS = 80;
-const NOT_GIVEN = "nie podano";
+/** Longest profile name put into the footer. */
+const PROFILE_NAME_MAX_CHARS = 80;
 
-export interface DigestField {
-  readonly label: string;
-  readonly value: string;
-  /** Set for a link: an http(s) URL, also the value shown. */
-  readonly href?: string;
-}
+/**
+ * The one accent colour of the e-mail (borders and the button), the web's
+ * light-scheme accent. White on it has a contrast of 6.3:1 (WCAG AA), and the
+ * button sets both colours, so it reads in a dark mail client too. Text sets
+ * no colour: it inherits the client's, light or dark.
+ */
+const ACCENT = "#1d5fb4";
 
-/** One offer as shown: its title and labelled fields, cleaned, not escaped yet. */
-export interface DigestItemView {
-  readonly title: string;
-  readonly fields: readonly DigestField[];
-}
+/** The PILNE badge's background; sets its text colour too (white), so dark mail clients keep it. */
+const URGENT_BACKGROUND = "#b3261e";
 
 /**
  * A footer paragraph, optionally ending with a link: shown as its URL in the
@@ -87,21 +83,21 @@ interface DigestModel {
   readonly heading: string;
   /** Shown right under the heading: matching offers left for later e-mails. */
   readonly overflowNotice: string | null;
-  readonly items: readonly DigestItemView[];
+  readonly cards: readonly OfferCard[];
   readonly footer: readonly FooterParagraph[];
-}
-
-/** Polish plural form for `count`: one, few (2–4, not 12–14), many. */
-export function plural(count: number, one: string, few: string, many: string): string {
-  if (count === 1) return one;
-  const lastDigit = count % 10;
-  const lastTwo = count % 100;
-  return lastDigit >= 2 && lastDigit <= 4 && (lastTwo < 12 || lastTwo > 14) ? few : many;
 }
 
 /** "N nowe zamówienie" / "N nowe zamówienia" / "N nowych zamówień". */
 function newOffers(count: number): string {
   return `${String(count)} ${plural(count, "nowe zamówienie", "nowe zamówienia", "nowych zamówień")}`;
+}
+
+/**
+ * The subject's count: "1 nowe", "2 nowe", "5 nowych" — agreeing with the
+ * body's "zamówienie" (newOffers), so one offer is "1 nowe" in both.
+ */
+export function newCount(count: number): string {
+  return `${String(count)} ${plural(count, "nowe", "nowe", "nowych")}`;
 }
 
 /** "pasujące" / "pasujących", agreeing with newOffers(count). */
@@ -121,61 +117,6 @@ function overflowNotice(count: number): string {
   return `${String(count)} ${offers} wyślemy w następnych dniach, jeśli ${willBe} wtedy aktualne.`;
 }
 
-const graphemes = new Intl.Segmenter("pl", { granularity: "grapheme" });
-
-/** At most `max` characters (graphemes); longer text is cut at a word boundary and ends with "…". */
-export function snippet(value: string, max: number = SNIPPET_MAX_CHARS): string {
-  const chars = Array.from(graphemes.segment(cleanText(value)), (part) => part.segment);
-  if (chars.length <= max) return chars.join("");
-  const cut = chars.slice(0, max - 1).join("");
-  const lastSpace = cut.lastIndexOf(" ");
-  // A boundary far back would waste most of the snippet: cut mid-word then.
-  const head = lastSpace >= cut.length * 0.6 ? cut.slice(0, lastSpace) : cut;
-  return `${head.trimEnd()}…`;
-}
-
-function formatLocation(location: OpportunityLocation | null): string {
-  if (location === null) return NOT_GIVEN;
-  const parts = [
-    location.city,
-    location.county === undefined ? undefined : `powiat ${location.county}`,
-    location.voivodeship === undefined ? undefined : `woj. ${location.voivodeship}`,
-  ].filter((part): part is string => part !== undefined);
-  if (parts.length > 0) return parts.join(", ");
-  return location.raw ?? NOT_GIVEN;
-}
-
-/**
- * The "Kategoria:" value: "Elektryka; Serwis, naprawy i konserwacja · CPV:
- * 45310000-3, 50700000-2", or "CPV: …" alone without an MVP category. The
- * customer sees category names, never the keys (CATEGORY_LABELS). Names
- * contain commas, so they are joined with "; ", and " · CPV: " keeps the
- * codes apart from the last name.
- */
-function formatCategory(cpvCodes: readonly string[]): string {
-  if (cpvCodes.length === 0) return NOT_GIVEN;
-  const shown = cpvCodes.slice(0, CPV_CODES_SHOWN).join(", ");
-  const more = cpvCodes.length - CPV_CODES_SHOWN;
-  const codes = `CPV: ${shown}${more > 0 ? ` i ${String(more)} ${plural(more, "inny", "inne", "innych")}` : ""}`;
-  const categories = mvpCategoriesForCpv(cpvCodes).map((category) => CATEGORY_LABELS[category]);
-  return categories.length === 0 ? codes : `${categories.join("; ")} · ${codes}`;
-}
-
-function formatContact(contact: OpportunityContact | null): string | null {
-  if (contact === null) return null;
-  const parts = [contact.name, contact.email, contact.phone].filter(
-    (part): part is string => part !== undefined,
-  );
-  if (parts.length > 0) return parts.join(", ");
-  return contact.raw ?? null;
-}
-
-/** The source link when it is http(s); anything else (e.g. `javascript:`) is not shown. */
-function safeLink(value: string): string | null {
-  const url = URL.parse(value);
-  return url !== null && (url.protocol === "https:" || url.protocol === "http:") ? url.href : null;
-}
-
 /**
  * Soonest deadline first (unknown last), then the latest published (unknown
  * last), then id. Also the order of the web page of matches (PR-06B).
@@ -191,58 +132,25 @@ export function digestOrder(a: DigestItem, b: DigestItem): number {
 }
 
 /**
- * The attribution the Baza Konkurencyjności's terms of reuse require with each
- * of its offers (D-030). Other sources need none (BZP: D-015).
+ * The subject: "Radar Zamówień: 3 nowe, najbliższy termin 18.11" — the count
+ * and the earliest deadline not passed at `now` among the e-mail's offers, as
+ * a day in Poland; without one, "Radar Zamówień: 3 nowe". Never the
+ * recipient's company name (a forwarded or previewed subject would show it)
+ * nor any text from a source.
  */
-function sourceAttribution(offer: Opportunity): string | null {
-  return offer.sourceId === BK_SOURCE_ID ? bkAttribution(offer.fetchedAt) : null;
-}
-
-/**
- * One offer's title and fields, as the digest shows them; also used by the
- * web page of matches (PR-06B), so both show an offer the same way.
- */
-export function digestItemView({ offer, reasons }: DigestItem): DigestItemView {
-  const fields: DigestField[] = [
-    { label: "Zamawiający", value: offer.issuerName },
-    { label: "Lokalizacja", value: formatLocation(offer.location) },
-    {
-      label: "Termin składania ofert",
-      value:
-        offer.deadline === null ? NOT_GIVEN : `${formatWarsawMinute(offer.deadline)} (czas polski)`,
-    },
-    {
-      label: "Data publikacji",
-      value: offer.publishedAt === null ? NOT_GIVEN : warsawDay(offer.publishedAt),
-    },
-    { label: "Kategoria", value: formatCategory(offer.categories) },
-  ];
-  if (offer.description !== null) fields.push({ label: "Opis", value: snippet(offer.description) });
-  const contact = formatContact(offer.contact);
-  if (contact !== null) fields.push({ label: "Kontakt", value: contact });
-  fields.push({
-    label: "Dlaczego pasuje",
-    value: formatReasons(reasons, { categoryLabels: CATEGORY_LABELS }),
-  });
-  const attribution = sourceAttribution(offer);
-  if (attribution !== null) fields.push({ label: ATTRIBUTION_LABEL, value: attribution });
-  const link = safeLink(offer.sourceUrl);
-  // An unsafe link is not shown, but the line stays, so its absence is visible.
-  fields.push(
-    link === null
-      ? { label: "Link", value: NOT_GIVEN }
-      : { label: "Link", value: link, href: link },
-  );
-  // Stored text is clean already; cleaning again keeps a line break or a
-  // control character out of the e-mail whatever the row holds.
-  return {
-    title: cleanText(offer.title),
-    fields: fields.map((field) => ({ ...field, value: cleanText(field.value) })),
-  };
+export function digestSubject(items: readonly DigestItem[], now: Date): string {
+  const nearest = items.reduce<Date | null>((soonest, { offer: { deadline } }) => {
+    if (deadline === null || deadline.getTime() < now.getTime()) return soonest;
+    return soonest === null || deadline.getTime() < soonest.getTime() ? deadline : soonest;
+  }, null);
+  const subject = `Radar Zamówień: ${newCount(items.length)}`;
+  return nearest === null
+    ? subject
+    : `${subject}, najbliższy termin ${formatPolishDayMonth(nearest)}`;
 }
 
 function profileName(profile: Pick<CompanyProfile, "name">): string {
-  return snippet(profile.name, SUBJECT_NAME_MAX_CHARS);
+  return snippet(profile.name, PROFILE_NAME_MAX_CHARS);
 }
 
 function digestModel(
@@ -296,18 +204,36 @@ function digestModel(
   return {
     heading: `Znaleźliśmy dziś ${newOffers(items.length)} ${matching(items.length)} do Twojej firmy.`,
     overflowNotice: options.overflow > 0 ? overflowNotice(options.overflow) : null,
-    items: [...items].sort(digestOrder).map(digestItemView),
+    cards: [...items].sort(digestOrder).map((item) => offerCard(item, now)),
     footer,
   };
+}
+
+/** A row's value with the urgency word before it (plain text). */
+function rowText(row: CardRow): string {
+  return row.urgent ? `${URGENT_WORD} ${row.value}` : row.value;
+}
+
+/**
+ * One card as text: the title, the labelled rows, the link (the excerpt only,
+ * never the full description) and the match details as the last line.
+ */
+function cardText(card: OfferCard, index: number): string[] {
+  return [
+    `${String(index + 1)}. ${card.title}`,
+    ...card.rows.map((row) => `   ${row.label}: ${rowText(row)}`),
+    ...(card.url === null ? [] : [`   ${LINK_LABEL}: ${card.url}`]),
+    ...(card.matchDetails.length === 0
+      ? []
+      : [`   ${MATCH_DETAILS_LABEL}: ${card.matchDetails.join(" · ")}`]),
+  ];
 }
 
 function renderText(model: DigestModel): string {
   const lines = [model.heading, ""];
   if (model.overflowNotice !== null) lines.push(model.overflowNotice, "");
-  model.items.forEach((item, index) => {
-    lines.push(`${String(index + 1)}. ${item.title}`);
-    for (const field of item.fields) lines.push(`   ${field.label}: ${field.value}`);
-    lines.push("");
+  model.cards.forEach((card, index) => {
+    lines.push(...cardText(card, index), "");
   });
   lines.push(
     "--",
@@ -319,20 +245,39 @@ function renderText(model: DigestModel): string {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
-function renderField(field: DigestField): string {
-  const value =
-    field.href === undefined
-      ? escapeHtml(field.value)
-      : `<a href="${escapeHtml(field.href)}">${escapeHtml(field.value)}</a>`;
-  return `<li><strong>${escapeHtml(field.label)}:</strong> ${value}</li>`;
+function rowHtml(row: CardRow): string {
+  // A badge, so the word does not read as part of the bold label. Inline
+  // style (mail clients drop <style>); white on URGENT_BACKGROUND is 6.5:1.
+  const urgent = row.urgent
+    ? `<b style="background:${URGENT_BACKGROUND};color:#fff;padding:0 4px">${URGENT_WORD}</b> `
+    : "";
+  return `<b>${escapeHtml(row.label)}:</b> ${urgent}${escapeHtml(row.value)}`;
+}
+
+/**
+ * One card as HTML, inline-styled (mail clients drop <style>): a bordered
+ * box in the accent colour, the rows, one "Otwórz ogłoszenie" button and the
+ * match details as a small last line. No colour on text, no images or fonts.
+ */
+function cardHtml(card: OfferCard): string {
+  const button =
+    card.url === null
+      ? ""
+      : `<p><a href="${escapeHtml(card.url)}" style="display:inline-block;padding:6px 14px;` +
+        `background:${ACCENT};color:#fff;text-decoration:none"><b>${OPEN_LABEL}</b></a></p>`;
+  const details =
+    card.matchDetails.length === 0
+      ? ""
+      : `<small>${MATCH_DETAILS_LABEL}: ${escapeHtml(card.matchDetails.join(" · "))}</small>`;
+  return (
+    `<div style="border:1px solid ${ACCENT};padding:0 12px 10px;margin:12px 0">` +
+    `<h2 style="font-size:1.05em;margin:10px 0 6px">${escapeHtml(card.title)}</h2>` +
+    `<p style="margin:0">${card.rows.map(rowHtml).join("<br>")}</p>` +
+    `${button}${details}</div>`
+  );
 }
 
 function renderHtml(model: DigestModel, subject: string): string {
-  const items = model.items.map(
-    (item) =>
-      `<li><h2 style="font-size:1.05em;margin:1em 0 0.3em">${escapeHtml(item.title)}</h2>` +
-      `<ul style="padding-left:1em;margin:0">${item.fields.map(renderField).join("")}</ul></li>`,
-  );
   return [
     "<!doctype html>",
     '<html lang="pl">',
@@ -342,8 +287,8 @@ function renderHtml(model: DigestModel, subject: string): string {
     '<body style="font-family:sans-serif;line-height:1.4">',
     `<p><strong>${escapeHtml(model.heading)}</strong></p>`,
     ...(model.overflowNotice === null ? [] : [`<p>${escapeHtml(model.overflowNotice)}</p>`]),
-    `<ol style="padding-left:1.2em">${items.join("")}</ol>`,
-    '<hr><div style="font-size:0.9em;color:#555">',
+    ...model.cards.map(cardHtml),
+    '<hr><div style="font-size:0.9em">',
     ...model.footer.map(
       (paragraph) =>
         `<p>${escapeHtml(paragraph.text)}` +
@@ -359,11 +304,11 @@ function renderHtml(model: DigestModel, subject: string): string {
 }
 
 /**
- * Builds one profile's digest. The subject holds only the count and the
- * profile's name (operator data, cleaned of control characters and bounded),
- * never text from a source. Items are sorted by deadline, soonest first; the
- * caller has already dropped offers past their deadline. `now` is shown as the
- * time the digest was made.
+ * Builds one profile's digest. The subject holds the count and the nearest
+ * deadline only (digestSubject). Items are sorted by deadline, soonest
+ * first; the caller has already dropped offers past their deadline. `now`
+ * (the run time) is shown as the time the digest was made and is what the
+ * deadline lines count days from.
  */
 export function buildDigest(
   profile: Pick<CompanyProfile, "name">,
@@ -372,6 +317,6 @@ export function buildDigest(
   options: DigestOptions,
 ): DigestEmail {
   const model = digestModel(profile, items, now, options);
-  const subject = `Radar Zamówień: ${newOffers(items.length)} — ${profileName(profile)}`;
+  const subject = digestSubject(items, now);
   return { subject, text: renderText(model), html: renderHtml(model, subject) };
 }

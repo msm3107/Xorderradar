@@ -1121,7 +1121,9 @@ YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
     powtórzony, zły uuid lub data → kod 2 (błąd wywołania jak w pozostałych komendach,
     sprawdzany przed konfiguracją i bez otwierania bazy). Bez decyzji operatora oferty nie
     trafią do tego profilu, a profil z dzisiejszym `pending` nic dziś nie dostanie.
-  - **Treść** (`buildDigest`, czyste, `src/notifications/digest.ts`; D-013 — po polsku): temat
+  - **Treść** (`buildDigest`, czyste, `src/notifications/digest.ts`; D-013 — po polsku;
+    **zmienione w PR-11:** karta oferty z `src/notifications/card.ts`, temat bez nazwy firmy —
+    opis w README → „Digest (e-mail)” i ARCHITECTURE §4.5; niżej stan z PR-05–PR-10): temat
     tylko z liczby ofert i nazwy profilu (≤ 80 znaków, bez znaków sterujących i CR/LF), nigdy z
     danych źródła. Dla każdej oferty: tytuł, zamawiający, lokalizacja, termin (czas polski) i
     data publikacji („nie podano”, gdy brak), kategoria (MVP + CPV, gdy są; od PR-09
@@ -1390,8 +1392,10 @@ YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
     zapis musiałby po cichu zawieść).
   - **Dopasowania** (`/dopasowania`): liczone na żądanie tymi samymi regułami co digest — wspólny
     moduł `src/notifications/candidates.ts` (okno 7 dni, limit 10 000 kandydatów, `matchingItems`) i
-    widok pozycji `digestItemView` z `digest.ts`; kolejność: najbliższy termin pierwszy. Karta
-    oferty jest zwarta: od razu tytuł, zamawiający, lokalizacja (przy profilu na całą Polskę
+    widok pozycji (do PR-10 `digestItemView` z `digest.ts`; **od PR-11 ta sama karta `offerCard`
+    z `src/notifications/card.ts` co e-mail, bez „Szczegółów ogłoszenia” — ARCHITECTURE §4.6**);
+    kolejność: najbliższy termin pierwszy. _Historyczne (stan do PR-10, zastąpione przez PR-11):_
+    karta oferty była zwarta: od razu tytuł, zamawiający, lokalizacja (przy profilu na całą Polskę
     „Dlaczego pasuje” jej nie podaje), termin składania ofert, „Dlaczego pasuje” i link do źródła;
     data publikacji, kategoria, opis i kontakt w natywnym `<details>` („Szczegóły ogłoszenia”, bez
     JavaScriptu); brakujące pola jak w digeście. Najwyżej 50 pozycji i „I N kolejnych”; puste —
@@ -1995,9 +1999,15 @@ YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
   - Przy takiej ofercie powód „źródło nie podaje województwa” stoi obok linii
     „Lokalizacja: mazowieckie, śląskie” (z `raw`). To prawda o polu `voivodeship`, ale
     może dziwić. Do poprawy w tekstach matchingu, poza PR-08.
-  - Wartość `bk` nie mówi, czy jest netto, czy brutto. Gdy wartość będzie pokazywana
-    (dziś nie jest), etykieta ma brzmieć „wartość szacunkowa (źródło nie podaje, netto czy
-    brutto)”.
+  - Wartość `bk` nie mówi, czy jest netto, czy brutto. **Od PR-11 wartość jest pokazywana**
+    (karta oferty, `src/notifications/card.ts`, `formatValue`): wiersz „Wartość szacunkowa:
+    120 000,00 PLN (źródło nie podaje, netto czy brutto)”. Kwota powstaje z zapisanego
+    tekstu (`numeric` jako string), nigdy przez liczbę zmiennoprzecinkową: grupy tysięcy
+    oddziela twarda spacja (U+00A0), część dziesiętna po przecinku ma co najmniej 2 cyfry,
+    dalsze cyfry znaczące zostają (bez zaokrąglania). Dopisek o netto/brutto stoi przy
+    każdej wartości — także BZP, bo ani BZP, ani Baza tego nie podaje (gdy źródło kiedyś
+    poda, dopisek trzeba zastąpić tą informacją). Brak wartości → „Wartość szacunkowa: nie
+    podano”, nigdy 0. Atrybucja „Źródło:” (dzień `fetched_at` RRRR-MM-DD) bez zmian.
 
 ## D-031 — Samoobsługowe wejście („Wyślij mi link”) i potwierdzanie zmiany adresu
 

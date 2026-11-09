@@ -21,7 +21,9 @@ import { upsertOpportunity } from "../../src/infrastructure/db/opportunities-rep
 import type { Database } from "../../src/infrastructure/db/schema.js";
 import { upsertSource } from "../../src/infrastructure/db/sources-repository.js";
 import { createLogger } from "../../src/infrastructure/logger.js";
+import { formatDeadline, formatPolishDay } from "../../src/notifications/card.js";
 import type { EmailSender, OutgoingEmail } from "../../src/notifications/sender.js";
+import { formatWarsawMinute } from "../../src/sources/normalize/warsaw-time.js";
 import { csrfTokenFor, NOTICE_COOKIE, SESSION_COOKIE } from "../../src/web/session.js";
 import {
   MATCHES_RETRY_AFTER_SECONDS,
@@ -789,13 +791,19 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
 
   describe("matches page", () => {
     it("shows the matching offers, soonest deadline first, with their reasons", async () => {
+      // The page's clock, injected so the deadline rows are exact; the offers are
+      // first seen just after it, which keeps them new (only a lower bound).
+      const at = new Date();
+      const publishedAt = new Date(at.getTime() - DAY_MS);
+      const laterDeadline = new Date(at.getTime() + 9 * DAY_MS);
+      const soonerDeadline = new Date(at.getTime() + 2 * DAY_MS);
       const later = await upsertOpportunity(
         schema.db,
-        draft({ title: "Oświetlenie później", deadline: new Date(Date.now() + 9 * DAY_MS) }),
+        draft({ title: "Oświetlenie później", publishedAt, deadline: laterDeadline }),
       );
       await upsertOpportunity(
         schema.db,
-        draft({ title: "Oświetlenie wcześniej", deadline: new Date(Date.now() + 2 * DAY_MS) }),
+        draft({ title: "Oświetlenie wcześniej", publishedAt, deadline: soonerDeadline }),
       );
       // Not matching: another region; and one whose deadline has passed.
       await upsertOpportunity(
@@ -804,34 +812,94 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       );
       await upsertOpportunity(
         schema.db,
-        draft({ title: "Oświetlenie po terminie", deadline: new Date(Date.now() - DAY_MS) }),
+        draft({ title: "Oświetlenie po terminie", deadline: new Date(at.getTime() - DAY_MS) }),
       );
-      const { cookie } = await login();
-      const page = await fetch(`${url}/dopasowania`, { headers: { cookie } });
-      expect(page.status).toBe(200);
-      expect(page.headers.get("cache-control")).toBe("no-store");
-      const html = await page.text();
+      const clocked = await startWebServer({
+        db: schema.db,
+        publicBaseUrl: BASE,
+        logger: createLogger("info", () => undefined),
+        host: "127.0.0.1",
+        port: 0,
+        cleanupIntervalMs: null,
+        now: () => at,
+      });
+      let html: string;
+      try {
+        const { cookie } = await login();
+        const page = await fetch(`http://127.0.0.1:${String(clocked.port)}/dopasowania`, {
+          headers: { cookie },
+        });
+        expect(page.status).toBe(200);
+        expect(page.headers.get("cache-control")).toBe("no-store");
+        html = await page.text();
+      } finally {
+        await clocked.close();
+      }
       const titles = [...html.matchAll(/<h2>([^<]+)<\/h2>/g)].map((match) => match[1]);
       expect(titles).toEqual(["Oświetlenie wcześniej", "Oświetlenie później"]);
-      expect(html).toContain("<dt>Dlaczego pasuje:</dt><dd>kategoria: „Elektryka”;");
-      expect(html).toContain("<dt>Kategoria:</dt><dd>Elektryka · CPV: 45310000-3</dd>");
-      // The category label, never its key (PR-09).
-      expect(html).not.toMatch(/kategoria: elektryka|Kategoria:<\/dt><dd>elektryka/u);
+      // The category label, never its key (PR-09); the CPV code under the match details.
       expect(html).toContain(
-        `<a href="${later.opportunity.sourceUrl}" rel="noopener noreferrer">` +
-          "Otwórz ogłoszenie w źródle (zamowienia.example.gov.pl)</a>",
+        "<dt>Dlaczego pasuje:</dt><dd>Elektryka · słowo „oświetlenie” w tytule · mazowieckie</dd>",
       );
-      // Compact cards: one native disclosure per offer, holding the other fields.
-      expect(html.match(/<details><summary>Szczegóły ogłoszenia<\/summary><dl>/g)).toHaveLength(2);
+      expect(html).not.toMatch(/kategoria: elektryka|<dd>elektryka/u);
       expect(html).toContain(
-        "<details><summary>Szczegóły ogłoszenia</summary><dl><dt>Data publikacji:",
+        `<p><a class="button" href="${later.opportunity.sourceUrl}" rel="noopener noreferrer">` +
+          "Otwórz ogłoszenie</a></p>",
       );
-      // The place of work is visible, between the buyer and the deadline.
-      expect(html).toContain(
-        "<dt>Zamawiający:</dt><dd>Gmina Przykładowa</dd>" +
-          "<dt>Lokalizacja:</dt><dd>woj. mazowieckie</dd><dt>Termin składania ofert:</dt>",
-      );
+      // One native disclosure per offer: the CPV code and the technical reasons.
+      expect(
+        html.match(
+          /<details><summary>Szczegóły dopasowania<\/summary><ul><li>CPV: 45310000-3<\/li><\/ul><\/details>/g,
+        ),
+      ).toHaveLength(2);
+      // The value, the deadline counted from the injected clock, the buyer, place and publication day.
+      for (const deadline of [soonerDeadline, laterDeadline]) {
+        const expected = formatDeadline(deadline, at);
+        const marker = expected.urgent ? '<strong class="pilne">PILNE</strong> ' : "";
+        expect(html).toContain(
+          "<dl><dt>Wartość szacunkowa:</dt><dd>nie podano</dd>" +
+            `<dt>Termin składania ofert:</dt><dd>${marker}${expected.text}</dd>` +
+            "<dt>Zamawiający:</dt><dd>Gmina Przykładowa</dd>" +
+            "<dt>Lokalizacja:</dt><dd>woj. mazowieckie</dd>" +
+            `<dt>Data publikacji:</dt><dd>${formatPolishDay(publishedAt)}</dd>`,
+        );
+      }
+      // Nine days ahead is never urgent.
+      expect(formatDeadline(laterDeadline, at).urgent).toBe(false);
       expect(html).not.toContain('class="note"');
+    });
+
+    it("dates the cards by the injected clock", async () => {
+      // A day ahead of the real clock, so the offer is still new and open in the database.
+      const at = new Date(Date.now() + DAY_MS);
+      const deadline = new Date(at.getTime() + DAY_MS);
+      await upsertOpportunity(schema.db, draft({ title: "Oświetlenie pilne", deadline }));
+      const clocked = await startWebServer({
+        db: schema.db,
+        publicBaseUrl: BASE,
+        logger: createLogger("info", () => undefined),
+        host: "127.0.0.1",
+        port: 0,
+        cleanupIntervalMs: null,
+        now: () => at,
+      });
+      try {
+        const { cookie } = await login();
+        const html = await (
+          await fetch(`http://127.0.0.1:${String(clocked.port)}/dopasowania`, {
+            headers: { cookie },
+          })
+        ).text();
+        // A day after the clock: urgent, whatever the real date.
+        const expected = formatDeadline(deadline, at);
+        expect(expected.urgent).toBe(true);
+        expect(html).toContain(
+          `<dt>Termin składania ofert:</dt><dd><strong class="pilne">PILNE</strong> ${expected.text}</dd>`,
+        );
+        expect(html).toContain(`Stan na ${formatWarsawMinute(at)} (czas polski).`);
+      } finally {
+        await clocked.close();
+      }
     });
 
     it(`shows at most ${String(MATCHES_SHOWN)} and counts the rest`, async () => {

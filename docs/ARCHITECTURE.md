@@ -85,6 +85,7 @@ src/
 │                           # run.ts (wybór ofert, idempotencja, blokada digest; D-024)
 │                           # candidates.ts: kandydaci i dopasowanie (digest + web) [PR-06B]
 │                           # access-emails.ts: treść e-maili dostępu (czysta)    [PR-10]
+│                           # card.ts: karta oferty (e-mail + web, czysta)        [PR-11]
 ├── operations/             # status.ts (raport i alert operatora, czysty),      [PR-07A]
 │                           # backup.ts (pg_dump/pg_restore jako procesy potomne; D-028)
 │                           # heartbeat.ts (ping HEARTBEAT_URL po status; D-029) [PR-07B]
@@ -121,8 +122,9 @@ z jednym wyjątkiem (D-023): może importować czyste helpery `sources/normalize
 `notifications` importuje z `web` wyłącznie `web/links.ts` (czyste budowanie URL-i tras
 `/dostep/…`, `/wypis/…` i od PR-10 `/potwierdz-email/…`, bez I/O) — trasy definiuje `web`.
 W drugą stronę (PR-06B, D-027) `web` importuje z `notifications` wyłącznie `candidates.ts`
-(odczyt kandydatów i dopasowanie — te same reguły co digest) oraz czyste `digest.ts`
-(`digestItemView`, `digestOrder`, `plural`; także `/przyklad`), a z `sources` tylko czysty
+(odczyt kandydatów i dopasowanie — te same reguły co digest), czyste `digest.ts`
+(`digestOrder`, `plural`) i od PR-11 czyste `card.ts` (karta oferty `offerCard` i jej
+etykiety; także `/przyklad`), a z `sources` tylko czysty
 `normalize/warsaw-time.ts`; nic z `run.ts`. Od PR-10 (D-031) `serve` wysyła e-maile dostępu
 („Wyślij mi link”, potwierdzenie zmiany adresu i powiadomienie na stary adres):
 `web/access-mail.ts` importuje czyste `notifications/access-emails.ts` (treść) i z
@@ -328,7 +330,8 @@ API publicznej aplikacji na `bazakonkurencyjnosci.funduszeeuropejskie.gov.pl`.
   - `status` z etykiety ogłoszenia (`PUBLISHED` → `open`/`closed` wg terminu, `CANCELLED` →
     `cancelled`, `CLOSED`/`RESOLVED` → `closed`, inna → `unknown`).
 - **Atrybucja:** e-mail i `/dopasowania` pokazują przy ofercie `bk` pole „Źródło” z pełną nazwą
-  ministerstwa, dniem `fetched_at` i informacją o przetworzeniu (`digestItemView`, D-030).
+  ministerstwa, dniem `fetched_at` i informacją o przetworzeniu (`offerCard` w
+  `notifications/card.ts` od PR-11, D-030).
 
 ### 4.2 SafeHttpClient (PR-02, zaimplementowany)
 
@@ -552,8 +555,20 @@ Szczegóły i uzasadnienie: D-010 (SMTP, biblioteka) i D-024 (wybór ofert, idem
 
 - `buildDigest(profile, items, now, { overflow })` (`digest.ts`, czyste, bez I/O) →
   `{ subject, text, html }`; `items` = oferta + powody z `matchOpportunity`. Pola tylko
-  podane przez źródło („nie podano” dla lokalizacji, terminu, daty publikacji i kategorii),
-  link tylko `http(s)`, każda wartość w HTML przez `escapeHtml`, temat bez danych źródła.
+  podane przez źródło („nie podano” dla wartości, lokalizacji, terminu i daty publikacji),
+  link tylko `http(s)`, każda wartość w HTML przez `escapeHtml`, temat bez danych źródła
+  i bez nazwy firmy (`digestSubject`: liczba z odmianą `newCount` i najbliższy nieminiony
+  termin, PR-11). HTML ma style inline (e-mail nie dostaje `/styl.css`) bez stałych szarości
+  na tekście, żeby ciemny motyw programu pocztowego zostawał czytelny.
+- Karta oferty (PR-11, `card.ts`, czyste, bez I/O): `offerCard({ offer, reasons }, now)` →
+  `{ title, rows, fullDescription, url, matchDetails }` — jedno źródło treści dla tekstu
+  i HTML e-maila, `/dopasowania` i `/przyklad` (każdy tylko inaczej ją układa). Wartość
+  z zapisanego tekstu `numeric` (`formatAmount`, nigdy przez float), termin w czasie polskim
+  z dniem tygodnia ze stałej tabeli i odległością w dniach kalendarzowych
+  (`formatDeadline`; „PILNE” dla 0–2 dni), „Dlaczego pasuje” jednym zdaniem
+  (`whySentence`), kody CPV i powody techniczne osobno (`matchDetails`). Chwila `now`:
+  digest — chwila przebiegu; web — `WebServerOptions.now` (domyślnie zegar procesu;
+  tokeny i sesje dalej liczy zegar bazy).
 - `EmailSender` (`sender.ts`): `transport` (`test`/`smtp`), `send(email)`, `close()`. Tryb
   `test` (`createOutboxSender`) zapisuje `.eml` (MIME z nodemailera, `streamTransport`) i
   `.json` w `EMAIL_OUTBOX_DIR` (katalog `0700`, pliki `0600`, nazwy z czasu i UUID, nigdy z
@@ -668,9 +683,10 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   potwierdzenie próbują jeszcze raz. Inne zmiany niczego nie unieważniają.
 - Strona dopasowań (`/dopasowania`): `readDigestCandidates` + `matchingItems` (jak digest),
   kolejność `digestOrder` (najbliższy termin), najwyżej 50 (`MATCHES_SHOWN`) + „I N
-  kolejnych…”, pola jak w e-mailu (`digestItemView`), link do źródła tylko `http(s)` z
-  `rel="noopener noreferrer"`. Karta zwarta: zamawiający, lokalizacja, termin, „Dlaczego
-  pasuje” i link od razu, pozostałe pola w `<details>` „Szczegóły ogłoszenia” (bez JS). Pusty
+  kolejnych…”, ta sama karta co e-mail (`offerCard`, §4.5), przycisk „Otwórz ogłoszenie”
+  tylko dla `http(s)` z `rel="noopener noreferrer"`. Wiersze w `<dl>` (siatka dwóch kolumn,
+  przy wąskim ekranie jedna); pełny opis w `<details>` „Pełny opis” tylko, gdy wyciąg jest
+  ucięty, CPV i powody techniczne w `<details>` „Szczegóły dopasowania” (bez JS). Pusty
   stan objaśnia okno 7 dni; profil nieaktywny dostaje notkę; wiersz profilu odrzucany przez
   schemat → prośba o poprawkę w ustawieniach. Koszt: liczone na żądanie w procesie `serve`;
   `matchingItems` oddaje pętlę zdarzeń po ok. 20 ms pracy (`MATCH_YIELD_AFTER_MS`), a serwer liczy
@@ -695,7 +711,11 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   kontrola `Origin`. `multipart.ts` — minimalny ścisły parser `multipart/form-data` tylko dla
   wypisu RFC 8058 (boundary według RFC 2046, jedno pole; D-026). `links.ts` —
   `loginUrl`/`unsubscribeUrl`/`emailConfirmUrl` (czyste; używa też `notifications` i
-  `access:link`). `example.ts` — dane `/przyklad` (stałe, zmyślone oferty w szablonie digestu).
+  `access:link`). `example.ts` — dane `/przyklad` (`exampleView(now)`: zmyślone oferty
+  z datami liczonymi od `now`, dopasowane prawdziwymi regułami, karty jak na `/dopasowania`,
+  najważniejsze stany karty na jednej stronie — wartość podana i nie, termin za kilka dni,
+  jutro z „PILNE” i nie podany, opis ucięty, krótki i brak, nieznany region, CPV spoza listy
+  kategorii, BZP i BK; bez „dziś” i „minął”; bez bazy).
   `access-mail.ts` — e-maile dostępu po odpowiedzi (`createAccessMailer`: kolejka, jedna próba
   wysyłki, log „access mail”; przy zamknięciu serwera czekające zadania wypadają z logiem,
   a na bieżące serwer czeka najwyżej 5 s — `MAIL_SHUTDOWN_DEADLINE_MS` — po czym je porzuca
