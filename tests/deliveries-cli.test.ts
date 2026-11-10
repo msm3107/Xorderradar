@@ -34,6 +34,7 @@ async function run(
     pending?: string[];
     list?: PendingDeliveries | Error;
     resolve?: ResolveResult | Error;
+    env?: Record<string, string>;
   } = {},
 ) {
   const calls = { closed: 0, listed: 0, resolved: [] as Omit<ResolveRequest, "digestLockKey">[] };
@@ -61,7 +62,7 @@ async function run(
   const code = await runCli(
     args,
     {
-      env: { DATABASE_URL },
+      env: { DATABASE_URL, ...options.env },
       stdout: (text) => (stdout += text),
       stderr: (text) => (stderr += text),
     },
@@ -132,15 +133,22 @@ describe("deliveries:pending", () => {
 
 describe("deliveries:resolve", () => {
   it.each([
-    [["--sent"], { profileId: PROFILE_ID, outcome: "sent", digestDate: null }],
-    [["--failed"], { profileId: PROFILE_ID, outcome: "failed", digestDate: null }],
+    [["--sent"], { profileId: PROFILE_ID, transport: "test", outcome: "sent", digestDate: null }],
+    [
+      ["--failed"],
+      { profileId: PROFILE_ID, transport: "test", outcome: "failed", digestDate: null },
+    ],
     [
       ["--sent", "--date", "2026-11-02"],
-      { profileId: PROFILE_ID, outcome: "sent", digestDate: "2026-11-02" },
+      { profileId: PROFILE_ID, transport: "test", outcome: "sent", digestDate: "2026-11-02" },
     ],
     [
       ["--date", "2026-11-02", "--failed"],
-      { profileId: PROFILE_ID, outcome: "failed", digestDate: "2026-11-02" },
+      { profileId: PROFILE_ID, transport: "test", outcome: "failed", digestDate: "2026-11-02" },
+    ],
+    [
+      ["--failed", "--transport", "smtp", "--date", "2026-11-02"],
+      { profileId: PROFILE_ID, transport: "smtp", outcome: "failed", digestDate: "2026-11-02" },
     ],
   ])("passes %j on and prints the rows changed", async (options, request) => {
     const result = await run(["deliveries:resolve", PROFILE_ID, ...options]);
@@ -149,11 +157,63 @@ describe("deliveries:resolve", () => {
     expect(JSON.parse(result.stdout)).toEqual({
       status: "ok",
       outcome: request.outcome,
+      transport: request.transport,
       digestDate: request.digestDate,
       changed: 3,
     });
     expect(result.stderr).toBe("");
     expect(result.calls.closed).toBe(1);
+  });
+
+  it.each([
+    // Without --transport: EMAIL_MODE's transport, like digest; SMTP_URL and
+    // EMAIL_FROM are not needed (not set here) and an empty value counts as unset.
+    [{}, [], "test"],
+    [{ EMAIL_MODE: "" }, [], "test"],
+    [{ EMAIL_MODE: "test" }, [], "test"],
+    [{ EMAIL_MODE: "smtp" }, [], "smtp"],
+    // --transport wins; EMAIL_MODE is then not read.
+    [{ EMAIL_MODE: "smtp" }, ["--transport", "test"], "test"],
+    [{ EMAIL_MODE: "test" }, ["--transport", "smtp"], "smtp"],
+    [{ EMAIL_MODE: "imap" }, ["--transport", "smtp"], "smtp"],
+  ])("with env %j and %j resolves the %s transport", async (env, options, transport) => {
+    const result = await run(["deliveries:resolve", PROFILE_ID, "--sent", ...options], { env });
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(result.calls.resolved).toEqual([
+      { profileId: PROFILE_ID, transport, outcome: "sent", digestDate: null },
+    ]);
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: "ok", transport, changed: 3 });
+    expect(result.stderr).toBe("");
+  });
+
+  it("with EMAIL_MODE=smtp ignores a malformed SMTP_URL and never prints it", async () => {
+    // SMTP_URL is not read by deliveries:resolve: neither its validity nor its
+    // password matters, and it must not reach the output.
+    const smtpUrl = "smtp://user:sekret@:not a port/%%";
+    const result = await run(["deliveries:resolve", PROFILE_ID, "--sent"], {
+      env: { EMAIL_MODE: "smtp", SMTP_URL: smtpUrl },
+    });
+    expect(result.code).toBe(ExitCode.Ok);
+    expect(result.calls.resolved).toEqual([
+      { profileId: PROFILE_ID, transport: "smtp", outcome: "sent", digestDate: null },
+    ]);
+    expect(JSON.parse(result.stdout)).toMatchObject({ status: "ok", transport: "smtp" });
+    expect(result.stderr).toBe("");
+    for (const output of [result.stdout, result.stderr]) {
+      expect(output).not.toContain(smtpUrl);
+      expect(output).not.toContain("sekret");
+    }
+  });
+
+  it("exits 1 on an invalid EMAIL_MODE without --transport, before opening the database", async () => {
+    const result = await run(["deliveries:resolve", PROFILE_ID, "--sent"], {
+      env: { EMAIL_MODE: "imap" },
+    });
+    expect(result.code).toBe(ExitCode.Failure);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("Invalid e-mail configuration: EMAIL_MODE\n");
+    expect(result.calls.resolved).toEqual([]);
+    expect(result.calls.closed).toBe(0);
   });
 
   it("exits 1 without a change while a digest run (or another resolve) holds the lock", async () => {
@@ -170,10 +230,20 @@ describe("deliveries:resolve", () => {
   });
 
   it.each([
-    [[], "Deliveries not resolved: the profile has no pending deliveries; nothing was changed.\n"],
+    [
+      [],
+      'Deliveries not resolved: the profile has no pending deliveries over transport "test"; ' +
+        "nothing was changed.\n",
+    ],
     [
       ["--date", "2026-11-02"],
-      "Deliveries not resolved: the profile has no pending deliveries of that day; nothing was changed.\n",
+      "Deliveries not resolved: the profile has no pending deliveries of that day over " +
+        'transport "test"; nothing was changed.\n',
+    ],
+    [
+      ["--transport", "smtp"],
+      'Deliveries not resolved: the profile has no pending deliveries over transport "smtp"; ' +
+        "nothing was changed.\n",
     ],
   ])("exits 1 when no pending row matches (%j)", async (options, message) => {
     const result = await run(["deliveries:resolve", PROFILE_ID, "--failed", ...options], {
@@ -217,6 +287,13 @@ describe("deliveries:resolve", () => {
     [
       [PROFILE_ID, "--sent", "--date", "2026-11-01", "--date", "2026-11-02"],
       "Option --date given twice.",
+    ],
+    [[PROFILE_ID, "--sent", "--transport"], "Option --transport needs a value."],
+    [[PROFILE_ID, "--sent", "--transport", "imap"], "--transport must be test or smtp."],
+    [[PROFILE_ID, "--sent", "--transport", "SMTP"], "--transport must be test or smtp."],
+    [
+      [PROFILE_ID, "--sent", "--transport", "test", "--transport", "smtp"],
+      "Option --transport given twice.",
     ],
     [[PROFILE_ID, "--sent", "--all"], 'Unexpected argument: "--all"'],
   ])("refuses %j as a usage error (exit 2) without opening the database", async (rest, message) => {

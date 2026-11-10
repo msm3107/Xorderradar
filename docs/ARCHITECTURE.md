@@ -527,8 +527,10 @@ tokenów tekstu, którego nie ma inne liczone słowo; przydział w D-023), `more
 - **Tekst** (`text.ts`): obie strony przez `comparableText` (także bez znaków `\p{Cf}`, np.
   miękkiego łącznika), tokeny = ciągi liter/cyfr; fraza pasuje do kolejnych tokenów; prosta
   odmiana: token słowa ≥ 4 znaki pasuje do tokenu tekstu zaczynającego się od niego bez jednej
-  końcowej samogłoski, krótsze i bez litery (liczby) — tylko dokładnie; ta sama reguła dla
-  wykluczeń. Słowo ≤ 10 tokenów (schemat). Znane ograniczenia i koszt w D-023.
+  końcowej samogłoski, a token ≥ 6 znaków na „nie”/„cie” także do tokenu równego mu bez
+  „ie” (dopełniacz l. mn.: „szkoleń”, „zajęć”; tylko równość, nie prefiks); krótsze i bez
+  litery (liczby) — tylko dokładnie; ta sama reguła dla wykluczeń. Słowo ≤ 10 tokenów
+  (schemat). Znane ograniczenia i koszt w D-023.
 - **Region:** znane województwo oferty spoza województw profilu → niezgodny, niezależnie od
   powiatu (powiaty nigdy nie poszerzają profilu z województwami). W obrębie województwa z
   listy decyduje województwo; zawężania powiatem nie ma (żadne źródło nie podaje jeszcze
@@ -1069,12 +1071,13 @@ release failed`. `ingest` i `digest` nie blokują się wzajemnie.
   `{"status":"ok","tokens":…,"sessions":…}`. Kontrola schematu jak w `access:link`, bez
   `PUBLIC_BASE_URL`; nieznany profil → kod 1.
 - `digest` przy ustawionym `PUBLIC_BASE_URL` dodaje do e-maili linki (§4.5).
-- `deliveries:pending` i `deliveries:resolve <profileId> --sent|--failed [--date]` (PR-09,
-  D-024) — decyzja operatora o wierszach `pending` (`deliveries-repository.ts`):
+- `deliveries:pending` i `deliveries:resolve <profileId> --sent|--failed [--date] [--transport]`
+  (PR-09, D-024) — decyzja operatora o wierszach `pending` (`deliveries-repository.ts`):
   `listPendingDeliveries` (grupy profil × transport × dzień digestu, tylko id, daty i liczby,
   najwyżej 1000) i `resolvePendingDeliveries` (jedna transakcja: najpierw
   `pg_try_advisory_xact_lock(DIGEST_LOCK_KEY)` bez czekania — zajęty → odmowa, kod 1; potem
-  `UPDATE … sent` albo `DELETE` tylko wierszy `pending` profilu i dnia; 0 zmienionych → kod 1).
+  `UPDATE … sent` albo `DELETE` tylko wierszy `pending` profilu, transportu i dnia; transport
+  domyślnie z samego `EMAIL_MODE`, `loadEmailMode`; 0 zmienionych → kod 1).
 - `status [--notify]` (PR-07A, D-028) — raport operatora, jedna linia JSON na stdout; tylko
   odczyt, bez blokady. Kolejność kontroli: argumenty (kod 2) → konfiguracja (z `--notify`:
   `OPERATOR_EMAIL` i zmienne e-mail jak w `digest`, kod 1) → baza. Oczekujące migracje →

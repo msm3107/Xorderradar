@@ -170,9 +170,11 @@ const smtpUrlSchema = z.string().transform((value, context): SmtpServer => {
   };
 });
 
+const emailModeSchema = z.enum(emailModes).default("test");
+
 const emailEnvSchema = z
   .object({
-    EMAIL_MODE: z.enum(emailModes).default("test"),
+    EMAIL_MODE: emailModeSchema,
     EMAIL_FROM: emailFromSchema.optional(),
     SMTP_URL: smtpUrlSchema.optional(),
     EMAIL_OUTBOX_DIR: z
@@ -197,9 +199,9 @@ export type EmailConfig =
   | { readonly mode: "smtp"; readonly from: EmailAddress; readonly smtp: SmtpServer };
 
 /**
- * Parses the e-mail variables (only `digest` reads them, so the other commands
- * work without them). `test` is the default and never sends; `smtp` needs
- * EMAIL_FROM and SMTP_URL. Like loadConfig: empty values count as unset, and
+ * Parses the e-mail variables (only `digest` and `status --notify` read them,
+ * so the other commands work without them). `test` is the default and never
+ * sends; `smtp` needs EMAIL_FROM and SMTP_URL. Like loadConfig: empty values count as unset, and
  * a ConfigError names the variables only — SMTP_URL holds a password.
  */
 export function loadEmailConfig(env: Readonly<Record<string, string | undefined>>): EmailConfig {
@@ -218,6 +220,17 @@ export function loadEmailConfig(env: Readonly<Record<string, string | undefined>
     throw new ConfigError("Invalid e-mail configuration: EMAIL_FROM, SMTP_URL");
   }
   return { mode, from, smtp };
+}
+
+/**
+ * Parses EMAIL_MODE alone, for `deliveries:resolve` (its default transport):
+ * the same rule and error as loadEmailConfig, but without EMAIL_FROM and
+ * SMTP_URL, which resolving never uses.
+ */
+export function loadEmailMode(env: Readonly<Record<string, string | undefined>>): EmailMode {
+  const result = z.object({ EMAIL_MODE: emailModeSchema }).safeParse(nonEmptyEnv(env));
+  if (!result.success) throw configError("Invalid e-mail configuration", result.error);
+  return result.data.EMAIL_MODE;
 }
 
 /** Hosts for which PUBLIC_BASE_URL may use plain `http:` (local development only). */
