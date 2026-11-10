@@ -153,9 +153,14 @@ monitoringu:
   2. `$RADAR health` (jako `radar`, poza sandboksem `serve`; `$RADAR` — `DEPLOY.md`
      punkt 6) wypisuje JSON. `"database":{"status":"ok"}` tutaj (przy migracjach
      zastosowanych całość to `"status":"ok"`, kod `0`), a `503` z `serve` → problem leży po
-     stronie unitu (`IPAddressAllow`, host w `DATABASE_URL` inny niż `localhost`/`127.0.0.1`)
-     albo w puli `serve` — `systemctl restart radar-serve`. `"database":{"status":"error",…}`
-     tutaj (`reason`/`code`) → to problem bazy, nie `serve`.
+     stronie unitu albo w puli `serve`. Unit przepuszcza tylko loopback (`IPAddressDeny=any`,
+     `IPAddressAllow=localhost`): baza na innym hoście (host w `DATABASE_URL` inny niż
+     `localhost`/`127.0.0.1`) wymaga jej adresu w `IPAddressAllow=` w drop-inie, nie w samym
+     unicie (`DEPLOY.md` punkt 7). Drop-in `smtp.conf`
+     (`EMAIL_MODE=smtp`) zdejmuje ten filtr — `systemctl show radar-serve -p IPAddressDeny`
+     pokazuje wtedy puste `IPAddressDeny=` i filtr nie jest przyczyną. Pula:
+     `systemctl restart radar-serve`. `"database":{"status":"error",…}` tutaj
+     (`reason`/`code`) → to problem bazy, nie `serve`.
   3. `journalctl -u radar-serve -n 200 | grep health_check_failed` — stały powód
      (`reason`/`code`, np. `unreachable`/`ECONNREFUSED`, `authentication_failed`, `timeout`);
      treści błędów ani danych w logu nie ma.
@@ -370,15 +375,112 @@ Kto ma e-mail z linkiem albo sesję, ma dostęp do profilu. Odebranie dostępu:
 node dist/main.js access:revoke <profileId>   # {"status":"ok","tokens":…,"sessions":…}
 ```
 
-Unieważnia wszystkie linki (logowania i wypisu) i sesje profilu naraz; profil i powiadomienia
-zostają. Gdy ktoś przejął powiadomienia zmianą adresu: najpierw `access:revoke`, potem
-poprawka adresu
-(`UPDATE company_profiles SET email = '<adres>', updated_at = now() WHERE id = '<profileId>';`)
+Unieważnia wszystkie linki (logowania, wypisu i potwierdzenia adresu) i sesje profilu naraz;
+profil i powiadomienia zostają (także adres oczekujący na potwierdzenie — klient anuluje go na
+`/profil` albo zapisuje ponownie). Zmiana adresu przez klienta wymaga potwierdzenia z nowej
+skrzynki (D-031), a stary adres dostaje powiadomienie. Gdy ktoś mimo to przejął powiadomienia
+zmianą adresu: najpierw `access:revoke`, potem poprawka adresu
+(`UPDATE company_profiles SET email = '<adres>', pending_email = NULL, updated_at = now() WHERE id = '<profileId>';`)
 i nowy link dla właściciela:
 
 ```sh
 node dist/main.js access:link <profileId>     # link jest sekretem — tylko właścicielowi
 ```
+
+## E-maile dostępu i kontakt (`serve`, D-031)
+
+`serve` wysyła sam dwa rodzaje e-maili, tym samym transportem co `digest` (`EMAIL_MODE`,
+`EMAIL_FROM`, `SMTP_URL` z `/etc/radar/radar.env`): link logowania na prośbę klienta („Wyślij mi
+link”) oraz potwierdzenie nowego adresu z powiadomieniem na stary. Bez potwierdzenia
+właściciela `EMAIL_MODE` zostaje `test` (`docs/SECURITY.md` §10).
+
+- **`CONTACT_EMAIL`** — adres kontaktowy na stronie głównej, na stronach 429 („Za dużo próśb
+  o link”) i 409 („Nie zmieniono adresu”) oraz w powiadomieniu o zmianie adresu (na stary
+  adres); opcjonalny (pusty — kontakt nie jest pokazywany). Musi to być prawdziwa, czytana skrzynka. Błędny zapis zatrzymuje start
+  `serve` (`Invalid e-mail configuration: CONTACT_EMAIL`, kod `1`). Po zmianie:
+  `systemctl restart radar-serve`.
+- **Limity** (stałe w kodzie, bez konfiguracji):
+
+  | Limit                                                            | Wartość                            | Gdzie                                   | Po przekroczeniu                                        |
+  | ---------------------------------------------------------------- | ---------------------------------- | --------------------------------------- | ------------------------------------------------------- |
+  | linki „Wyślij mi link” na profil                                 | 3 na 24 h                          | baza (`access_emails`), atomowo         | ta sama strona, nic nie wysłane (`limit_reached`)       |
+  | linki potwierdzające zmianę adresu                               | 3 na 24 h                          | baza (`access_emails`), atomowo         | błąd w formularzu, nic nie zapisane                     |
+  | żądania „Wyślij mi link” z jednego IP (IPv6: z jednej sieci /64) | 10 na godzinę                      | pamięć `serve` (najwyżej 10 000 kluczy) | 429 „Za dużo próśb o link”                              |
+  | e-maile czekające na wysyłkę                                     | 20                                 | pamięć `serve` (jedna wysyłka naraz)    | żądanie odrzucone (`dropped`, `access_mail_queue_full`) |
+  | ciało formularza „Wyślij mi link”                                | 1 KiB                              | `serve`                                 | 413                                                     |
+  | wysyłka w toku przy zatrzymaniu `serve`                          | 5 s (po ≤ 10 s na otwarte żądania) | `serve`                                 | porzucona (`dropped`, `access_mail_shutdown_timeout`)   |
+
+  Klucz limitu na IP: adres IPv4 (także zapisany jako `::ffff:a.b.c.d`) albo prefiks /64
+  adresu IPv6 — klient z całą siecią /64 ma jeden licznik, niezależnie od adresu w niej i od
+  zapisu adresu. Firmy za jednym adresem IPv4 (NAT) albo w jednej sieci /64 dzielą licznik.
+
+  Limit na IP i kolejka giną przy restarcie `serve` (limit IP zaczyna się od zera; czekające
+  e-maile są odrzucone z linią `access_mail_shutdown`). Limit profilu w bazie przetrwa
+  restart; zapisy starsze niż doba usuwa godzinne sprzątanie `serve`.
+
+  Zatrzymanie `serve` (`systemctl stop`/`restart`) mieści się w `TimeoutStopSec=20`: do 10 s
+  na otwarte żądania, potem najwyżej 5 s na e-mail dostępu w toku (jedna wysyłka SMTP może
+  czekać dłużej — limity jak przy `digest`). E-mail, który nie zdążył, dostaje linię
+  `"outcome":"dropped"`, `"errorCode":"access_mail_shutdown_timeout"` (z `kind` zadania; przy
+  zmianie adresu `email_change`, także gdy utknęło powiadomienie); jego zadanie nie zaczyna już
+  kolejnej wysyłki. Zmiana adresu wysyła najpierw powiadomienie na stary adres, potem link
+  potwierdzający na nowy (także gdy powiadomienie nie wyszło): błąd albo zatrzymanie przy
+  wysyłce linku nie odbiera staremu adresowi ostrzeżenia, a zadanie porzucone przy
+  powiadomieniu nie wysyła już linku. Wysyłka, która była już w toku, kończy się mimo to i po
+  linii `dropped` może jeszcze zalogować własny wynik (z `kind` tego e-maila):
+  `"outcome":"sent"`, gdy serwer SMTP przyjął porzucony e-mail, albo `"outcome":"send_failed"`,
+  gdy wysyłka się nie udała. Proces kończy się, gdy zamknie się gniazdo SMTP, najpóźniej po
+  `TimeoutStopSec`; serwer HTTP nie przyjmuje wtedy już połączeń, a transport SMTP
+  (`sender.close()`) i pula połączeń z bazą (`db.destroy()`) są już zamknięte.
+
+## Klient nie dostaje linku
+
+Klient prosi o link sam: formularz „Wyślij mi link” na stronie głównej i na stronie „link
+nieważny” (D-031). Odpowiedź jest zawsze ta sama — strona niczego nie mówi o adresie, więc
+przyczynę widać tylko w logu `serve` (bez adresów; tylko `kind`, `outcome`, `profileId`,
+`errorCode`):
+
+```sh
+journalctl -u radar-serve --since "-2h" | grep '"access mail"'
+```
+
+| `outcome`       | Znaczenie i reakcja                                                                                                                                                                                                                                                                                                           |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sent`          | Serwer pocztowy przyjął wiadomość. Klient sprawdza folder spam i dokładny adres. Link działa raz: na innym urządzeniu potrzebny jest nowy.                                                                                                                                                                                    |
+| `no_profile`    | Żaden profil nie ma tego adresu jako bieżącego (literówka, inny adres firmy, adres jeszcze niepotwierdzony po zmianie). Profil po adresie — zapytanie w `README.md` („Obsługa klienta”); link od operatora: `access:link`.                                                                                                    |
+| `limit_reached` | Profil dostał już 3 e-maile dostępu w ciągu 24 h (linki „Wyślij mi link”; osobno 3 potwierdzenia zmiany adresu). Klient używa linku z ostatniej wiadomości albo czeka; w pilnej sprawie `access:link`.                                                                                                                        |
+| `send_failed`   | Wysyłka nie wyszła (`errorCode`, `failureKind` jak przy `digest`): sprawdź `SMTP_URL`, dostawcę i ruch wychodzący z `radar-serve`. Wysyłka nie jest ponawiana — klient prosi ponownie (żądanie liczy się do limitu profilu).                                                                                                  |
+| `dropped`       | Kolejka pełna (`access_mail_queue_full`: ponad 20 czekających — zalew żądań) albo zatrzymanie `serve`: `access_mail_shutdown` (żądanie w trakcie zamykania; czekające — jedna linia z liczbą `count`), `access_mail_shutdown_timeout` (wysyłka w toku nie skończyła się w 5 s). Klient prosi ponownie; zmiana adresu — niżej. |
+| `failed`        | Baza niedostępna w chwili zadania (`reason`, `code`): jak przy `status` → `database_unavailable`.                                                                                                                                                                                                                             |
+| `not_sent`      | `email_not_configured` — tylko w testach; `serve` zawsze ma transport z `EMAIL_MODE`.                                                                                                                                                                                                                                         |
+
+Brak linii `access mail` przy zgłoszeniu: strona dała 429 (limit 10 żądań z jednego adresu IP na
+godzinę, w pamięci `serve`; mija po godzinie albo po restarcie usługi), błąd formularza (zły zapis
+adresu) albo żądanie nie doszło do `serve`. W `EMAIL_MODE=test` nic nie wychodzi z maszyny:
+wiadomości leżą w `EMAIL_OUTBOX_DIR`.
+
+Zmiana adresu, której klient nie może potwierdzić (link nie przyszedł albo wygasł po 24 h):
+klient zapisuje nowy adres w formularzu jeszcze raz (nowy link; najwyżej 3 na dobę) albo
+anuluje zmianę na `/profil`; do tego czasu wszystko idzie na stary adres. Po wygaśnięciu
+linku (albo `access:revoke`) `/profil` i ustawienia mówią wprost, że link wygasł, zamiast
+„Oczekuje na potwierdzenie”.
+
+`dropped` przy `"kind":"email_change"` (kolejka pełna albo zatrzymanie `serve`): zmiana jest
+już zapisana i **liczy się do limitu 3 potwierdzeń na dobę** (licznik i token powstają przy
+zapisie formularza, przed kolejką), tylko link potwierdzający nie wyszedł (przy
+`access_mail_shutdown_timeout` mogło wyjść samo powiadomienie na stary adres — idzie pierwsze;
+linia `"kind":"email_change","outcome":"sent"` po `dropped` znaczy, że link jednak wyszedł,
+a `"outcome":"send_failed"` — że nie wyszedł);
+`/profil` pokazuje „Oczekuje na potwierdzenie”. Powiedz klientowi: link nie został wysłany — niech zapisze nowy adres w
+ustawieniach jeszcze raz (nowy link) albo anuluje zmianę; gdy limit dnia jest wyczerpany
+(błąd w formularzu), niech spróbuje, gdy minie doba od najstarszego z trzech linków. Pilna
+zmiana: tożsamość innym kanałem i poprawka w `psql` jak wyżej. `dropped` przy
+`"kind":"login_link"` z `access_mail_queue_full` albo `access_mail_shutdown` niczego nie
+zapisuje i nie liczy się do limitu profilu — klient po prostu prosi o link ponownie. Inaczej
+`access_mail_shutdown_timeout`: zadanie było już w toku, więc link jest zwykle już wydany i
+policzony do limitu profilu, a e-mail może jeszcze dojść (po linii `dropped` pojawi się wtedy
+`sent`; `send_failed` znaczy, że nie dojdzie) — niech klient najpierw sprawdzi pocztę. Gdy klient nie ma już dostępu do starej skrzynki: sprawdź
+tożsamość innym kanałem i popraw adres w `psql` jak wyżej.
 
 ## Backup i odtworzenie
 
@@ -487,9 +589,10 @@ pusty. Kod `1` z `not_migrated` — backup sprzed nowszej wersji aplikacji: uruc
 
 ## Reverse proxy: logi
 
-Ścieżki `/dostep/…` (logowanie) i `/wypis/…` (wypis) zawierają tokeny dające dostęp do
-profilu. **Proxy nie może zapisywać tych ścieżek w logach dostępu.** `deploy/caddy/Caddyfile`
-pomija je w logu dostępu (`log_skip`), a nagłówki `Cookie`/`Authorization` Caddy domyślnie
-maskuje. Przy zmianie konfiguracji proxy zachowaj oba; to samo dotyczy narzędzi monitoringu i
-APM przed aplikacją. HSTS ustawia sama aplikacja (`max-age=31536000`, bez `includeSubDomains`)
-— proxy nie dodaje drugiego nagłówka (smoke test sprawdza dokładnie jeden).
+Ścieżki `/dostep/…` (logowanie), `/wypis/…` (wypis) i `/potwierdz-email/…` (potwierdzenie nowego
+adresu) zawierają tokeny dające dostęp do profilu. **Proxy nie może zapisywać tych ścieżek w logach
+dostępu.** `deploy/caddy/Caddyfile` pomija je w logu dostępu (`log_skip`), a nagłówki
+`Cookie`/`Authorization` Caddy domyślnie maskuje. Przy zmianie konfiguracji proxy zachowaj oba; to
+samo dotyczy narzędzi monitoringu i APM przed aplikacją. HSTS ustawia sama aplikacja
+(`max-age=31536000`, bez `includeSubDomains`) — proxy nie dodaje drugiego nagłówka (smoke test
+sprawdza dokładnie jeden).

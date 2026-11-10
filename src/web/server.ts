@@ -1,16 +1,21 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Kysely } from "kysely";
+import { emailSchema } from "../domain/common.js";
 import { DomainError } from "../domain/errors.js";
 import {
   activateProfile,
+  cancelEmailChange,
+  confirmEmailChange,
   consumeLoginToken,
   deactivateProfile,
   deleteExpiredAccess,
+  deleteOldAccessEmails,
   deleteSession,
   findSession,
   getProfileStatus,
   isUsableAccessToken,
+  isUsableEmailChangeToken,
   SESSION_TTL_MS,
   unsubscribeTokenProfileName,
   unsubscribeWithToken,
@@ -30,13 +35,22 @@ import {
   readDigestCandidates,
 } from "../notifications/candidates.js";
 import { digestItemView, digestOrder } from "../notifications/digest.js";
+import type { EmailSender } from "../notifications/sender.js";
 import { formatWarsawMinute } from "../sources/normalize/warsaw-time.js";
+import { createAccessMailer, type AccessMailer } from "./access-mail.js";
+import { EXAMPLE_ITEMS, EXAMPLE_PROFILE_VIEW } from "./example.js";
 import { createMatchesSlot, type MatchesSlot } from "./matches-slot.js";
 import { multipartBoundary, multipartFieldValues } from "./multipart.js";
 import {
+  emailChangedPage,
+  emailConfirmPage,
+  emailTakenPage,
   errorPage,
+  examplePage,
   homePage,
   invalidLinkPage,
+  linkRequestedPage,
+  linkRequestLimitPage,
   loginConfirmPage,
   loginRequiredPage,
   loginRefusedPage,
@@ -52,13 +66,14 @@ import {
   unsubscribedPage,
 } from "./pages.js";
 import {
-  DUPLICATE_EMAIL_ERRORS,
+  EMAIL_CHANGE_LIMIT_ERRORS,
   formValuesFromStored,
   formValuesFromSubmission,
   PROFILE_FORM_MULTIPLE_FIELDS,
   PROFILE_FORM_SINGLE_FIELDS,
   validateProfileForm,
 } from "./profile-form.js";
+import { clientAddress, createRateLimiter, rateLimitKey, type RateLimiter } from "./rate-limit.js";
 import {
   clearedNoticeCookie,
   clearedSessionCookie,
@@ -75,7 +90,7 @@ import {
 } from "./session.js";
 
 /**
- * The web access (PR-06A, PR-06B; D-025, D-026, D-027): plain node:http, no framework.
+ * The web access (PR-06A, PR-06B, PR-10; D-025, D-026, D-027, D-031): plain node:http, no framework.
  * Deny by default — a request is served only when its path matches one of
  * the routes below and its method is one the route allows; the profile is
  * taken only from the session, never from the URL or a form. TLS is the
@@ -92,7 +107,17 @@ export const MAX_BODY_BYTES = 8 * 1024;
  * lists fit; every other route keeps MAX_BODY_BYTES.
  */
 export const PROFILE_FORM_MAX_BYTES = 64 * 1024;
-/** Most `name=value` pairs in the profile form: 7 fields, 10 categories, 16 voivodeships. */
+/**
+ * The „Wyślij mi link” form's limit (D-031): one e-mail field of at most
+ * 254 characters, urlencoded.
+ */
+export const LINK_FORM_MAX_BYTES = 1024;
+/** „Wyślij mi link” requests per client IP address and hour (D-031); one more gets 429. */
+export const LINK_REQUESTS_PER_IP = 10;
+const LINK_REQUEST_WINDOW_MS = 60 * 60 * 1000;
+/** Keys (IPv4 addresses, IPv6 /64s) the per-IP limit remembers at most; the oldest go first. */
+export const LINK_REQUEST_MAX_IPS = 10_000;
+/** Most `name=value` pairs in the profile form: 6 fields, 10 categories, 16 voivodeships. */
 export const PROFILE_FORM_MAX_FIELDS = 64;
 /** Matching offers shown on /dopasowania; the rest are counted (as in the digest). */
 export const MATCHES_SHOWN = 50;
@@ -130,20 +155,24 @@ type RouteName =
   | "home"
   | "health"
   | "stylesheet"
+  | "example"
+  | "link_request"
   | "login_link"
   | "login"
   | "profile"
   | "profile_settings"
   | "profile_unsubscribe"
   | "profile_resubscribe"
+  | "profile_cancel_email"
   | "matches"
   | "logout"
-  | "unsubscribe";
+  | "unsubscribe"
+  | "email_confirm";
 
 interface RouteMatch {
   readonly name: RouteName;
   readonly allow: readonly Method[];
-  /** The path segment after /dostep/ or /wypis/ (validated by the repository). */
+  /** The path segment after /dostep/, /wypis/ or /potwierdz-email/ (validated by the repository). */
   readonly token?: string;
 }
 
@@ -159,6 +188,10 @@ function matchRoute(path: string): RouteMatch | null {
       return { name: "stylesheet", allow: PAGE };
     case "/zdrowie":
       return { name: "health", allow: PAGE };
+    case "/przyklad":
+      return { name: "example", allow: PAGE };
+    case "/wyslij-link":
+      return { name: "link_request", allow: FORM };
     case "/dostep":
       return { name: "login", allow: FORM };
     case "/profil":
@@ -169,16 +202,19 @@ function matchRoute(path: string): RouteMatch | null {
       return { name: "profile_unsubscribe", allow: FORM };
     case "/profil/wlacz":
       return { name: "profile_resubscribe", allow: FORM };
+    case "/profil/anuluj-email":
+      return { name: "profile_cancel_email", allow: FORM };
     case "/dopasowania":
       return { name: "matches", allow: PAGE };
     case "/wyloguj":
       return { name: "logout", allow: FORM };
   }
-  const link = /^\/(dostep|wypis)\/([^/]+)$/.exec(path);
-  if (link?.[2] === undefined) return null;
-  return link[1] === "dostep"
-    ? { name: "login_link", allow: PAGE, token: link[2] }
-    : { name: "unsubscribe", allow: [...PAGE, "POST"], token: link[2] };
+  const link = /^\/(dostep|wypis|potwierdz-email)\/([^/]+)$/.exec(path);
+  const [, prefix, token] = link ?? [];
+  if (token === undefined) return null;
+  if (prefix === "dostep") return { name: "login_link", allow: PAGE, token };
+  if (prefix === "wypis") return { name: "unsubscribe", allow: [...PAGE, "POST"], token };
+  return { name: "email_confirm", allow: [...PAGE, "POST"], token };
 }
 
 /** Methods named in the log; anything else is logged as OTHER. */
@@ -401,6 +437,16 @@ export interface WebServerOptions {
   readonly healthTimeoutMs?: number;
   /** The database check of /zdrowie (tests). Default: `select 1` over `db`. */
   readonly healthProbe?: () => Promise<void>;
+  /**
+   * Sends the access e-mails (D-031): „Wyślij mi link” and the address
+   * confirmation. Absent or null: they are logged as not sent (tests).
+   */
+  readonly sender?: EmailSender | null;
+  /**
+   * CONTACT_EMAIL: shown on the home page, the 409 and 429 pages and in the
+   * notice to the old address; absent or null: no contact shown.
+   */
+  readonly contactEmail?: string | null;
 }
 
 export interface WebServer {
@@ -429,6 +475,10 @@ interface ServerState {
   readonly matchesPerSession: Map<string, number>;
   /** GET /zdrowie: true when the database answered in time (createHealthCheck). */
   readonly health: () => Promise<boolean>;
+  /** „Wyślij mi link” requests per client IP address (D-031). */
+  readonly linkRequests: RateLimiter;
+  /** The access e-mails, sent after the response (D-031). */
+  readonly mail: AccessMailer;
 }
 
 /**
@@ -503,7 +553,9 @@ async function handle(
   if (method !== "POST") {
     switch (route.name) {
       case "home":
-        return pageReply(homePage());
+        return pageReply(homePage({ contactEmail: options.contactEmail ?? null }));
+      case "example":
+        return pageReply(examplePage({ ...EXAMPLE_PROFILE_VIEW, items: EXAMPLE_ITEMS }));
       case "health": {
         // Plain text without any detail: only whether this process reaches the database.
         const healthy = await state.health();
@@ -531,6 +583,14 @@ async function handle(
         const name = await unsubscribeTokenProfileName(db, token);
         return pageReply(name === null ? invalidLinkPage() : unsubscribeConfirmPage(token, name));
       }
+      case "email_confirm": {
+        const token = route.token ?? "";
+        // Read-only like the login link: only the POST of the page's button changes the address.
+        const usable = await isUsableEmailChangeToken(db, token);
+        return pageReply(
+          usable ? emailConfirmPage(token) : invalidLinkPage({ emailChangeLink: true }),
+        );
+      }
       case "profile": {
         const session = await currentSession(req, db);
         if (session === null) return unauthenticated(req);
@@ -548,7 +608,15 @@ async function handle(
         if (session === null) return unauthenticated(req);
         const stored = await getProfileSettings(db, session.profileId);
         if (stored === null) return unauthenticated(req);
-        return pageReply(settingsPage(formValuesFromStored(stored), csrfTokenFor(session.token)));
+        return pageReply(
+          settingsPage(
+            formValuesFromStored(stored),
+            csrfTokenFor(session.token),
+            {},
+            stored.pendingEmail,
+            stored.pendingEmailExpired,
+          ),
+        );
       }
       case "matches": {
         const session = await currentSession(req, db);
@@ -585,21 +653,27 @@ async function handle(
           else counts.set(session.sessionId, left);
         }
       }
+      case "link_request":
       case "login":
       case "profile_unsubscribe":
       case "profile_resubscribe":
+      case "profile_cancel_email":
       case "logout":
         // Unreachable: these routes allow POST only (checked by the caller).
         return pageReply(errorPage(405));
     }
   }
 
+  // The forms without a session (no CSRF token): the login, „Wyślij mi
+  // link” and the address confirmation must provably come from our own pages.
+  const sessionless =
+    route.name === "login" || route.name === "link_request" || route.name === "email_confirm";
   // RFC 8058: a mail provider POSTs the one-click body from its own servers,
   // with no cookie and possibly a foreign Origin; the unguessable token in the
   // path is the authorization. Every other form must come from our own pages.
   if (route.name !== "unsubscribe" && !originAllowed(req.headers.origin, options.publicBaseUrl)) {
     return {
-      ...pageReply(route.name === "login" ? loginRefusedPage() : errorPage(403)),
+      ...pageReply(sessionless ? loginRefusedPage() : errorPage(403)),
       close: true,
     };
   }
@@ -610,27 +684,48 @@ async function handle(
   if (multipart === null && !isFormContentType(contentType)) {
     return { ...pageReply(errorPage(415)), close: true };
   }
-  const limit = route.name === "profile_settings" ? PROFILE_FORM_MAX_BYTES : MAX_BODY_BYTES;
+  const limit =
+    route.name === "profile_settings"
+      ? PROFILE_FORM_MAX_BYTES
+      : route.name === "link_request"
+        ? LINK_FORM_MAX_BYTES
+        : MAX_BODY_BYTES;
   const declared = req.headers["content-length"];
   if (declared !== undefined && Number(declared) > limit) {
     return { ...pageReply(errorPage(413)), close: true };
   }
   const body = await readBody(req, limit);
   if (body === null) return { ...pageReply(errorPage(413)), close: true };
+  // Login CSRF: there is no session yet, so no CSRF token; the request must
+  // provably come from our own pages (session.ts).
+  if (
+    sessionless &&
+    !loginRequestAllowed(req.headers.origin, req.headers["sec-fetch-site"], options.publicBaseUrl)
+  ) {
+    return pageReply(loginRefusedPage());
+  }
 
   switch (route.name) {
-    case "login": {
-      // Login CSRF: there is no session yet, so no CSRF token; the request
-      // must provably come from our own confirmation page (session.ts).
-      if (
-        !loginRequestAllowed(
-          req.headers.origin,
-          req.headers["sec-fetch-site"],
-          options.publicBaseUrl,
-        )
-      ) {
-        return pageReply(loginRefusedPage());
+    case "link_request":
+      return requestLink(req, body, options, state);
+    case "email_confirm": {
+      if (parseForm(body, []) === null) return pageReply(errorPage(400));
+      const confirmed = await confirmEmailChange(
+        db,
+        route.token ?? "",
+        readSessionCookie(req.headers.cookie),
+      );
+      if (confirmed.kind === "invalid") {
+        return pageReply(invalidLinkPage({ emailChangeLink: true }));
       }
+      if (confirmed.kind === "taken")
+        return pageReply(emailTakenPage(options.contactEmail ?? null));
+      // The confirming browser stays signed in when its session is the profile's.
+      return confirmed.keptSession
+        ? redirectToProfile("zmieniono_email")
+        : pageReply(emailChangedPage());
+    }
+    case "login": {
       const form = parseForm(body, ["token"]);
       if (form === null) return pageReply(errorPage(400));
       const opened = await consumeLoginToken(db, form.token ?? "");
@@ -654,9 +749,10 @@ async function handle(
       return pageReply(done ? unsubscribedPage() : invalidLinkPage());
     }
     case "profile_settings":
-      return saveProfileSettings(req, body, db);
+      return saveProfileSettings(req, body, db, state.mail);
     case "profile_unsubscribe":
     case "profile_resubscribe":
+    case "profile_cancel_email":
     case "logout": {
       // A form without exactly one csrf field counts as a missing token: 403.
       const submitted = parseForm(body, ["csrf"])?.csrf ?? "";
@@ -671,6 +767,11 @@ async function handle(
           headers: { Location: "/", "Set-Cookie": clearedSessionCookie() },
         };
       }
+      if (route.name === "profile_cancel_email") {
+        // Idempotent; false: the session ended meanwhile.
+        const cancelled = await cancelEmailChange(db, session.profileId, session.token);
+        return cancelled ? redirectToProfile("anulowano_zmiane") : unauthenticated(req);
+      }
       // Both idempotent: a repeated click changes nothing.
       const unsubscribe = route.name === "profile_unsubscribe";
       if (unsubscribe) await deactivateProfile(db, session.profileId);
@@ -680,12 +781,52 @@ async function handle(
     case "home":
     case "health":
     case "stylesheet":
+    case "example":
     case "login_link":
     case "profile":
     case "matches":
       // Unreachable: these routes do not allow POST (checked by the caller).
       return pageReply(errorPage(405));
   }
+}
+
+/** The form error of a „Wyślij mi link” address that is not one (no database involved). */
+const LINK_REQUEST_EMAIL_ERROR = "Podaj poprawny adres e-mail, na przykład nazwa@firma.pl.";
+
+/**
+ * POST /wyslij-link (D-031). The per-IP limit first (429), then the form;
+ * an address that is not one is shown again with the error (400). Any
+ * valid address gets the same page at once: the lookup, the per-profile
+ * limit and the send run after the response (access-mail.ts), so neither
+ * the page nor its timing tells whether the address has a profile.
+ */
+function requestLink(
+  req: IncomingMessage,
+  body: Buffer,
+  options: WebServerOptions,
+  state: ServerState,
+): Reply {
+  // IPv4 per address, IPv6 per /64 (rate-limit.ts).
+  const client = rateLimitKey(
+    clientAddress(req.socket.remoteAddress, req.headers["x-forwarded-for"]),
+  );
+  if (!state.linkRequests.allow(client)) {
+    return pageReply(linkRequestLimitPage(options.contactEmail ?? null));
+  }
+  const form = parseForm(body, ["email"]);
+  if (form === null) return pageReply(errorPage(400));
+  const value = form.email ?? "";
+  const email = emailSchema.safeParse(value);
+  if (!email.success) {
+    return pageReply(
+      homePage({
+        contactEmail: options.contactEmail ?? null,
+        linkRequest: { value, message: LINK_REQUEST_EMAIL_ERROR },
+      }),
+    );
+  }
+  state.mail.requestLoginLink(email.data);
+  return pageReply(linkRequestedPage());
 }
 
 /**
@@ -712,15 +853,17 @@ function redirectToProfile(notice: Notice): Reply {
 }
 
 /**
- * POST /profil/ustawienia (D-027): CSRF first, then the domain schema. An
- * invalid form is shown again with the submitted values (400); a valid one
- * is saved — with the revocation of other access when the e-mail changes —
- * and answered with 303 to /profil. Concurrent saves: the last one wins.
+ * POST /profil/ustawienia (D-027, D-031): CSRF first, then the domain
+ * schema. An invalid form is shown again with the submitted values (400); a
+ * valid one is saved and answered with 303 to /profil. A new address waits
+ * for its confirmation: the link to it and the notice to the current
+ * address are sent after the response. Concurrent saves: the last one wins.
  */
 async function saveProfileSettings(
   req: IncomingMessage,
   body: Buffer,
   db: Kysely<Database>,
+  mail: AccessMailer,
 ): Promise<Reply> {
   const form = parseMultiValueForm(
     body,
@@ -740,27 +883,33 @@ async function saveProfileSettings(
   const stored = await getProfileSettings(db, session.profileId);
   if (stored === null) return unauthenticated(req);
   const values = formValuesFromSubmission(form.single, form.multiple);
-  const result = validateProfileForm(values, stored.email);
-  if (!result.ok) return pageReply(settingsPage(values, csrf, result.errors));
-  try {
-    const saved = await updateProfileSettings(
-      db,
-      session.profileId,
-      result.settings,
-      session.token,
+  const result = validateProfileForm(values);
+  if (!result.ok) {
+    return pageReply(
+      settingsPage(values, csrf, result.errors, stored.pendingEmail, stored.pendingEmailExpired),
     );
-    if (saved === null) return unauthenticated(req);
-    return redirectToProfile(saved.emailChanged ? "zmieniono_email" : "zapisano");
-  } catch (error: unknown) {
-    if (
-      error instanceof DomainError &&
-      error.code === "duplicate" &&
-      error.constraint === "company_profiles_email_key"
-    ) {
-      return pageReply(settingsPage(values, csrf, DUPLICATE_EMAIL_ERRORS));
-    }
-    throw error;
   }
+  const saved = await updateProfileSettings(db, session.profileId, result.settings, session.token);
+  if (saved === null) return unauthenticated(req);
+  if (saved.kind === "email_change_limit") {
+    return pageReply(
+      settingsPage(
+        values,
+        csrf,
+        EMAIL_CHANGE_LIMIT_ERRORS,
+        stored.pendingEmail,
+        stored.pendingEmailExpired,
+      ),
+    );
+  }
+  if (saved.emailChange === null) return redirectToProfile("zapisano");
+  mail.emailChange({
+    profileId: session.profileId,
+    currentEmail: saved.emailChange.currentEmail,
+    newEmail: saved.emailChange.newEmail,
+    token: saved.emailChange.link.token,
+  });
+  return redirectToProfile("wyslano_potwierdzenie");
 }
 
 /** GET /dopasowania: the digest's candidates and rules for this one profile (D-027). */
@@ -835,6 +984,18 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       options.healthTimeoutMs ?? HEALTH_TIMEOUT_MS,
       logger,
     ),
+    linkRequests: createRateLimiter({
+      limit: LINK_REQUESTS_PER_IP,
+      windowMs: LINK_REQUEST_WINDOW_MS,
+      maxEntries: LINK_REQUEST_MAX_IPS,
+    }),
+    mail: createAccessMailer({
+      db: options.db,
+      sender: options.sender ?? null,
+      publicBaseUrl: options.publicBaseUrl,
+      logger,
+      contactEmail: options.contactEmail ?? null,
+    }),
   };
   const https = options.publicBaseUrl.startsWith("https:");
 
@@ -916,15 +1077,22 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   let cleanupRun: Promise<void> | null = null;
   const cleanup = (): void => {
     if (cleanupRun !== null) return; // the previous run is still going
-    cleanupRun = deleteExpiredAccess(options.db)
-      .then(
-        (deleted) => {
-          logger.debug("access cleanup", deleted);
-        },
-        (error: unknown) => {
-          logger.warn("access cleanup failed", { ...describeDatabaseFailure(error) });
-        },
-      )
+    // allSettled: the run ends only after both queries did, so close() never
+    // destroys the pool under a query still in flight.
+    cleanupRun = Promise.allSettled([
+      deleteExpiredAccess(options.db),
+      deleteOldAccessEmails(options.db),
+    ])
+      .then(([deleted, emails]) => {
+        for (const result of [deleted, emails]) {
+          if (result.status === "rejected") {
+            logger.warn("access cleanup failed", { ...describeDatabaseFailure(result.reason) });
+          }
+        }
+        if (deleted.status === "fulfilled" && emails.status === "fulfilled") {
+          logger.debug("access cleanup", { ...deleted.value, emails: emails.value });
+        }
+      })
       .finally(() => {
         cleanupRun = null;
       });
@@ -957,8 +1125,11 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
         });
         server.closeIdleConnections();
       });
-      // The cleanup must not outlive the database the caller closes next.
-      if (cleanupRun !== null) await cleanupRun;
+      // The cleanup and the e-mail being sent must not outlive the database
+      // and the sender the caller closes next. Waiting e-mails are dropped;
+      // the one being sent gets MAIL_SHUTDOWN_DEADLINE_MS (access-mail.ts),
+      // so with SHUTDOWN_GRACE_MS the stop stays within TimeoutStopSec.
+      await Promise.all([state.mail.close(), cleanupRun]);
     },
   };
 }

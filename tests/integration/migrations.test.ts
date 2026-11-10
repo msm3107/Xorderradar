@@ -34,8 +34,10 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
       "0005_deliveries",
       "0006_access",
       "0007_bk_source",
+      "0008_self_service_access",
     ]);
     expect(await tablesInSchema()).toEqual([
+      "access_emails",
       "access_tokens",
       "company_profiles",
       "deliveries",
@@ -62,6 +64,7 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
       "0005_deliveries",
       "0006_access",
       "0007_bk_source",
+      "0008_self_service_access",
     ]);
   });
 
@@ -128,6 +131,7 @@ describe.skipIf(skipWithoutDatabase)("migrations: concurrent runs (PostgreSQL)",
       "0005_deliveries",
       "0006_access",
       "0007_bk_source",
+      "0008_self_service_access",
     ]);
   });
 });

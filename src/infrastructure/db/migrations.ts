@@ -319,4 +319,66 @@ export const migrations: Readonly<Record<string, Migration>> = {
       `.execute(db);
     },
   },
+
+  "0008_self_service_access": {
+    async up(db: Kysely<unknown>) {
+      // A new address waits here until its owner confirms it (D-031): until
+      // then the digest, the links and the logins keep using `email`. Not
+      // unique: a taken address is only found out at the confirmation, so
+      // the form is no oracle for which addresses have a profile.
+      await sql`
+        ALTER TABLE company_profiles
+          ADD COLUMN pending_email text,
+          ADD CONSTRAINT company_profiles_pending_email_check
+            CHECK (pending_email = lower(btrim(pending_email)) AND pending_email <> '')
+      `.execute(db);
+
+      // The confirmation link of a pending address (purpose `email_change`,
+      // single use, 24 hours, D-031) is bound to that address; the other
+      // purposes carry none. It is used up by deleting it, so used_at stays
+      // a login-only column (access_tokens_used_at_check is unchanged).
+      await sql`
+        ALTER TABLE access_tokens
+          ADD COLUMN email text,
+          DROP CONSTRAINT access_tokens_purpose_check,
+          ADD CONSTRAINT access_tokens_purpose_check
+            CHECK (purpose IN ('login', 'unsubscribe', 'email_change')),
+          DROP CONSTRAINT access_tokens_expiry_check,
+          ADD CONSTRAINT access_tokens_expiry_check
+            CHECK (expires_at > created_at
+                   AND expires_at <= created_at + CASE purpose
+                     WHEN 'login' THEN interval '168 hours'
+                     WHEN 'email_change' THEN interval '24 hours'
+                     ELSE interval '1440 hours'
+                   END),
+          ADD CONSTRAINT access_tokens_email_check
+            CHECK ((purpose = 'email_change') = (email IS NOT NULL)
+                   AND email = lower(btrim(email)))
+      `.execute(db);
+
+      // The access e-mails a profile was sent (D-031): a self-service login
+      // link or an address confirmation. Only what the daily limits count —
+      // the profile, the kind and the time, never an address or a token —
+      // and deleted by `serve`'s cleanup once older than a day.
+      await sql`
+        CREATE TABLE access_emails (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          profile_id uuid NOT NULL,
+          kind text NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT access_emails_profile_id_fkey
+            FOREIGN KEY (profile_id) REFERENCES company_profiles (id) ON DELETE CASCADE,
+          CONSTRAINT access_emails_kind_check CHECK (kind IN ('login_link', 'email_change'))
+        )
+      `.execute(db);
+      // The limit's count per profile and kind, and the cascade.
+      await sql`
+        CREATE INDEX access_emails_profile_kind_created_at_idx
+          ON access_emails (profile_id, kind, created_at)
+      `.execute(db);
+      await sql`CREATE INDEX access_emails_created_at_idx ON access_emails (created_at)`.execute(
+        db,
+      );
+    },
+  },
 };

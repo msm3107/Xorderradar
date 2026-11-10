@@ -23,15 +23,20 @@ WorkingDirectory=/opt/radar-zamowien
 # in deploy/cron/radar; deploy/radar.env.example keeps it readable by
 # systemd's EnvironmentFile= too. The file is root:radar 0640.
 ExecStart=/usr/bin/node --env-file=/etc/radar/radar.env dist/main.js serve
-# SIGTERM starts the graceful shutdown (open requests finish, the pool closes).
+# SIGTERM starts the graceful shutdown: open requests get up to 10 s, the
+# access e-mail being sent up to 5 s more, then the pool closes — well within
+# TimeoutStopSec (docs/RUNBOOK.md, „Limity”).
 KillSignal=SIGTERM
 TimeoutStopSec=20
 Restart=on-failure
 RestartSec=5
 
 # --- Hardening (systemd-analyze security radar-serve) ---
-# `serve` writes nothing to disk (no outbox, no backup, logs to journald), so
-# the whole file system is read-only for it and no ReadWritePaths= is needed.
+# `serve` writes nothing to disk (no backup, logs to journald) except the
+# access e-mails (D-031) in EMAIL_MODE=test: they go to EMAIL_OUTBOX_DIR,
+# the one writable path ("-": no error while the directory does not exist).
+# Keep it equal to EMAIL_OUTBOX_DIR in /etc/radar/radar.env.
+ReadWritePaths=-/var/lib/radar/outbox
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -47,11 +52,18 @@ ProtectProc=invisible
 # No capability at all: port 3000 needs none.
 CapabilityBoundingSet=
 AmbientCapabilities=
-# TCP to PostgreSQL and from Caddy; AF_UNIX for a local PostgreSQL socket.
+# TCP to PostgreSQL, from Caddy and, in EMAIL_MODE=smtp, to the SMTP server;
+# AF_UNIX for a local PostgreSQL socket.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 # Only the loopback: Caddy connects from it and PostgreSQL is reached over it.
-# `serve` makes no outbound request. With a database on another host, add its
-# address to IPAddressAllow=.
+# In the default EMAIL_MODE=test `serve` makes no outbound request (the access
+# e-mails go to the outbox). EMAIL_MODE=smtp sends them (D-031) to SMTP_URL's
+# host and needs the drop-in deploy/systemd/radar-serve.service.d/smtp.conf,
+# which lifts this filter (docs/DEPLOY.md, point 7). `serve` fetches no source
+# and no URL. With a database on another host, put its address in an
+# IPAddressAllow= line of a drop-in in /etc/systemd/system/radar-serve.service.d/,
+# not in this unit: reinstalling the unit from the repository would drop it
+# (docs/DEPLOY.md, point 7; docs/RUNBOOK.md).
 IPAddressDeny=any
 IPAddressAllow=localhost
 RestrictNamespaces=yes

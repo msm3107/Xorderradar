@@ -131,7 +131,7 @@ describe("pages", () => {
   });
 
   const newLinkHint =
-    "Jeśli link został już użyty lub wygasł, odpowiedz na ostatnią wiadomość — operator wyśle nowy link.";
+    "Jeśli link został już użyty lub wygasł, wpisz adres e-mail profilu — wyślemy nowy link.";
   const resubscribeHint =
     "Jeśli to pomyłka, odpowiedz na ostatnią wiadomość — włączymy powiadomienia ponownie.";
 
@@ -146,8 +146,13 @@ describe("pages", () => {
     expect(loginRequired.html).toContain("Użyj linku „Twój profil” z ostatniej wiadomości");
     const home = homePage();
     expect(home.html).toContain("użyj linku „Twój profil” z ostatniej wiadomości");
-    for (const page of [invalid, loginRequired, home]) {
+    for (const page of [invalid, loginRequired]) {
       expect(page.html).toContain(`<p>${newLinkHint}</p>`);
+    }
+    // PR-10: the „Wyślij mi link” form replaces asking the operator.
+    for (const page of [invalid, loginRequired, home]) {
+      expect(page.html).toContain('<form method="post" action="/wyslij-link">');
+      expect(page.html).not.toContain("operator wyśle nowy link");
       expect(page.html).not.toMatch(/<script|\sstyle=|<style|\son[a-z]+=/i);
     }
   });

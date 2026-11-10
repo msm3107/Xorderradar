@@ -73,7 +73,7 @@ Szacunek: 1–2 dni pracy właściciela. Wykonuje właściciel [W], według list
 
 ## Etap 3: Gotowość do pilotażu
 
-Szacunek: 1–2 tygodnie. Etap ma trzy niezależne ścieżki: kod, pocztę i prawo.
+Szacunek: 2–3 tygodnie. Etap ma trzy niezależne ścieżki: kod, pocztę i prawo.
 
 ### 3a. PR-09: kalibracja dopasowań i narzędzia operatora [A]
 
@@ -120,9 +120,23 @@ zakresie PR-08.
 
 Teksty sprawdza prawnik. Agenci mogą przygotować szkic, ale nie stanowi on porady prawnej.
 
+### 3d. Seria UX/QOL: PR-10 – PR-13 [A]
+
+Odpowiedź na niezależny audyt UX z 2026-11-06. Plan każdego PR-a jest w `docs/PR_PLAN.md`.
+
+| PR    | Cel                               | Co rozwiązuje                                                                |
+| ----- | --------------------------------- | ---------------------------------------------------------------------------- |
+| PR-10 | Wejście bez pułapek               | „wyślij mi link”, potwierdzenie zmiany e-maila, strona główna i `/przyklad`  |
+| PR-11 | Karta oferty do oceny w 20 sekund | wartość, termin po ludzku, opis, czytelne „dlaczego”, temat bez nazwy firmy  |
+| PR-12 | Ocena trafności i eksport         | „Trafne/Nietrafne” w mailu i na liście, `feedback:report`, CSV               |
+| PR-13 | Ustawienia bez pułapek            | „Cała Polska” / wybrane, bez pola „Powiaty”, siatka, odświeżanie zamiast 503 |
+
+Kolejność jest stała: PR-10 → PR-13. Każdy PR jest otwierany dopiero wtedy, gdy jest gotowy
+do review właściciela.
+
 ### Kryterium wyjścia etapu 3
 
-- PR-09 jest zmergowany.
+- PR-09 i PR-10 – PR-13 są zmergowane.
 - Digest testowy dotarł do skrzynki odbiorczej, a nie do spamu.
 - Dokumenty prawne są gotowe do przekazania firmom pilotażowym.
 
@@ -147,14 +161,13 @@ Szacunek: 4–8 tygodni.
 
 ### Zbieranie danych
 
-Tygodniowa ankieta, 3 pytania:
+Oceny „trafne” i „nietrafne” zbiera produkt: przyciski w mailu i na `/dopasowania` (PR-12).
+Właściciel czyta je z `feedback:report`.
 
-1. Ile ofert było trafnych?
-2. Co przegapiliśmy?
-3. Czy coś z tego realnie złożysz?
+Tygodniowa ankieta ma 2 pytania:
 
-Oceny „trafne” i „nietrafne” właściciel zapisuje w arkuszu poza systemem. W pilotażu nie
-dodajemy do tego żadnej funkcji w produkcie.
+1. Co przegapiliśmy?
+2. Czy coś z tego realnie złożysz?
 
 ### Metryki
 
@@ -162,7 +175,7 @@ Wszystkie progi to hipotezy do zatwierdzenia przez właściciela.
 
 | Metryka                                     | Źródło danych                | Hipoteza progu |
 | ------------------------------------------- | ---------------------------- | -------------- |
-| Trafność (trafne / wszystkie w digeście)    | ankieta                      | ≥ 60%          |
+| Trafność (trafne / wszystkie ocenione)      | `feedback:report` (PR-12)    | ≥ 60%          |
 | Dni z dostarczonym digestem (bez awarii)    | `status`, `deliveries`       | ≥ 95%          |
 | Firmy aktywne po 4 tygodniach (bez wypisu)  | `company_profiles`, `/wypis` | ≥ 70%          |
 | Firmy, które złożyły ofertę z digestu       | ankieta                      | ≥ 2 firmy      |
@@ -188,10 +201,10 @@ Każdy punkt to osobny PR z wpisem w `docs/DECISIONS.md` (Phase 5 w `docs/ROADMA
 
 1. **[A] Ograniczanie liczby żądań** na proxy albo w aplikacji. Obejmuje `/dopasowania`
    między sesjami (PR-06B C&S L-2). To warunek konieczny każdego publicznego linku.
-2. **[A] Samoobsługowe wejście:** formularz „wyślij mi link” z ochroną przed sprawdzaniem,
-   czy e-mail ma konto, i z limitem żądań. Wcześniej właściciel ustala TTL tokenów
-   (dziś 7/60/30 dni).
-3. **[A] Powiadomienie starego adresu po zmianie e-maila** (otwarte od PR-06B).
+2. **[A] Samoobsługowe wejście** — przeniesione do PR-10 (etap 3d). TTL tokenów zostają
+   bez zmian (7/60/30 dni). W etapie 5 zostaje samodzielna rejestracja nowej firmy.
+3. **[A] Powiadomienie starego adresu po zmianie e-maila** — przeniesione do PR-10 (etap 3d),
+   razem z potwierdzaniem nowego adresu.
 4. **[A] Pomiar `/dopasowania` na danych z pilotażu.** Optymalizacja tylko wtedy, gdy pomiar
    ją uzasadnia.
 5. **[W] Płatności.** Na start przelew i faktura ręczna, bez kodu. Integracja płatności
@@ -199,7 +212,7 @@ Każdy punkt to osobny PR z wpisem w `docs/DECISIONS.md` (Phase 5 w `docs/ROADMA
 6. **[W] + [P] Regulamin usługi płatnej**, aktualizacja polityki prywatności.
 7. **[W] Strona produktu (landing):**
    - komunikat;
-   - przykładowy digest na danych pseudonimizowanych;
+   - przykładowy digest na danych pseudonimizowanych (`/przyklad` od PR-10);
    - cennik;
    - regulamin;
    - polityka prywatności;
@@ -255,7 +268,7 @@ Hipotezy do zatwierdzenia przez właściciela:
 - konwersja z okresu próbnego na płatny;
 - churn miesięczny;
 - koszt pozyskania klienta (CAC) a przychód z klienta;
-- trafność digestu (dalej ankieta, rzadziej niż w pilotażu).
+- trafność digestu (`feedback:report`, oceny w produkcie od PR-12).
 
 ### Kryterium wyjścia
 
@@ -272,7 +285,7 @@ Decyzja o skali, zapisana w `docs/DECISIONS.md`:
 | Ryzyko                                                              | Skutek                       | Zabezpieczenie                                                                                                                                                                                                                                                                                                  |
 | ------------------------------------------------------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | API Bazy Konkurencyjności jest nieudokumentowane i może się zmienić | brak ofert BK                | zmiana struktury: `SourceFormatError` → `invalid_document`, alert z `status` (także lista krótsza niż jej `meta.total`); pojedyncze pominięcia (`detail_*`) widoczne tylko w podsumowaniu `ingest` i `ingest.log` — operator sprawdza je po backfillu (DEPLOY §6); próba błędu źródła (§13); szybki PR poprawki |
-| Niska trafność dopasowań                                            | odejście firm w 1. tygodniu  | PR-09 przed pilotażem, ankieta tygodniowa, kalibracja na profilach pilotażowych                                                                                                                                                                                                                                 |
+| Niska trafność dopasowań                                            | odejście firm w 1. tygodniu  | PR-09 przed pilotażem, oceny w produkcie (PR-12), kalibracja na profilach pilotażowych                                                                                                                                                                                                                          |
 | Digest w spamie                                                     | brak wartości mimo działania | SPF/DKIM/DMARC, test na własnej skrzynce, monitoring zwrotów                                                                                                                                                                                                                                                    |
 | Pojedynczy VPS                                                      | przerwa w dostawach          | kopia poza hostem, ćwiczenie odtworzenia, heartbeat, zewnętrzny monitoring dostępności                                                                                                                                                                                                                          |
 | Wąskie gardło operatora (profile przez CLI)                         | limit kilkunastu firm        | samoobsługowe wejście w etapie 5, nie wcześniej                                                                                                                                                                                                                                                                 |
@@ -284,7 +297,7 @@ Lista obejmuje tylko punkty blokujące kolejne etapy:
 1. Zakres PR-09: które punkty z etapu 3a (przed etapem 4).
 2. Zgoda na `smtp` i domena nadawcy (przed etapem 4).
 3. Progi metryk pilotażu z tabeli w etapie 4 (przed etapem 4).
-4. TTL tokenów i formularz „wyślij mi link” (przed etapem 5).
+4. ~~TTL tokenów i formularz „wyślij mi link”~~ — rozstrzygnięte 2026-11-06: TTL bez zmian, formularz w PR-10.
 5. Model płatności, cennik i hosting landingu (przed etapem 5).
 6. RODO art. 14 dla danych kontaktowych z ogłoszeń: wyjątek z art. 14 ust. 5 lit. b z LIA
    i informacją publiczną albo inny sposób (etap 3c, przed etapem 4).

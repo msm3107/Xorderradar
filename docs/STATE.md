@@ -1,13 +1,12 @@
 # Current State
 
 Current phase: PHASE 4 — PILOT
-Current PR: PR-09 — Kalibracja dopasowań i narzędzia operatora
-Status: PR-08 **MERGED in PR #14 (366618e)**. PR-09 (owner's choice 2026-11-06: scoring
-calibration, operator delivery commands, category labels/footer, `source_incomplete`) **PR
-READY** (Code & Safety Review PASS, Quality Review ACCEPT); owner review of PR #15 PASS with
-one Medium + two QoL asks, implemented in a fix round awaiting the reviewers; scope in
-`docs/PR_PLAN.md` → PR-09. Owner steps on the VPS for PR-08 (AC1, `bk`
-backfill, DEPLOY §6) remain in Blockers.
+Current PR: PR-10 — Wejście bez pułapek (UX/QOL series PR-10 – PR-13)
+Status: PR-08 **MERGED in PR #14 (366618e)**. PR-09 **MERGED in PR #15 (42dd008)**. PR-10
+(first PR of the UX/QOL series from the independent UX audit of 2026-11-06; plan in
+`docs/PR_PLAN.md` → PR-10 – PR-13, `docs/LAUNCH_ROADMAP.md` → 3d) **READY** (Code & Safety
+Review PASS, Quality Review ACCEPT), base branch merged in after PR #15; its PR opens for owner
+review. Owner steps on the VPS for PR-08 (AC1, `bk` backfill, DEPLOY §6) remain in Blockers.
 
 ## Completed
 
@@ -684,9 +683,59 @@ Round-1 fixes:
 
 ## In progress
 
+**PR-10 — Wejście bez pułapek** (`docs/PR_PLAN.md` → PR-10) — READY locally: Code & Safety
+Review PASS (re-checked after every fix round; the last round without findings), Quality
+Review ACCEPT (all 6 ACs met). D-031 new; D-026 and D-027 changed. Migration
+`0008_self_service_access`.
+
+- „Wyślij mi link” (`POST /wyslij-link`, form on `/` and on the invalid-link page): login-CSRF
+  like `/dostep`, body ≤ 1 KiB, the same 200 page for every valid address (existing, unknown,
+  inactive, limit reached). Lookup, limit and sending run after the response in an in-memory
+  queue of `serve` (`src/web/mail-queue.ts`: 1 running, ≤ 20 waiting, overflow
+  `access_mail_queue_full`; on shutdown waiting jobs drop and the running one gets ≤ 5 s). One
+  send attempt, no retry. The link is a login token (one use, 7 days, D-026), also for
+  `active = false`; only the current address is looked up, never `pending_email`.
+- Limits: ≤ 3 e-mails per profile and kind in 24 h, counted in `access_emails` (profile, kind,
+  time; never the address or a token) under the profile row lock (`FOR NO KEY UPDATE`, D-027
+  lock order), written before sending; ≤ 10 requests per IP per hour in memory (≤ 10 000 keys,
+  IPv6 by /64; the IP from the last `X-Forwarded-For` entry only behind the loopback Caddy) →
+  429 page.
+- E-mail change with confirmation: the `email_confirm` field is gone; the new address goes to
+  `pending_email` while digest, links and login stay on the old one. The old address gets a
+  notice without links and without the new address (sent first; the confirmation follows even
+  when the notice fails), the new one `/potwierdz-email/<token>` (purpose `email_change`, one
+  use, 24 h, bound to the address). `GET` changes nothing; `POST` swaps the address in one
+  transaction with `revokeOtherAccess`. Of two parallel confirmations one wins, the other gets
+  the invalid-link page; an address taken at confirmation gets a neutral message and no
+  change; the form no longer reports a taken address (no oracle). „Anuluj zmianę” (POST + CSRF)
+  clears `pending_email` and the token.
+- Home page `/` (what it is, sources BZP + BK, how to start, the form, `/przyklad`, contact);
+  `/przyklad` renders a pseudonymised sample with the `/dopasowania` view, without the
+  database; optional `CONTACT_EMAIL` (validated at start; shown on the home, 409 and 429 pages
+  and in the old-address notice; never logged). `GET /dostep/<token>` says the link works once.
+- Deploy: `radar-serve.service` writes only to the outbox (`ReadWritePaths=-…`) and reaches
+  only the loopback with `EMAIL_MODE=test`; the drop-in
+  `deploy/systemd/radar-serve.service.d/smtp.conf` resets `IPAddressDeny` for `smtp`. Caddy
+  redacts `/potwierdz-email/` in access logs like `/dostep/` and `/wypis/`. RUNBOOK („klient
+  nie dostaje linku”, limits, `CONTACT_EMAIL`), SECURITY, DEPLOY, ARCHITECTURE, README and
+  PRODUCT (promise = BZP + BK) updated.
+- Changed tracked assertions (contract change of scope item 3, D-027 → D-031): the
+  `email_confirm`/„Powtórz adres e-mail” cases in `tests/web-profile-form.test.ts`,
+  `tests/web-pages.test.ts` (field count 6 → 5) and `tests/integration/web-profile.test.ts`
+  (the taken-address field error and the immediate-change revocation test became pending
+  address and confirmation tests); `NOTICES` in `tests/web-session.test.ts` gains the new
+  notices; `tests/deploy-artifacts.test.ts` (the serve unit has `ReadWritePaths` for the
+  outbox; Caddy `@token` and the log redaction include `/potwierdz-email/`); the migration
+  lists gain `0008_self_service_access`. 2094 tests in 61 files (+76).
+- Deferred: Quality NIT 1 — `/przyklad` dates are fixed (already in the past); make them
+  relative to the render time with an injectable clock (`docs/PR_PLAN.md` → PR-11). Optional
+  C&S notes: the test helpers wait 5 s, as long as the Vitest timeout; in RUNBOOK the
+  `login_link` database step can still log `failed`/`no_profile`/`limit_reached` after
+  `dropped`; `deploy/radar.env.example` could say „when an address change is requested”.
+
 **PR-09 — Kalibracja dopasowań i narzędzia operatora** (`docs/PR_PLAN.md` → PR-09) —
-PR READY: Code & Safety Review PASS (round 3), Quality Review ACCEPT (round 2); awaiting owner
-review. D-023, D-024, D-028 updated.
+MERGED in PR #15 (42dd008) after owner review PASS: Code & Safety Review PASS (round 3),
+Quality Review ACCEPT (round 2). D-023, D-024, D-028 updated.
 
 - Scoring (D-023): a keyword gives +30 when a counted keyword's assigned hit is in the title,
   +15 (`POINTS.keywordInDescription`) when all are in the description; threshold 50 and other
@@ -924,10 +973,10 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
 
 ## Next action
 
-1. PR-09: PR READY (Code & Safety Review PASS round 3, Quality Review ACCEPT round 2); owner
-   review PASS with three asks → fix round done (PR-09 section), next: Code & Safety Review
-   and Quality Review of the round, then back to the owner (not merged by the agents); check
-   CI on its head. On the VPS
+0. PR-10: READY (Code & Safety Review PASS, Quality Review ACCEPT), base branch merged in
+   after PR #15 → owner review of its PR (not merged by the agents). Then PR-11 – PR-13 in
+   order (`docs/PR_PLAN.md`). Each PR opens only when ready for owner review.
+1. PR-09: MERGED in PR #15 (42dd008). On the VPS
    (PR-08 is merged, 366618e): PR-07B checklist (`docs/DEPLOY.md` §13) if not done yet, then
    PR-08 AC1 and the `bk` backfill (Blockers). Follow-ups from the PR-08 reviews (owner to
    choose the PR):
@@ -953,8 +1002,9 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
    - Nits: `docs/SECURITY.md` bk line wrapping and a repeated sentence; long attribution line in
      `docs/LAUNCH_ROADMAP.md`.
      Still open from PR-06B: last write wins, already-sent offers on `/dopasowania`, the shared
-     `/dopasowania` slot. Still open from PR-06A: TTLs (7/60/30 days), a self-service "e-mail me a
-     link" form, §8.3 leniency on `/wypis`, forwarded digests.
+     `/dopasowania` slot. Still open from PR-06A: TTLs (7/60/30 days; kept by the owner's
+     decision of 2026-11-06), §8.3 leniency on `/wypis`, forwarded digests. (Done in PR-10:
+     the self-service „Wyślij mi link” form, D-031.)
 2. Left after PR-07B (owner to choose the PR): rate limiting at the proxy (incl.
    `/dopasowania` across sessions, PR-06B C&S L-2); `serve` uptime is covered only by the
    external uptime check recommended in DEPLOY §10 (the heartbeat covers the cron commands).
@@ -968,8 +1018,8 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
    - When a source starts providing counties, update the counties hint/note (`src/web/pages.ts`)
      and D-023/D-027.
    - Re-measure `/dopasowania` on pilot data (C&S measured 8.5–9 s for 5 000 candidates with 3.2 KB descriptions).
-   - Notify the old address after an e-mail change (needs sending from the web process; the
-     real protection against a hijacked session changing the address).
+   - (Done in PR-10: the old address gets a notice when a change is requested, and the change
+     waits for a confirmation from the new address, D-031.)
    - Build `CARD_LABELS` (`src/web/pages.ts`) from label constants exported by the digest
      (C&S L-3; today a renamed digest label would move that field into `<details>`).
    - Accessibility nits (Quality Low): the repeated „Szczegóły ogłoszenia” summary label could
@@ -1179,6 +1229,19 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-10, PR-10 after merging the base branch (PR #15, 42dd008) in (Node 22, pnpm 10.28.0,
+PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2133 tests passed in 61 files,
+none skipped (2094 PR-10 + 39 from the PR-09 owner-review round). Conflicts only in README,
+STATE and one `src/cli.ts` config block (both sides kept).
+
+2026-11-09, PR-10 before the PR (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2094 tests passed in 61 files,
+none skipped (run by the coder, the Code & Safety and Quality reviewers and the coordinator).
+No dependency changes; no network requests to live sources; no e-mail sent (tests use the
+`test` transport and in-memory senders). Working-tree fingerprint unchanged across every
+reviewer run.
 
 2026-11-09, PR-09 owner-review round (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test_pr09
 REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2057 tests passed in 58 files,

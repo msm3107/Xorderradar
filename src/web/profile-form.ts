@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import { emailSchema, hasControlCharacter } from "../domain/common.js";
+import { hasControlCharacter } from "../domain/common.js";
 import {
   companyProfileSettingsSchema,
   MAX_KEYWORD_TOKENS,
@@ -10,7 +10,7 @@ import { countyKey } from "../matching/match.js";
 import { plural } from "../notifications/digest.js";
 
 /**
- * The profile form (PR-06B, D-027): the submitted values, their validation
+ * The profile form (PR-06B, D-027, D-031): the submitted values, their validation
  * with the domain schema plus profile:create's county-name check (both
  * reused, no rule is repeated here) and the Polish message for each issue.
  * Pure: no I/O.
@@ -21,7 +21,6 @@ export const PROFILE_FORM_SINGLE_FIELDS = [
   "csrf",
   "name",
   "email",
-  "email_confirm",
   "counties",
   "include_keywords",
   "exclude_keywords",
@@ -33,7 +32,6 @@ export const PROFILE_FORM_MULTIPLE_FIELDS = ["categories", "voivodeships"] as co
 export interface ProfileFormValues {
   readonly name: string;
   readonly email: string;
-  readonly emailConfirm: string;
   readonly categories: readonly string[];
   readonly voivodeships: readonly string[];
   readonly counties: string;
@@ -50,7 +48,6 @@ export type ProfileFormErrors = Partial<Record<ProfileFormField, readonly string
 export const FIELD_LABELS: Readonly<Record<ProfileFormField, string>> = {
   name: "Nazwa firmy",
   email: "Adres e-mail",
-  emailConfirm: "Powtórz adres e-mail",
   categories: "Kategorie",
   voivodeships: "Województwa",
   counties: "Powiaty",
@@ -62,7 +59,6 @@ export const FIELD_LABELS: Readonly<Record<ProfileFormField, string>> = {
 export const FIELD_ORDER: readonly ProfileFormField[] = [
   "name",
   "email",
-  "emailConfirm",
   "categories",
   "voivodeships",
   "counties",
@@ -87,12 +83,11 @@ function entries(text: string): Entry[] {
     .filter((entry) => entry.value !== "");
 }
 
-/** The stored profile as form values (the e-mail confirmation starts empty). */
+/** The stored profile as form values (the current address, not a pending one). */
 export function formValuesFromStored(stored: StoredProfileSettings): ProfileFormValues {
   return {
     name: stored.name,
     email: stored.email,
-    emailConfirm: "",
     categories: stored.categories,
     voivodeships: stored.voivodeships,
     counties: stored.counties.join("\n"),
@@ -109,7 +104,6 @@ export function formValuesFromSubmission(
   return {
     name: single.name,
     email: single.email,
-    emailConfirm: single.email_confirm,
     categories: multiple.categories,
     voivodeships: multiple.voivodeships,
     counties: single.counties,
@@ -134,14 +128,11 @@ const SCHEMA_FIELDS: Readonly<Record<string, ProfileFormField>> = {
 };
 
 /**
- * Validates the form with the domain's settings schema. `currentEmail` is the
- * stored address: a different one must be typed twice (the confirmation is
- * compared after the schema's normalization, so case and spaces do not count).
+ * Validates the form with the domain's settings schema. A new address is not
+ * typed twice: it takes effect only through the confirmation link sent to it
+ * (D-031), so a typo cannot lock the customer out.
  */
-export function validateProfileForm(
-  values: ProfileFormValues,
-  currentEmail: string,
-): ProfileFormResult {
+export function validateProfileForm(values: ProfileFormValues): ProfileFormResult {
   const lists = {
     counties: entries(values.counties),
     includeKeywords: entries(values.includeKeywords),
@@ -206,27 +197,21 @@ export function validateProfileForm(
       );
     }
   });
-  const email = result.success ? result.data.email : emailSchema.safeParse(values.email).data;
-  if (email !== undefined && email !== currentEmail) {
-    const confirmation = emailSchema.safeParse(values.emailConfirm).data;
-    if (confirmation !== email) {
-      add(
-        "emailConfirm",
-        values.emailConfirm.trim() === ""
-          ? "Wpisz nowy adres e-mail jeszcze raz."
-          : "Adresy e-mail różnią się. Wpisz nowy adres dwa razy tak samo.",
-      );
-    }
-  }
   if (result.success && found.size === 0) return { ok: true, settings: result.data };
   return { ok: false, errors: capped(found) };
 }
 
-/** The message shown when another profile uses the address (UNIQUE violation). */
-export const DUPLICATE_EMAIL_ERRORS: ProfileFormErrors = {
+/**
+ * A new address while the profile had ACCESS_EMAILS_PER_DAY confirmation
+ * e-mails in the last 24 hours (D-031): nothing is saved, not even the other
+ * fields — the form shows them again, and with the current address restored
+ * they save (updateProfileSettings).
+ */
+export const EMAIL_CHANGE_LIMIT_ERRORS: ProfileFormErrors = {
   email: [
-    "Ten adres e-mail jest już przypisany do innego profilu. Jeśli to Twój drugi profil, " +
-      "odpowiedz na ostatnią wiadomość.",
+    "W ciągu doby wysłaliśmy już 3 linki potwierdzające zmianę adresu. Nie zapisaliśmy " +
+      "żadnej zmiany. Nowy adres zapiszesz po upływie doby. Pozostałe zmiany zapiszesz " +
+      "teraz, wpisując z powrotem obecny adres.",
   ],
 };
 
@@ -293,8 +278,5 @@ function issueMessage(
         return inLine(`najwyżej ${String(MAX_KEYWORD_TOKENS)} słów`);
       }
       return inLine("wpis zawiera niedozwolone znaki");
-    case "emailConfirm":
-      // Not a schema field: its messages come from validateProfileForm.
-      return "Wpisz nowy adres e-mail jeszcze raz.";
   }
 }

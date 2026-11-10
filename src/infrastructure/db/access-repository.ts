@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import { sql, type Kysely, type Transaction } from "kysely";
-import type { AccessTokenPurpose, Database } from "./schema.js";
+import { sql, type ExpressionBuilder, type Kysely, type Transaction } from "kysely";
+import { isDeadlock, isUniqueViolation } from "./errors.js";
+import type { AccessEmailKind, AccessTokenPurpose, Database } from "./schema.js";
 
 /**
  * Secret tokens and sessions of the web access (PR-06A, D-026). Every
@@ -18,11 +19,21 @@ export const LOGIN_TOKEN_TTL_MS = 168 * HOUR_MS;
 export const UNSUBSCRIBE_TOKEN_TTL_MS = 1440 * HOUR_MS;
 /** A browser session: absolute expiry, 30 days, not extended by use. */
 export const SESSION_TTL_MS = 720 * HOUR_MS;
+/** The confirmation link of a new address (D-031): single use, 24 hours. */
+export const EMAIL_CHANGE_TOKEN_TTL_MS = 24 * HOUR_MS;
 
 const TOKEN_TTL_MS: Readonly<Record<AccessTokenPurpose, number>> = {
   login: LOGIN_TOKEN_TTL_MS,
   unsubscribe: UNSUBSCRIBE_TOKEN_TTL_MS,
+  email_change: EMAIL_CHANGE_TOKEN_TTL_MS,
 };
+
+/**
+ * Access e-mails of one kind a profile gets per 24 hours at most (D-031): a
+ * self-service login link, or an address confirmation. Counted in the
+ * database under the profile row's lock, so concurrent requests cannot pass it.
+ */
+export const ACCESS_EMAILS_PER_DAY = 3;
 
 const TOKEN_BYTES = 32;
 /** The form of every secret token: 32 bytes as base64url without padding. */
@@ -54,11 +65,24 @@ export interface IssuedToken {
   readonly expiresAt: Date;
 }
 
-/** Stores a new token of `purpose` for the profile and returns the secret. */
+/**
+ * Stores a new token of `purpose` for the profile and returns the secret.
+ * An `email_change` token is issued by requestEmailChange only: it is bound
+ * to its pending address.
+ */
 export async function issueAccessToken(
   db: Kysely<Database>,
   profileId: string,
+  purpose: Exclude<AccessTokenPurpose, "email_change">,
+): Promise<IssuedToken> {
+  return insertToken(db, profileId, purpose, null);
+}
+
+async function insertToken(
+  db: Kysely<Database>,
+  profileId: string,
   purpose: AccessTokenPurpose,
+  email: string | null,
 ): Promise<IssuedToken> {
   const token = newSecretToken();
   const row = await db
@@ -68,6 +92,7 @@ export async function issueAccessToken(
       profile_id: profileId,
       purpose,
       expires_at: nowPlus(TOKEN_TTL_MS[purpose]),
+      email,
     })
     .returning("expires_at")
     .executeTakeFirstOrThrow();
@@ -108,7 +133,7 @@ export async function issueDigestTokens(
 export async function isUsableAccessToken(
   db: Kysely<Database>,
   token: string,
-  purpose: AccessTokenPurpose,
+  purpose: Exclude<AccessTokenPurpose, "email_change">,
 ): Promise<boolean> {
   if (!isSecretToken(token)) return false;
   const row = await db
@@ -294,6 +319,30 @@ export interface ProfileStatus {
   /** The current notification address (the profile page shows it to its own session). */
   readonly email: string;
   readonly active: boolean;
+  /** A new address waiting for its confirmation (D-031); null when none. */
+  readonly pendingEmail: string | null;
+  /** `pendingEmail` is set but its confirmation link no longer works (pendingEmailLinkLive). */
+  readonly pendingEmailExpired: boolean;
+}
+
+/**
+ * Whether the profile's pending address (D-031) still has an unexpired
+ * confirmation link — the one condition isUsableEmailChangeToken checks
+ * besides the token itself. False once the link expired or was revoked
+ * (access:revoke): `pending_email` stays, and the profile pages say the link
+ * expired instead of „Oczekuje na potwierdzenie”. A subquery of the profile
+ * row's own SELECT, so no extra query.
+ */
+export function pendingEmailLinkLive(eb: ExpressionBuilder<Database, "company_profiles">) {
+  return eb.exists(
+    eb
+      .selectFrom("access_tokens")
+      .select("access_tokens.id")
+      .whereRef("access_tokens.profile_id", "=", "company_profiles.id")
+      .where("access_tokens.purpose", "=", "email_change")
+      .whereRef("access_tokens.email", "=", "company_profiles.pending_email")
+      .where("access_tokens.expires_at", ">", sql<Date>`now()`),
+  );
 }
 
 export async function getProfileStatus(
@@ -302,10 +351,260 @@ export async function getProfileStatus(
 ): Promise<ProfileStatus | null> {
   const row = await db
     .selectFrom("company_profiles")
-    .select(["name", "email", "active"])
+    .select(["name", "email", "active", "pending_email"])
+    .select((eb) => pendingEmailLinkLive(eb).as("pending_link_live"))
     .where("id", "=", profileId)
     .executeTakeFirst();
-  return row ?? null;
+  if (row === undefined) return null;
+  return {
+    name: row.name,
+    email: row.email,
+    active: row.active,
+    pendingEmail: row.pending_email,
+    pendingEmailExpired: row.pending_email !== null && row.pending_link_live !== true,
+  };
+}
+
+/**
+ * Inside `trx`, which holds the profile row (FOR NO KEY UPDATE): records one
+ * more access e-mail of `kind` and returns true, unless the profile already
+ * had ACCESS_EMAILS_PER_DAY of them in the last 24 hours (false, nothing
+ * recorded). The row lock makes count and insert atomic: a concurrent
+ * request waits for it, and its count — a new statement in READ COMMITTED —
+ * then sees this one's row.
+ */
+async function claimAccessEmail(
+  trx: Transaction<Database>,
+  profileId: string,
+  kind: AccessEmailKind,
+): Promise<boolean> {
+  const sent = await trx
+    .selectFrom("access_emails")
+    .select(sql<string>`count(*)`.as("count"))
+    .where("profile_id", "=", profileId)
+    .where("kind", "=", kind)
+    .where("created_at", ">", sql<Date>`now() - interval '24 hours'`)
+    .executeTakeFirstOrThrow();
+  if (Number(sent.count) >= ACCESS_EMAILS_PER_DAY) return false;
+  await trx.insertInto("access_emails").values({ profile_id: profileId, kind }).execute();
+  return true;
+}
+
+/** What one „Wyślij mi link” request found (D-031); never shown to the requester. */
+export type LoginLinkRequest =
+  | {
+      readonly kind: "issued";
+      readonly profileId: string;
+      /** The profile's address, where the link goes. */
+      readonly email: string;
+      readonly link: IssuedToken;
+    }
+  | { readonly kind: "limit_reached"; readonly profileId: string }
+  | { readonly kind: "no_profile" };
+
+/**
+ * „Wyślij mi link” (D-031): a new login token for the profile whose current
+ * address is `email` (already normalized), also when its e-mails are off
+ * (`active = false`), at most ACCESS_EMAILS_PER_DAY per 24 hours. One
+ * transaction: the profile row FOR NO KEY UPDATE first, like every other
+ * writer of the profile's access (updateProfileSettings), then the count and
+ * the token. A pending address is not looked up: until it is confirmed,
+ * links go to the current one.
+ */
+export async function requestLoginLink(
+  db: Kysely<Database>,
+  email: string,
+): Promise<LoginLinkRequest> {
+  return db.transaction().execute(async (trx): Promise<LoginLinkRequest> => {
+    const profile = await trx
+      .selectFrom("company_profiles")
+      .select(["id", "email"])
+      .where("email", "=", email)
+      .forNoKeyUpdate()
+      .executeTakeFirst();
+    if (profile === undefined) return { kind: "no_profile" };
+    if (!(await claimAccessEmail(trx, profile.id, "login_link"))) {
+      return { kind: "limit_reached", profileId: profile.id };
+    }
+    const link = await issueAccessToken(trx, profile.id, "login");
+    return { kind: "issued", profileId: profile.id, email: profile.email, link };
+  });
+}
+
+/**
+ * Inside the transaction of the profile form's save (updateProfileSettings,
+ * which holds the profile row): a new confirmation link for `email`, the
+ * address that goes into pending_email. Any earlier `email_change` token of
+ * the profile is deleted first — a new change replaces the pending one. null
+ * when the profile had ACCESS_EMAILS_PER_DAY confirmations in 24 hours.
+ */
+export async function requestEmailChange(
+  trx: Transaction<Database>,
+  profileId: string,
+  email: string,
+): Promise<IssuedToken | null> {
+  if (!(await claimAccessEmail(trx, profileId, "email_change"))) return null;
+  await deleteEmailChangeTokens(trx, profileId);
+  return insertToken(trx, profileId, "email_change", email);
+}
+
+async function deleteEmailChangeTokens(
+  trx: Transaction<Database>,
+  profileId: string,
+): Promise<void> {
+  await trx
+    .deleteFrom("access_tokens")
+    .where("profile_id", "=", profileId)
+    .where("purpose", "=", "email_change")
+    .execute();
+}
+
+/**
+ * Read-only, for GET /potwierdz-email/<token>: is `token` an unexpired
+ * confirmation link of the address still pending on its profile? A mail
+ * scanner fetching the link changes nothing.
+ */
+export async function isUsableEmailChangeToken(
+  db: Kysely<Database>,
+  token: string,
+): Promise<boolean> {
+  if (!isSecretToken(token)) return false;
+  const row = await db
+    .selectFrom("access_tokens")
+    .innerJoin("company_profiles", "company_profiles.id", "access_tokens.profile_id")
+    .select("access_tokens.id")
+    .where("access_tokens.token_hash", "=", hashSecretToken(token))
+    .where("access_tokens.purpose", "=", "email_change")
+    .where("access_tokens.expires_at", ">", sql<Date>`now()`)
+    .whereRef("access_tokens.email", "=", "company_profiles.pending_email")
+    .executeTakeFirst();
+  return row !== undefined;
+}
+
+/** The outcome of POST /potwierdz-email/<token> (D-031). */
+export type EmailChangeConfirmation =
+  | {
+      readonly kind: "changed";
+      readonly profileId: string;
+      /** The confirming browser's session belongs to the profile and stays open. */
+      readonly keptSession: boolean;
+    }
+  /** Unknown, expired, already used, cancelled or replaced: one neutral page for all. */
+  | { readonly kind: "invalid" }
+  /** Another profile has the address by now: nothing changed. */
+  | { readonly kind: "taken" };
+
+/**
+ * Confirms a pending address (D-031), in one transaction: `email` becomes
+ * pending_email, pending_email is cleared, and every token of the profile —
+ * this one included, which uses it up — and every session but the
+ * confirming browser's (when it is the profile's) is deleted, as the e-mail
+ * change of D-027 did. Lock order (D-027): profile row FOR NO KEY UPDATE →
+ * the kept session FOR KEY SHARE → tokens (DELETE) → other sessions
+ * (DELETE) → the profile UPDATE, last. Changing `email` (a unique key)
+ * makes that UPDATE take the FOR UPDATE-strength lock, which waits for the
+ * KEY SHARE of a login's session INSERT; such a login holds its token row,
+ * which the tokens DELETE has waited for already, so it has no lock left to
+ * take, and its new session is deleted with the others (a new snapshot per
+ * statement). A deadlock with the hourly cleanup stays possible in theory
+ * and is retried once. Two confirmations of one link: the second waits for the
+ * profile row, then finds pending_email cleared and the token gone — exactly
+ * one changes the address. Another profile using the address by now (the
+ * UNIQUE key) rolls everything back: `taken`.
+ */
+export async function confirmEmailChange(
+  db: Kysely<Database>,
+  token: string,
+  sessionToken: string | null,
+): Promise<EmailChangeConfirmation> {
+  if (!isSecretToken(token)) return { kind: "invalid" };
+  const tokenHash = hashSecretToken(token);
+  const liveLink = (trx: Transaction<Database>) =>
+    trx
+      .selectFrom("access_tokens")
+      .select(["profile_id", "email"])
+      .where("token_hash", "=", tokenHash)
+      .where("purpose", "=", "email_change")
+      .where("expires_at", ">", sql<Date>`now()`)
+      .executeTakeFirst();
+  const confirm = () =>
+    db.transaction().execute(async (trx): Promise<EmailChangeConfirmation> => {
+      const found = await liveLink(trx);
+      if (found === undefined || found.email === null) return { kind: "invalid" };
+      const profileId = found.profile_id;
+      const profile = await trx
+        .selectFrom("company_profiles")
+        .select("pending_email")
+        .where("id", "=", profileId)
+        .forNoKeyUpdate()
+        .executeTakeFirst();
+      // Read again under the row lock: a confirmation, cancel or new change
+      // that held it has deleted or replaced the token meanwhile.
+      const link = await liveLink(trx);
+      if (profile === undefined || link === undefined || link.email !== profile.pending_email) {
+        return { kind: "invalid" };
+      }
+      const keep =
+        sessionToken !== null && (await lockLiveSession(trx, profileId, sessionToken))
+          ? sessionToken
+          : null;
+      await deleteAccess(trx, profileId, keep === null ? null : hashSecretToken(keep));
+      await trx
+        .updateTable("company_profiles")
+        .set({
+          email: sql<string>`pending_email`,
+          pending_email: null,
+          updated_at: sql<Date>`now()`,
+        })
+        .where("id", "=", profileId)
+        .execute();
+      return { kind: "changed", profileId, keptSession: keep !== null };
+    });
+  const attempt = async (): Promise<EmailChangeConfirmation> => {
+    try {
+      return await confirm();
+    } catch (error: unknown) {
+      if (isUniqueViolation(error, "company_profiles_email_key")) return { kind: "taken" };
+      throw error;
+    }
+  };
+  try {
+    return await attempt();
+  } catch (error: unknown) {
+    if (!isDeadlock(error)) throw error;
+    return attempt();
+  }
+}
+
+/**
+ * „Anuluj zmianę” (D-031): clears pending_email and deletes the profile's
+ * confirmation link, so a link already sent no longer works. Idempotent.
+ * Profile row first, then the session (as in updateProfileSettings); false —
+ * nothing changed — when the session ended meanwhile.
+ */
+export async function cancelEmailChange(
+  db: Kysely<Database>,
+  profileId: string,
+  sessionToken: string,
+): Promise<boolean> {
+  return db.transaction().execute(async (trx) => {
+    const profile = await trx
+      .selectFrom("company_profiles")
+      .select("id")
+      .where("id", "=", profileId)
+      .forNoKeyUpdate()
+      .executeTakeFirst();
+    if (profile === undefined) return false;
+    if (!(await lockLiveSession(trx, profileId, sessionToken))) return false;
+    await deleteEmailChangeTokens(trx, profileId);
+    await trx
+      .updateTable("company_profiles")
+      .set({ pending_email: null })
+      .where("id", "=", profileId)
+      .where("pending_email", "is not", null)
+      .execute();
+    return true;
+  });
 }
 
 /** What `revokeProfileAccess` deleted. */
@@ -315,17 +614,18 @@ export interface RevokedAccess {
 }
 
 /**
- * `access:revoke`: deletes every token (login and unsubscribe, used or not)
- * and every session of the profile, in one transaction, so each e-mail link
- * and signed-in browser stops working at once (a forwarded digest, a lost
- * device; D-026). The profile row itself is not touched.
+ * `access:revoke`: deletes every token (login, unsubscribe and an address
+ * confirmation; used or not) and every session of the profile, in one
+ * transaction, so each e-mail link and signed-in browser stops working at
+ * once (a forwarded digest, a lost device; D-026). The profile row itself is
+ * not touched: a pending address stays until cancelled or saved again.
  */
 export async function revokeProfileAccess(
   db: Kysely<Database>,
   profileId: string,
 ): Promise<RevokedAccess> {
   return db.transaction().execute(async (trx) => {
-    // The profile row first, like the e-mail change (updateProfileSettings):
+    // The profile row first, like the e-mail confirmation (confirmEmailChange):
     // the two never run interleaved, so they cannot deadlock over tokens and sessions.
     await trx
       .selectFrom("company_profiles")
@@ -360,20 +660,6 @@ export async function lockLiveSession(
 }
 
 /**
- * The e-mail change on the profile form (PR-06B, D-027): like
- * revokeProfileAccess, but the session that made the change stays open.
- * `trx` is the transaction of the profile UPDATE (which holds the profile
- * row), so the new address and the revocation commit together or not at all.
- */
-export async function revokeOtherAccess(
-  trx: Transaction<Database>,
-  profileId: string,
-  keepSessionToken: string,
-): Promise<RevokedAccess> {
-  return deleteAccess(trx, profileId, hashSecretToken(keepSessionToken));
-}
-
-/**
  * Tokens go first: a login racing with the revoke either has its token
  * deleted under it (the conditional UPDATE then finds nothing) or holds the
  * token row until it commits, so its new session is already visible to the
@@ -396,6 +682,29 @@ async function deleteAccess(
 
 /** Expired rows deleted per table and call, so one cleanup is a short statement. */
 export const ACCESS_CLEANUP_BATCH = 1000;
+
+/**
+ * Deletes at most `limit` access_emails rows older than 24 hours: the daily
+ * limits no longer count them. Called by `serve` with deleteExpiredAccess.
+ */
+export async function deleteOldAccessEmails(
+  db: Kysely<Database>,
+  limit: number = ACCESS_CLEANUP_BATCH,
+): Promise<number> {
+  const deleted = await db
+    .deleteFrom("access_emails")
+    .where(
+      "id",
+      "in",
+      db
+        .selectFrom("access_emails")
+        .select("id")
+        .where("created_at", "<=", sql<Date>`now() - interval '24 hours'`)
+        .limit(limit),
+    )
+    .executeTakeFirst();
+  return Number(deleted.numDeletedRows);
+}
 
 /**
  * Deletes at most `limit` expired tokens and `limit` expired sessions (used

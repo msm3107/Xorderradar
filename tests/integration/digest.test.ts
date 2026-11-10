@@ -14,10 +14,15 @@ import {
 import type { CompanyProfile, CompanyProfileInput } from "../../src/domain/company-profile.js";
 import type { OpportunityDraft } from "../../src/domain/opportunity.js";
 import {
+  confirmEmailChange,
   consumeLoginToken,
   hashSecretToken,
+  issueAccessToken,
 } from "../../src/infrastructure/db/access-repository.js";
-import { createCompanyProfile } from "../../src/infrastructure/db/company-profiles-repository.js";
+import {
+  createCompanyProfile,
+  updateProfileSettings,
+} from "../../src/infrastructure/db/company-profiles-repository.js";
 import {
   listPendingDeliveries,
   PENDING_DELIVERIES_MAX_GROUPS,
@@ -1220,6 +1225,57 @@ describe.skipIf(skipWithoutDatabase)("digest (PostgreSQL)", () => {
       expect(only(again.report)).toMatchObject({ status: "sent", sent: 1 });
       expect(next.sent.map((sent) => sent.email.to)).toEqual([newEmail]);
       expect((await deliveries()).map((row) => row.opportunity_id)).toEqual([offer.id]);
+    });
+
+    it("sends to the current address while a new one waits for confirmation (D-031)", async () => {
+      const first = await store();
+      const newEmail = "nowy@example.invalid";
+      const login = await issueAccessToken(schema.db, profile.id, "login");
+      const session = await consumeLoginToken(schema.db, login.token);
+      if (session === null) throw new Error("no session");
+      const saved = await updateProfileSettings(
+        schema.db,
+        profile.id,
+        {
+          email: newEmail,
+          name: profileInput.name,
+          categories: profileInput.categories,
+          includeKeywords: profileInput.includeKeywords,
+          excludeKeywords: profileInput.excludeKeywords,
+          voivodeships: profileInput.voivodeships,
+          counties: profileInput.counties,
+        },
+        session.sessionToken,
+      );
+      if (saved?.kind !== "saved" || saved.emailChange === null) throw new Error("not pending");
+
+      const sender = fakeSender();
+      const result = await run([], {
+        digest: { createSender: () => sender.sender },
+        env: { PUBLIC_BASE_URL: BASE },
+      });
+      expect(only(result.report)).toMatchObject({ status: "sent", sent: 1 });
+      expect(sender.sent.map((sent) => sent.email.to)).toEqual([EMAIL]);
+      // The digest's links do not touch the pending change.
+      const pending = (await tokens()).filter((token) => token.purpose === "email_change");
+      expect(pending).toEqual([
+        expect.objectContaining({ token_hash: hashSecretToken(saved.emailChange.link.token) }),
+      ]);
+
+      expect(
+        await confirmEmailChange(schema.db, saved.emailChange.link.token, session.sessionToken),
+      ).toEqual({ kind: "changed", profileId: profile.id, keptSession: true });
+      const second = await store();
+      const next = fakeSender();
+      const again = await run([], {
+        digest: { createSender: () => next.sender, now: () => NEXT_DAY },
+        env: { PUBLIC_BASE_URL: BASE },
+      });
+      expect(only(again.report)).toMatchObject({ status: "sent", sent: 1 });
+      expect(next.sent.map((sent) => sent.email.to)).toEqual([newEmail]);
+      expect((await deliveries()).map((row) => row.opportunity_id).sort()).toEqual(
+        [first.id, second.id].sort(),
+      );
     });
 
     it("writes both List-Unsubscribe headers to the outbox copy", async () => {

@@ -55,7 +55,14 @@ function readCookie(header: string | undefined, name: string): string | null {
  */
 export const NOTICE_COOKIE = "__Host-radar_komunikat";
 
-export const NOTICES = ["zapisano", "zmieniono_email", "wypisano", "wlaczono"] as const;
+export const NOTICES = [
+  "zapisano",
+  "zmieniono_email",
+  "wypisano",
+  "wlaczono",
+  "wyslano_potwierdzenie",
+  "anulowano_zmiane",
+] as const;
 export type Notice = (typeof NOTICES)[number];
 
 /** Long enough for the redirect that follows; a notice never shows up later. */

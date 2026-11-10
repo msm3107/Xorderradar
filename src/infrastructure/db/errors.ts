@@ -39,6 +39,13 @@ export function isDeadlock(error: unknown): boolean {
   return error instanceof pg.DatabaseError && error.code === "40P01";
 }
 
+/** A unique violation (SQLSTATE 23505) of the constraint named `constraint`. */
+export function isUniqueViolation(error: unknown, constraint: string): boolean {
+  return (
+    error instanceof pg.DatabaseError && error.code === "23505" && error.constraint === constraint
+  );
+}
+
 /** Runs a repository query, converting integrity errors into DomainError. */
 export async function withDomainErrors<T>(query: () => Promise<T>): Promise<T> {
   try {

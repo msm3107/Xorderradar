@@ -11,7 +11,12 @@ import {
 } from "../../domain/company-profile.js";
 import { entityIdSchema, parseDomain } from "../../domain/common.js";
 import { DomainError } from "../../domain/errors.js";
-import { lockLiveSession, revokeOtherAccess } from "./access-repository.js";
+import {
+  lockLiveSession,
+  pendingEmailLinkLive,
+  requestEmailChange,
+  type IssuedToken,
+} from "./access-repository.js";
 import { isDeadlock, withDomainErrors } from "./errors.js";
 import type { CompanyProfilesTable, Database } from "./schema.js";
 
@@ -142,6 +147,7 @@ async function updateRow(
   trx: Transaction<Database>,
   profileId: string,
   changes: z.output<typeof companyProfilePatchSchema>,
+  pendingEmail?: string,
 ): Promise<CompanyProfile | null> {
   const row = await withDomainErrors(() =>
     trx
@@ -156,6 +162,7 @@ async function updateRow(
         voivodeships: changes.voivodeships,
         counties: changes.counties,
         active: changes.active,
+        pending_email: pendingEmail,
         updated_at: sql<Date>`now()`,
       })
       .where("id", "=", profileId)
@@ -176,6 +183,13 @@ export interface StoredProfileSettings {
   readonly counties: readonly string[];
 }
 
+/** The form's values plus the address waiting for its confirmation (D-031), null when none. */
+export interface StoredProfileForm extends StoredProfileSettings {
+  readonly pendingEmail: string | null;
+  /** `pendingEmail` is set but its confirmation link no longer works (expired or revoked). */
+  readonly pendingEmailExpired: boolean;
+}
+
 /**
  * The profile form's current values (PR-06B), read directly like
  * getProfileStatus: a row the schema refuses still fills the form, so the
@@ -185,7 +199,7 @@ export interface StoredProfileSettings {
 export async function getProfileSettings(
   db: Kysely<Database>,
   id: string,
-): Promise<StoredProfileSettings | null> {
+): Promise<StoredProfileForm | null> {
   const row = await db
     .selectFrom("company_profiles")
     .select([
@@ -196,7 +210,9 @@ export async function getProfileSettings(
       "exclude_keywords",
       "voivodeships",
       "counties",
+      "pending_email",
     ])
+    .select((eb) => pendingEmailLinkLive(eb).as("pending_link_live"))
     .where("id", "=", parseDomain(entityIdSchema, id))
     .executeTakeFirst();
   if (row === undefined) return null;
@@ -208,46 +224,51 @@ export async function getProfileSettings(
     excludeKeywords: row.exclude_keywords,
     voivodeships: row.voivodeships,
     counties: row.counties,
+    pendingEmail: row.pending_email,
+    pendingEmailExpired: row.pending_email !== null && row.pending_link_live !== true,
   };
 }
 
-export interface SettingsUpdate {
-  readonly profile: CompanyProfile;
-  /** The e-mail address changed, so the profile's other access was revoked. */
-  readonly emailChanged: boolean;
-}
+/** The result of a profile form save (D-031); null from updateProfileSettings when nothing was saved. */
+export type SettingsUpdate =
+  | {
+      readonly kind: "saved";
+      readonly profile: CompanyProfile;
+      /**
+       * A new address was submitted: it is pending, `profile.email` is still
+       * the old one. The confirmation link goes to `newEmail`, a notice
+       * without links to `currentEmail`. null when the address is unchanged.
+       */
+      readonly emailChange: {
+        readonly currentEmail: string;
+        readonly newEmail: string;
+        readonly link: IssuedToken;
+      } | null;
+    }
+  /** A new address, but ACCESS_EMAILS_PER_DAY confirmations were sent today: nothing saved. */
+  | { readonly kind: "email_change_limit" };
 
 /**
- * Saves the profile form (PR-06B, D-027): every field but `active`, in one
- * transaction. When the e-mail address changes, every access token of the
- * profile and every session except `keepSessionToken` (the one that made the
- * change) is deleted in the same transaction: the links in e-mails sent to
- * the old address and every other signed-in browser stop working. Other
- * changes revoke nothing. null — nothing saved — when the profile does not
- * exist or the session ended meanwhile (a logout or revoke in another tab);
- * the same e-mail as another profile → DomainError `duplicate`.
+ * Saves the profile form (PR-06B, D-027, D-031): every field but `active`,
+ * in one transaction. A new e-mail address does not replace `email`: it
+ * goes to `pending_email`, with a confirmation link (24 hours) replacing any
+ * earlier one; `email`, the sessions and the other links stay as they are
+ * until confirmEmailChange. An unchanged address keeps a pending change.
+ * null — nothing saved — when the profile does not exist or the session
+ * ended meanwhile (a logout or revoke in another tab). No uniqueness check
+ * of the new address here: the form never tells whether another profile
+ * uses it (D-031); the confirmation does.
  *
- * Lock order, so no concurrent writer can close a cycle with this one:
- * profile row FOR NO KEY UPDATE → the kept session FOR KEY SHARE → tokens
- * (DELETE) → other sessions (DELETE) → the profile UPDATE, last. Changing
- * the e-mail (a unique key) makes that UPDATE take the FOR UPDATE-strength
- * lock; until then the row is held only FOR NO KEY UPDATE, which does not
- * block the KEY SHARE that a session or token INSERT takes through its
- * foreign key.
- * - Login (token row UPDATE → session INSERT, KEY SHARE on the profile): if
- *   it holds the token, our token DELETE waits for its commit and the login
- *   never waits on us (its KEY SHARE passes our NO KEY UPDATE); its new
- *   session is then deleted with the other sessions (a new snapshot per
- *   statement). If we deleted the token first, its UPDATE waits holding
- *   nothing of ours and then finds no token. Our final UPDATE may wait for
- *   a login's KEY SHARE, but such a login has no lock left to take.
- * - access:revoke takes the profile row first as well: the two run one after
- *   the other. Logout holds one session row and waits for nothing of ours.
- * - The digest's token issue locks the profile FOR SHARE first
- *   (issueDigestTokens): it waits for this transaction and then sees the new
- *   address, or this one waits for its short transaction and deletes its tokens.
- * The hourly cleanup deletes expired tokens and sessions in its own row order,
- * so a cycle with it stays possible in theory: a deadlock (40P01) is retried once.
+ * Lock order, the one every writer of a profile's access follows: profile
+ * row FOR NO KEY UPDATE → the kept session FOR KEY SHARE → tokens → the
+ * profile UPDATE, last. The UPDATE changes no unique key, so it never needs
+ * more than the NO KEY UPDATE already held, and a login's session INSERT
+ * (KEY SHARE through its foreign key) passes it. access:revoke, the
+ * confirmation, the cancel and „Wyślij mi link” take the profile row first
+ * as well: they run one after the other. The digest's token issue locks the
+ * profile FOR SHARE (issueDigestTokens) and waits for this transaction. The
+ * hourly cleanup deletes expired tokens in its own row order, so a cycle
+ * with it stays possible in theory: a deadlock (40P01) is retried once.
  */
 export async function updateProfileSettings(
   db: Kysely<Database>,
@@ -256,7 +277,7 @@ export async function updateProfileSettings(
   keepSessionToken: string,
 ): Promise<SettingsUpdate | null> {
   const profileId = parseDomain(entityIdSchema, id);
-  const changes = parseDomain(companyProfileSettingsSchema, settings);
+  const { email, ...changes } = parseDomain(companyProfileSettingsSchema, settings);
   const save = () =>
     db.transaction().execute(async (trx): Promise<SettingsUpdate | null> => {
       const current = await trx
@@ -268,10 +289,19 @@ export async function updateProfileSettings(
       if (current === undefined) return null;
       if (!(await lockLiveSession(trx, profileId, keepSessionToken))) return null;
       // Both normalized: the schema lower-cases and trims, the column CHECK enforces it.
-      const emailChanged = current.email !== changes.email;
-      if (emailChanged) await revokeOtherAccess(trx, profileId, keepSessionToken);
-      const profile = await updateRow(trx, profileId, changes);
-      return profile === null ? null : { profile, emailChanged };
+      if (current.email === email) {
+        const profile = await updateRow(trx, profileId, changes);
+        return profile === null ? null : { kind: "saved", profile, emailChange: null };
+      }
+      const link = await requestEmailChange(trx, profileId, email);
+      if (link === null) return { kind: "email_change_limit" };
+      const profile = await updateRow(trx, profileId, changes, email);
+      if (profile === null) return null;
+      return {
+        kind: "saved",
+        profile,
+        emailChange: { currentEmail: current.email, newEmail: email, link },
+      };
     });
   try {
     return await save();

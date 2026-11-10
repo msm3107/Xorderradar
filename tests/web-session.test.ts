@@ -197,7 +197,14 @@ describe("notice cookie", () => {
       expect(readNoticeCookie(`a=1; ${NOTICE_COOKIE}=${notice}`)).toBe(notice);
     }
     expect(NOTICE_COOKIE.startsWith("__Host-")).toBe(true);
-    expect(NOTICES).toEqual(["zapisano", "zmieniono_email", "wypisano", "wlaczono"]);
+    expect(NOTICES).toEqual([
+      "zapisano",
+      "zmieniono_email",
+      "wypisano",
+      "wlaczono",
+      "wyslano_potwierdzenie",
+      "anulowano_zmiane",
+    ]);
     expect(clearedNoticeCookie()).toBe(
       `${NOTICE_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`,
     );

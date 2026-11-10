@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ConfigError,
   DEFAULT_EMAIL_OUTBOX_DIR,
+  loadContactEmail,
   loadEmailConfig,
   loadOperatorEmail,
   TEST_EMAIL_FROM,
@@ -176,5 +177,33 @@ describe("loadOperatorEmail (status --notify, PR-07A)", () => {
     }
     expect(caught).toBeInstanceOf(ConfigError);
     expect((caught as ConfigError).message).toBe("Invalid e-mail configuration: OPERATOR_EMAIL");
+  });
+});
+
+describe("loadContactEmail (the home page's contact, PR-10)", () => {
+  it("is null when unset or empty: the page then names no address", () => {
+    expect(loadContactEmail({})).toBeNull();
+    expect(loadContactEmail({ CONTACT_EMAIL: "" })).toBeNull();
+  });
+
+  it("returns a valid address", () => {
+    expect(loadContactEmail({ CONTACT_EMAIL: "kontakt@example.invalid" })).toBe(
+      "kontakt@example.invalid",
+    );
+  });
+
+  it.each([
+    "kontakt",
+    "kontakt@example.invalid\r\nBcc: x@example.invalid",
+    `${"a".repeat(250)}@example.invalid`,
+  ])("refuses %j, naming only the variable", (value) => {
+    let caught: unknown;
+    try {
+      loadContactEmail({ CONTACT_EMAIL: value });
+    } catch (error: unknown) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ConfigError);
+    expect((caught as ConfigError).message).toBe("Invalid e-mail configuration: CONTACT_EMAIL");
   });
 });

@@ -353,6 +353,21 @@ export function loadOperatorEmail(
   return result.data.OPERATOR_EMAIL ?? null;
 }
 
+/**
+ * CONTACT_EMAIL (PR-10): the operator's address, shown as given on the home
+ * page (to whoever wants a profile), on the 409 „address taken” and the 429
+ * „too many link requests” pages, and named in the notice e-mail to the old
+ * address of an address change (D-031). Null when unset: none of them names
+ * an address. Invalid → ConfigError naming the variable only.
+ */
+export function loadContactEmail(env: Readonly<Record<string, string | undefined>>): string | null {
+  const result = z
+    .object({ CONTACT_EMAIL: z.email().max(254).optional() })
+    .safeParse(nonEmptyEnv(env));
+  if (!result.success) throw configError("Invalid e-mail configuration", result.error);
+  return result.data.CONTACT_EMAIL ?? null;
+}
+
 /** The optional checks of `status` (PR-07B, D-029). */
 export interface StatusConfig {
   /** BACKUP_DIR: where `backup` writes (absolute); null = no backup check. */

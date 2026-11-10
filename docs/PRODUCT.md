@@ -4,6 +4,14 @@
 
 > Użytkownik dostaje kilka właściwych okazji zamiast przeglądać setki nieistotnych ogłoszeń.
 
+Codzienny e-mail z zamówieniami dopasowanymi do profilu firmy.
+
+## Źródła
+
+Dziś dwa: Biuletyn Zamówień Publicznych (platforma e-Zamówienia, oficjalne API) i Baza
+Konkurencyjności. Obietnica obejmuje tylko ogłoszenia z tych źródeł — nie obiecujemy BIP-ów
+urzędów, szkół, szpitali ani innych stron jako kanału, dopóki nie ma dla nich adaptera.
+
 ## Użytkownik
 
 Właściciel lub pracownik małej/średniej firmy (1–50 osób) świadczącej usługi lub dostawy dla
@@ -41,6 +49,17 @@ wartość):
 - link do źródła,
 - publiczne dane kontaktowe opublikowane przy zamówieniu,
 - dlaczego pasuje (np. kategoria: „Elektryka”; słowo: oświetlenie (tytuł); region: mazowieckie).
+
+## Dostęp
+
+- Bez haseł: do profilu wchodzi się linkiem z e-maila (digest albo „Wyślij mi link” na stronie
+  głównej). Link działa raz przez 7 dni; na innym urządzeniu prosi się o nowy.
+- „Wyślij mi link” zawsze odpowiada tak samo („Jeśli adres jest w bazie, link przyjdzie w ciągu
+  kilku minut”), więc nie zdradza, czy adres ma profil. Najwyżej 3 linki dziennie na profil.
+- Zmiana adresu e-mail wymaga potwierdzenia z nowej skrzynki; do potwierdzenia digest i linki
+  idą na stary adres, który dostaje też powiadomienie. Literówka nie odcina digestu.
+- Nową firmę zakłada na razie operator; strona główna to mówi i podaje kontakt
+  (`CONTACT_EMAIL`), a `/przyklad` pokazuje przykładowy digest.
 
 ## Digest
 

@@ -256,16 +256,18 @@ export function mailOptions(from: EmailAddress, email: OutgoingEmail) {
 }
 
 /**
- * The secret path segment of a login or unsubscribe link (web access,
- * PR-06A): a fixed prefix and exactly the 43-character token shape, so the
- * pattern has no nested or open-ended repetition.
+ * The secret path segment of a login, unsubscribe or address confirmation
+ * link (web access, PR-06A, D-031): a fixed prefix and exactly the
+ * 43-character token shape, so the pattern has no nested or open-ended
+ * repetition.
  */
-const TOKEN_LINK_PATH = /\/(dostep|wypis)\/[A-Za-z0-9_-]{43}/g;
+const TOKEN_LINK_PATH = /\/(dostep|wypis|potwierdz-email)\/[A-Za-z0-9_-]{43}/g;
 
 /**
- * The text with the token of every `/dostep/<token>` and `/wypis/<token>`
- * link replaced by `[token]`: the readable outbox copy shows where the links
- * are without holding the secrets (the `.eml` keeps them — it is the e-mail).
+ * The text with the token of every `/dostep/<token>`, `/wypis/<token>` and
+ * `/potwierdz-email/<token>` link replaced by `[token]`: the readable outbox
+ * copy shows where the links are without holding the secrets (the `.eml`
+ * keeps them — it is the e-mail).
  */
 export function redactTokenLinks(text: string): string {
   return text.replace(TOKEN_LINK_PATH, "/$1/[token]");

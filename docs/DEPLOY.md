@@ -7,14 +7,15 @@ heartbeat `status` do zewnętrznej usługi. Codzienna obsługa i awarie —
 
 Artefakty (komentarze w plikach mówią, co i dlaczego):
 
-| Plik                                 | Na hoście                                 |
-| ------------------------------------ | ----------------------------------------- |
-| `deploy/systemd/radar-serve.service` | `/etc/systemd/system/radar-serve.service` |
-| `deploy/cron/radar`                  | `/etc/cron.d/radar`                       |
-| `deploy/caddy/Caddyfile`             | `/etc/caddy/Caddyfile`                    |
-| `deploy/logrotate/radar`             | `/etc/logrotate.d/radar`                  |
-| `deploy/radar.env.example`           | `/etc/radar/radar.env` (wzór)             |
-| `deploy/smoke.sh`                    | uruchamiany z `/opt/radar-zamowien`       |
+| Plik                                             | Na hoście                                                                                |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| `deploy/systemd/radar-serve.service`             | `/etc/systemd/system/radar-serve.service`                                                |
+| `deploy/systemd/radar-serve.service.d/smtp.conf` | `/etc/systemd/system/radar-serve.service.d/smtp.conf` (tylko `EMAIL_MODE=smtp`, punkt 7) |
+| `deploy/cron/radar`                              | `/etc/cron.d/radar`                                                                      |
+| `deploy/caddy/Caddyfile`                         | `/etc/caddy/Caddyfile`                                                                   |
+| `deploy/logrotate/radar`                         | `/etc/logrotate.d/radar`                                                                 |
+| `deploy/radar.env.example`                       | `/etc/radar/radar.env` (wzór)                                                            |
+| `deploy/smoke.sh`                                | uruchamiany z `/opt/radar-zamowien`                                                      |
 
 Założenia i oznaczenia: Debian 12 albo Ubuntu 24.04, polecenia jako root (`sudo -i`) chyba że
 napisano inaczej; `admin` — konto administratora z `sudo` (właściciel kodu), `radar` — konto
@@ -117,12 +118,15 @@ install -d -m 0755 -o admin -g admin /opt/radar-zamowien
 ```
 
 - `/opt/radar-zamowien` — kod i build; należy do `admin`, nie do `radar` (aplikacja nie może
-  zmienić własnego kodu). `serve` niczego nie zapisuje.
+  zmienić własnego kodu). `serve` zapisuje wyłącznie e-maile dostępu w trybie `test` (do
+  `/var/lib/radar/outbox`, jedyna ścieżka zapisu w `radar-serve.service`).
 - `/etc/radar` — konfiguracja z sekretami, czytelna dla grupy `radar`.
 - `/var/log/radar` — logi zadań crona (rotacja: `deploy/logrotate/radar`).
 - `/var/backups/radar` — kopie (`BACKUP_DIR`), `0700`: zawierają dane osobowe. Musi leżeć na
   lokalnym systemie plików z twardymi dowiązaniami (ext4, xfs).
-- `/var/lib/radar/outbox` — `EMAIL_OUTBOX_DIR` w trybie `test`.
+- `/var/lib/radar/outbox` — `EMAIL_OUTBOX_DIR` w trybie `test` (digest, alerty i od PR-10
+  e-maile dostępu z `serve`: „Wyślij mi link”, potwierdzenie zmiany adresu). Inna ścieżka w
+  `EMAIL_OUTBOX_DIR` wymaga tej samej zmiany w `ReadWritePaths=` usługi `radar-serve`.
 
 ## 6. Kod, build, konfiguracja, migracje
 
@@ -147,7 +151,13 @@ editor /etc/radar/radar.env
 - `HEARTBEAT_URL=` zostaw puste do punktu 10 (puste = brak heartbeatu).
 - `EMAIL_MODE=test` (do potwierdzenia właściciela) nie używa `SMTP_URL`: zostaw go pustym
   (`SMTP_URL=`), dopóki nie znasz danych serwera SMTP, i wpisz przed przełączeniem na `smtp`
-  (punkt 13, „Próba ścieżki alertu”). Wpisany musi być poprawnym URL-em.
+  (punkt 13, „Próba ścieżki alertu”). Wpisany musi być poprawnym URL-em. Zmienne `EMAIL_*` i
+  `SMTP_URL` czyta też `serve` (e-maile dostępu, D-031): błędna wartość zatrzymuje jego start
+  (kod `1`), a po zmianie trybu zrestartuj `radar-serve` — przy `smtp` najpierw zainstaluj
+  drop-in z punktu 7, bez niego unit nie wypuści `serve` do serwera SMTP.
+- `CONTACT_EMAIL` — adres kontaktowy na stronie głównej, stronach 409 i 429 i w powiadomieniu
+  o zmianie adresu (opcjonalny; pusty = bez kontaktu).
+  W produkcji prawdziwa, czytana skrzynka; niepoprawny adres zatrzymuje start `serve`.
 
 Reguły pliku (Node `--env-file` i systemd `EnvironmentFile=` czytają go tak samo): jedna
 para `KLUCZ=wartość` w linii, komentarze tylko w osobnych liniach, w wartościach bez
@@ -280,9 +290,50 @@ install -m 0644 /opt/radar-zamowien/deploy/systemd/radar-serve.service /etc/syst
 systemctl daemon-reload
 systemctl enable --now radar-serve
 systemctl status radar-serve
-journalctl -u radar-serve -n 20           # "web server started"
+journalctl -u radar-serve -n 20           # "web server listening"
 systemd-analyze security radar-serve      # ocena hardeningu (im niżej, tym lepiej)
 ```
+
+Unit pozwala `serve` łączyć się tylko przez loopback (`IPAddressDeny=any`,
+`IPAddressAllow=localhost`): Caddy, PostgreSQL. W domyślnym `EMAIL_MODE=test` to wystarcza —
+e-maile dostępu idą do outboxa. PostgreSQL na innym hoście: jego adres w `IPAddressAllow=` w
+drop-inie (`/etc/systemd/system/radar-serve.service.d/`), nie w samym unicie — ponowne
+`install` unitu z repozytorium nadpisałoby zmianę.
+
+### `EMAIL_MODE=smtp`: drop-in `smtp.conf` (wymagany)
+
+Przy `EMAIL_MODE=smtp` `serve` wysyła e-maile dostępu („Wyślij mi link”, potwierdzenie zmiany
+adresu) do hosta z `SMTP_URL`. Adresy dostawcy mogą się zmieniać, więc drop-in
+`deploy/systemd/radar-serve.service.d/smtp.conf` zeruje listę `IPAddressDeny=`. Z drop-inem
+systemd nie ogranicza wcale ruchu wychodzącego `serve` (dowolny host i port), tak jak dla
+digestu i alertów z crona (te działają bez filtra systemd); ograniczyć go może tylko firewall
+hosta z regułami wyjścia. **Bez drop-inu każda wysyłka kończy się `send_failed`.** Węższa alternatywa (stałe
+zakresy adresów dostawcy w `IPAddressAllow=` zamiast zerowania) — opis w komentarzu pliku.
+
+Instalacja przy przełączeniu na `smtp` (jako root, po wpisaniu `EMAIL_MODE=smtp` i `SMTP_URL`
+w `/etc/radar/radar.env`):
+
+```sh
+install -d -m 0755 /etc/systemd/system/radar-serve.service.d
+install -m 0644 /opt/radar-zamowien/deploy/systemd/radar-serve.service.d/smtp.conf \
+  /etc/systemd/system/radar-serve.service.d/smtp.conf
+systemctl daemon-reload
+systemctl restart radar-serve
+systemctl show radar-serve -p IPAddressDeny   # "IPAddressDeny=" (puste), nie "…0.0.0.0/0 ::/0"
+systemctl status radar-serve                  # aktywny; w wierszu „Drop-In” widać smtp.conf
+```
+
+Kontrola wysyłki: na stronie głównej „Wyślij mi link” z adresem profilu testowego, potem
+
+```sh
+journalctl -u radar-serve --since "-5min" | grep '"access mail"'
+```
+
+Oczekiwane: linia `"kind":"login_link"` z `"outcome":"sent"` i e-mail z linkiem w skrzynce
+profilu testowego (sprawdź też spam). `"outcome":"send_failed"` z kodem połączenia — drop-in
+nie działa albo `SMTP_URL` jest błędny (`docs/RUNBOOK.md` → „Klient nie dostaje linku”).
+Powrót do `EMAIL_MODE=test`: `rm /etc/systemd/system/radar-serve.service.d/smtp.conf`,
+`systemctl daemon-reload`, `systemctl restart radar-serve`.
 
 ## 8. Caddy (reverse proxy, TLS)
 
@@ -293,12 +344,14 @@ caddy validate --config /etc/caddy/Caddyfile
 systemctl reload caddy
 ```
 
-Caddy sam pobiera certyfikat (potrzebne porty 80 i 443 i rekord DNS) i przekierowuje HTTP na
-HTTPS. Log dostępu (`/var/log/caddy/radar-access.log`) **pomija** ścieżki `/dostep/…` i
-`/wypis/…` (tokeny), a wszystkie logi Caddy — także log błędów w journalu (np. 502, gdy
-`serve` się restartuje) — zamieniają token w ścieżce i w nagłówku `Referer` na `REDACTED`.
-Nagłówki `Cookie`/`Authorization` Caddy domyślnie maskuje. HSTS ustawia aplikacja — nie
-dodawaj go w Caddy.
+Caddy sam pobiera certyfikat (potrzebne porty 80 i 443 i rekord DNS) i przekierowuje HTTP na HTTPS.
+Log dostępu (`/var/log/caddy/radar-access.log`) **pomija** ścieżki `/dostep/…`, `/wypis/…` i
+`/potwierdz-email/…` (tokeny), a wszystkie logi Caddy — także log błędów w journalu (np. 502, gdy
+`serve` się restartuje) — zamieniają token w ścieżce i w nagłówku `Referer` na `REDACTED`. Nagłówki
+`Cookie`/`Authorization` Caddy domyślnie maskuje. HSTS ustawia aplikacja — nie dodawaj go w Caddy.
+Caddy ustawia `X-Forwarded-For` na adres klienta i ignoruje nagłówek wysłany przez klienta; z niego
+`serve` liczy limit „Wyślij mi link” na IP (D-031). **Nie dodawaj `trusted_proxies`**, chyba że
+przed Caddy stoi kolejny proxy — inaczej klient sam wybierałby swój adres i omijał limit.
 
 **Obowiązkowa kontrola po instalacji i po każdej zmianie Caddyfile** (zamiast
 `radar.example.invalid` — prawdziwa domena; `test-redaction` to nie jest prawdziwy token):
@@ -309,10 +362,12 @@ curl -sI https://radar.example.invalid/ | head -n 1                 # najpierw: 
 systemctl stop radar-serve                # wymusza 502 → wpis w logu błędów
 curl -s -o /dev/null https://radar.example.invalid/dostep/test-redaction
 curl -s -o /dev/null http://radar.example.invalid/dostep/test-redaction
+curl -s -o /dev/null https://radar.example.invalid/potwierdz-email/test-redaction
 systemctl start radar-serve
 journalctl -u caddy --since -5min | grep -c test-redaction           # musi być 0
 grep -c test-redaction /var/log/caddy/radar-access.log               # musi być 0
 journalctl -u caddy --since -5min | grep -c 'dostep/REDACTED'         # >= 1 (filtr działa; 0 — niżej)
+journalctl -u caddy --since -5min | grep -c 'potwierdz-email/REDACTED' # >= 1
 ```
 
 Pierwsze `curl -sI` musi odpowiedzieć `HTTP/2 200` — wtedy certyfikat jest wydany, a
@@ -321,10 +376,10 @@ dopiero po minucie; `journalctl -u caddy -n 50`) poczekaj i powtórz, zanim prze
 
 Wynik inny niż `0` w którejś z dwóch kontroli `test-redaction`: **przerwij wdrożenie** (nie
 udostępniaj serwisu klientom) i zgłoś to — tokeny z linków trafiałyby do logów. (Brak pliku
-`radar-access.log` też jest w porządku: `grep` wypisze błąd, a log dostępu i tak pomija te
-ścieżki.) Licznik `dostep/REDACTED` równy `0` znaczy, że żądanie testowe nie zostawiło wpisu
-w logu błędów — wtedy dwa zera niczego nie dowodzą: powtórz całą kontrolę; znowu `0` —
-przerwij i zgłoś jak wyżej.
+`radar-access.log` też jest w porządku: `grep` wypisze błąd, a log dostępu i tak pomija te ścieżki.)
+Licznik `dostep/REDACTED` albo `potwierdz-email/REDACTED` równy `0` znaczy, że żądanie testowe nie
+zostawiło wpisu w logu błędów — wtedy dwa zera niczego nie dowodzą: powtórz całą kontrolę; znowu `0`
+— przerwij i zgłoś jak wyżej.
 
 ## 9. Cron i logrotate
 
@@ -378,9 +433,9 @@ wystarczy sam kod `200` — błąd bazy daje `503`, więc kod sam go wykrywa. `/
 bazy: odpowiada nawet wtedy, gdy `serve` w swoim sandboksie systemd nie łączy się
 z PostgreSQL. `/zdrowie` wykonuje `select 1` przez pulę `serve` i bez odpowiedzi bazy w 2 s
 zwraca `503` (`docs/RUNBOOK.md`, „Heartbeat”). Nie zwraca danych ani treści błędów, nie
-wymaga sesji. Caddy loguje `/zdrowie` jak zwykłą ścieżkę: `log_skip` i redakcja z punktu 8
-dotyczą tylko `/dostep/…` i `/wypis/…`. Monitoruj tylko `/zdrowie` — nigdy ścieżek
-z tokenami.
+wymaga sesji. Caddy loguje `/zdrowie` jak zwykłą ścieżkę: `log_skip` i redakcja z punktu 8 dotyczą
+tylko `/dostep/…`, `/wypis/…` i `/potwierdz-email/…`. Monitoruj tylko `/zdrowie` — nigdy ścieżek z
+tokenami.
 
 ## 11. Kopia poza hostem (zaszyfrowana `age`)
 
@@ -518,13 +573,18 @@ szczegóły: `$RADAR status | jq .`.
 8. [ ] Backfill raz, przed cronem (w `tmux`): punkt 6, „Pierwsze dane”, krok 2.
 9. [ ] Pierwszy backup: punkt 6, „Pierwsze dane”, krok 3.
 10. [ ] `radar-serve` włączony i aktywny; Caddy z prawdziwą domeną; strona otwiera się przez
-        HTTPS; kontrola redakcji tokenów w logach Caddy (punkt 8) daje `0` i `0`.
+        HTTPS; kontrola redakcji tokenów w logach Caddy (punkt 8) daje `0` i `0`;
+        „Wyślij mi link” dla profilu testowego zostawia e-mail w `/var/lib/radar/outbox`
+        (tryb `test`) i linię `"access mail"` z `"outcome":"sent"` w `journalctl -u radar-serve`;
+        strona główna pokazuje właściwy kontakt (`CONTACT_EMAIL` bez placeholdera).
 11. [ ] Cron i logrotate zainstalowane; następnego ranka logi w `/var/log/radar/*.log`.
 12. [ ] Heartbeat: check w usłudze, `HEARTBEAT_URL`, ping widoczny po `$RADAR status`;
         powiadomienie testowe z usługi dotarło do właściciela; monitoring dostępności
         `https://<domena>/zdrowie` (punkt 10).
 13. [ ] Ścieżka alertu: po przełączeniu na `EMAIL_MODE=smtp` (za zgodą właściciela) alert
-        testowy dochodzi do operatora — „Próba ścieżki alertu” niżej.
+        testowy dochodzi do operatora — „Próba ścieżki alertu” niżej; potem drop-in
+        `smtp.conf` i restart `radar-serve` z kontrolą wysyłki „Wyślij mi link” (punkt 7,
+        „`EMAIL_MODE=smtp`: drop-in”) — e-maile dostępu idą wtedy przez SMTP.
 14. [ ] Kopia poza hostem: pierwsza zaszyfrowana kopia na serwerze kopii, próbne odszyfrowanie
         u właściciela; cotygodniowa kontrola (punkt 11: najnowszy plik off-host ma < 48 h)
         w kalendarzu operatora.
@@ -627,7 +687,7 @@ pochodzi z `deploy/` — aktualizacja go nie zmienia. Dalej:
 
 ```sh
 $RADAR migrate
-systemctl daemon-reload                   # gdy zmienił się unit radar-serve.service
+systemctl daemon-reload                   # gdy zmienił się unit radar-serve.service albo smtp.conf
 systemctl restart radar-serve
 systemctl reload caddy                    # gdy zmienił się Caddyfile — potem kontrola z punktu 8
 sh /opt/radar-zamowien/deploy/smoke.sh

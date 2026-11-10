@@ -12,7 +12,7 @@ import {
 import type { Notice } from "./session.js";
 
 /**
- * The HTML pages of the web access (PR-06A, PR-06B). Polish, server-rendered, no
+ * The HTML pages of the web access (PR-06A, PR-06B, PR-10). Polish, server-rendered, no
  * script and no inline style (the CSP forbids both): every value is escaped
  * with the shared escapeHtml. Forms are plain POST forms with labelled real
  * buttons. A page never shows a token except inside the hidden field of the
@@ -51,17 +51,61 @@ dd{margin:0 0 .2rem}
 .matches details{margin:.3rem 0}
 .matches summary{cursor:pointer}
 nav p{margin:1.5rem 0}
+h2{font-size:1.15rem;margin:1.5rem 0 .3rem}
 `;
 
 const SITE_NAME = "Radar Zamówień";
 
 /**
- * How a customer gets back in: the links are single-use and expire, and there is
- * no self-service re-issue (the operator runs access:link). One shared sentence,
- * so the 404 stays the same page for every token failure.
+ * How a customer gets back in: the links are single-use and expire, and the
+ * „Wyślij mi link” form under this sentence sends a new one (D-031). One
+ * shared sentence, so the 404 stays the same page for every token failure.
  */
 const NEW_LINK_HINT =
-  "Jeśli link został już użyty lub wygasł, odpowiedz na ostatnią wiadomość — operator wyśle nowy link.";
+  "Jeśli link został już użyty lub wygasł, wpisz adres e-mail profilu — wyślemy nowy link.";
+
+/**
+ * The extra sentence of the 404 on the /potwierdz-email/… route (decided by
+ * the route, never by the token's state): the address it confirmed is not
+ * the profile's until confirmed, so the form needs the one the messages go
+ * to. True whether or not the change was confirmed meanwhile.
+ */
+const EMAIL_CHANGE_LINK_HINT =
+  "Link potwierdzający nowy adres? Dopóki adres nie jest potwierdzony, wpisz dotychczasowy " +
+  "adres profilu — wyślemy na niego link do profilu, a nowy adres zapiszesz ponownie " +
+  "w ustawieniach.";
+
+/** What every „Wyślij mi link” request is answered with (D-031), whatever the address. */
+export const LINK_REQUESTED_TEXT =
+  "Jeśli adres jest w bazie, link przyjdzie w ciągu kilku minut. Sprawdź też folder spam.";
+
+/** The „Wyślij mi link” form sent back with a syntax error of its one field. */
+export interface LinkRequestError {
+  /** The submitted value, shown again (escaped). */
+  readonly value: string;
+  readonly message: string;
+}
+
+/**
+ * The „Wyślij mi link” form (D-031): one e-mail field and a button, no
+ * session and so no CSRF token — its POST is checked like the login one.
+ */
+function linkRequestForm(error: LinkRequestError | null = null): string {
+  const invalid = error !== null;
+  return (
+    '<form method="post" action="/wyslij-link">' +
+    '<div class="field"><label for="link-email">Adres e-mail profilu</label>' +
+    (invalid
+      ? `<p class="error" id="link-email-blad"><span>Błąd: ${escapeHtml(error.message)}</span></p>`
+      : "") +
+    `<input type="email" name="email" value="${escapeHtml(error?.value ?? "")}" ` +
+    'maxlength="254" required autocomplete="email" id="link-email"' +
+    (invalid ? ' aria-describedby="link-email-blad" aria-invalid="true"' : "") +
+    ">" +
+    "</div>" +
+    '<button type="submit">Wyślij mi link</button></form>'
+  );
+}
 
 /**
  * Counties: kept in the profile, but no source gives an offer's county yet, so
@@ -105,7 +149,8 @@ function layout(title: string, body: readonly string[]): string {
     // checks would refuse them. A Referer carries the origin only, never a
     // path, so a token in /dostep/… or /wypis/… cannot leak through it.
     '<meta name="referrer" content="strict-origin">',
-    `<title>${escapeHtml(title === SITE_NAME ? title : `${title} — ${SITE_NAME}`)}</title>`,
+    // The site name once: also in „Błąd: Radar Zamówień”, the home page with a form error.
+    `<title>${escapeHtml(title.endsWith(SITE_NAME) ? title : `${title} — ${SITE_NAME}`)}</title>`,
     '<link rel="stylesheet" href="/styl.css">',
     "</head>",
     "<body>",
@@ -131,6 +176,11 @@ function link(href: string, text: string): string {
   return `<a href="${escapeHtml(href)}">${escapeHtml(text)}</a>`;
 }
 
+/** CONTACT_EMAIL as a mailto link; a page leaves the contact out without it. */
+function mailLink(address: string): string {
+  return link(`mailto:${address}`, address);
+}
+
 function homeLink(): string {
   return `<nav><p>${link("/", "Strona główna")}</p></nav>`;
 }
@@ -148,15 +198,76 @@ function form(action: string, fields: readonly string[], button: string): string
   );
 }
 
-export function homePage(): Page {
+export interface HomeOptions {
+  /** CONTACT_EMAIL; the contact section is left out without it. */
+  readonly contactEmail?: string | null;
+  /** The „Wyślij mi link” form sent back with a syntax error: a 400. */
+  readonly linkRequest?: LinkRequestError;
+}
+
+/** GET / (PR-10): what the service is, its sources, how to start, the link form, contact. */
+export function homePage(options: HomeOptions = {}): Page {
+  const contact = options.contactEmail ?? null;
+  const error = options.linkRequest ?? null;
+  return {
+    status: error === null ? 200 : 400,
+    html: layout(error === null ? SITE_NAME : `Błąd: ${SITE_NAME}`, [
+      paragraph(
+        "Radar Zamówień to codzienna wiadomość e-mail z nowymi zamówieniami publicznymi " +
+          "dobranymi do profilu firmy: jej branży, regionu i słów kluczowych.",
+      ),
+      `<p>${link("/przyklad", "Zobacz przykładowe zestawienie")}</p>`,
+      "<h2>Skąd są zamówienia</h2>",
+      paragraph(
+        "Codziennie sprawdzamy dwa publiczne źródła: Biuletyn Zamówień Publicznych " +
+          "(platforma e-Zamówienia) i Bazę Konkurencyjności (zamówienia w projektach " +
+          "z funduszy europejskich).",
+      ),
+      "<h2>Jak zacząć</h2>",
+      contact === null
+        ? paragraph("Na razie profil firmy zakłada operator serwisu.")
+        : `<p>Na razie profil firmy zakłada operator serwisu: napisz na ${mailLink(contact)}, ` +
+          "podając nazwę firmy, branżę i region.</p>",
+      "<h2>Masz już profil?</h2>",
+      paragraph(
+        "Najprościej: użyj linku „Twój profil” z ostatniej wiadomości. Link nie działa albo " +
+          "nie masz wiadomości pod ręką? Wpisz adres e-mail, na który przychodzą wiadomości " +
+          "z Radaru — wyślemy nowy link.",
+      ),
+      linkRequestForm(error),
+      ...(contact === null ? [] : ["<h2>Kontakt</h2>", `<p>${mailLink(contact)}</p>`]),
+    ]),
+  };
+}
+
+/** POST /wyslij-link: one page whatever the address was (D-031); never says whether it exists. */
+export function linkRequestedPage(): Page {
   return {
     status: 200,
-    html: layout(SITE_NAME, [
+    html: layout("Sprawdź pocztę", [
+      paragraph(LINK_REQUESTED_TEXT),
+      paragraph("Link działa raz przez 7 dni."),
+      homeLink(),
+    ]),
+  };
+}
+
+/**
+ * 429 on POST /wyslij-link: too many requests from this IP address within
+ * the hour (D-031). `contactEmail`: CONTACT_EMAIL, shown when set.
+ */
+export function linkRequestLimitPage(contactEmail: string | null = null): Page {
+  return {
+    status: 429,
+    html: layout("Za dużo próśb o link", [
       paragraph(
-        "Radar Zamówień wysyła raz dziennie nowe zamówienia publiczne pasujące do profilu firmy.",
+        "Z tego połączenia poproszono w ciągu godziny o zbyt wiele linków. Spróbuj ponownie " +
+          "za godzinę albo użyj linku z ostatniej wiadomości.",
       ),
-      paragraph("Aby zobaczyć swój profil, użyj linku „Twój profil” z ostatniej wiadomości."),
-      paragraph(NEW_LINK_HINT),
+      ...(contactEmail === null
+        ? []
+        : [`<p>Pilna sprawa? Napisz do operatora serwisu: ${mailLink(contactEmail)}.</p>`]),
+      homeLink(),
     ]),
   };
 }
@@ -167,21 +278,32 @@ export function loginConfirmPage(token: string): Page {
     status: 200,
     html: layout("Logowanie", [
       paragraph(
-        "Kliknij przycisk, aby otworzyć swój profil. Link działa tylko raz; " +
-          "logowanie jest ważne 30 dni na tym urządzeniu.",
+        "Kliknij przycisk, aby otworzyć swój profil; logowanie jest ważne 30 dni na tym " +
+          "urządzeniu.",
       ),
       form("/dostep", [hidden("token", token)], "Zaloguj się"),
+      `<p>Link działa raz. Na innym urządzeniu poproś o nowy na ${link("/", "stronie głównej")}.</p>`,
     ]),
   };
 }
 
-/** One page for an unknown, used and expired link alike: nothing tells them apart. */
-export function invalidLinkPage(): Page {
+export interface InvalidLinkOptions {
+  /** The route is /potwierdz-email/…: adds EMAIL_CHANGE_LINK_HINT. Never the token's state. */
+  readonly emailChangeLink?: boolean;
+}
+
+/**
+ * One page for an unknown, used and expired link alike: nothing tells them
+ * apart. Its only variant depends on the route of the link.
+ */
+export function invalidLinkPage(options: InvalidLinkOptions = {}): Page {
   return {
     status: 404,
     html: layout("Link jest nieaktywny", [
       paragraph("Ten link nie działa."),
       paragraph(NEW_LINK_HINT),
+      ...(options.emailChangeLink === true ? [paragraph(EMAIL_CHANGE_LINK_HINT)] : []),
+      linkRequestForm(),
       homeLink(),
     ]),
   };
@@ -193,6 +315,57 @@ export function loginRequiredPage(): Page {
     html: layout("Zaloguj się", [
       paragraph("Ta strona wymaga zalogowania. Użyj linku „Twój profil” z ostatniej wiadomości."),
       paragraph(NEW_LINK_HINT),
+      linkRequestForm(),
+      homeLink(),
+    ]),
+  };
+}
+
+/** GET /potwierdz-email/<token>: confirms the new address; only the POST changes it (D-031). */
+export function emailConfirmPage(token: string): Page {
+  return {
+    status: 200,
+    html: layout("Potwierdź nowy adres e-mail", [
+      paragraph(
+        "Kliknij przycisk, aby wiadomości Radaru Zamówień przychodziły od teraz na ten adres. " +
+          "Link działa raz. Linki z wcześniejszych wiadomości przestaną działać, a inne " +
+          "urządzenia zostaną wylogowane.",
+      ),
+      form(`/potwierdz-email/${token}`, [], "Potwierdź adres"),
+    ]),
+  };
+}
+
+/** The address was confirmed from a browser without the profile's session. */
+export function emailChangedPage(): Page {
+  return {
+    status: 200,
+    html: layout("Adres zmieniony", [
+      paragraph(
+        "Adres e-mail profilu został zmieniony: kolejne wiadomości przyjdą na nowy adres. " +
+          "Linki z wcześniejszych wiadomości przestały działać.",
+      ),
+      paragraph("Aby otworzyć profil, poproś o link na stronie głównej."),
+      homeLink(),
+    ]),
+  };
+}
+
+/**
+ * 409: another profile uses the address by now. Nothing changed; the page
+ * names neither the address nor the other profile — only CONTACT_EMAIL
+ * (`contactEmail`) when set.
+ */
+export function emailTakenPage(contactEmail: string | null = null): Page {
+  const text =
+    "Tego adresu nie można przypisać do profilu, więc adres e-mail profilu się nie zmienił. " +
+    "Wybierz inny adres w ustawieniach profilu albo napisz do operatora serwisu";
+  return {
+    status: 409,
+    html: layout("Nie zmieniono adresu", [
+      contactEmail === null
+        ? paragraph(`${text}.`)
+        : `<p>${escapeHtml(text)}: ${mailLink(contactEmail)}.</p>`,
       homeLink(),
     ]),
   };
@@ -203,19 +376,48 @@ export interface ProfileView {
   /** The current notification address, read with the session's profile. */
   readonly email: string;
   readonly active: boolean;
+  /** A new address waiting for its confirmation (D-031). */
+  readonly pendingEmail?: string | null;
+  /** Its confirmation link expired or was revoked (the address is still not confirmed). */
+  readonly pendingEmailExpired?: boolean;
 }
 
 /** What /profil says once after a form (session.ts, NOTICE_COOKIE). */
 const NOTICE_TEXT: Readonly<Record<Notice, string>> = {
   zapisano: "Zapisano zmiany profilu.",
   zmieniono_email:
-    "Zapisano zmiany profilu. Adres e-mail został zmieniony: linki z wcześniejszych wiadomości " +
+    "Adres e-mail został zmieniony na potwierdzony adres: linki z wcześniejszych wiadomości " +
     "przestały działać, a inne urządzenia zostały wylogowane. Sprawdź poniżej, czy nowy adres " +
     "jest poprawny.",
   wypisano: "Wypisano z powiadomień. Nie wyślemy kolejnych wiadomości.",
   wlaczono:
     "Włączono powiadomienia. Nowe pasujące zamówienia przyjdą w najbliższej codziennej wiadomości.",
+  wyslano_potwierdzenie:
+    "Zapisano zmiany profilu. Na nowy adres wysłaliśmy link potwierdzający, ważny 24 godziny. " +
+    "Do potwierdzenia wiadomości przychodzą na dotychczasowy adres.",
+  anulowano_zmiane: "Anulowano zmianę adresu e-mail. Wysłany link potwierdzający już nie działa.",
 };
+
+/**
+ * „Oczekuje na potwierdzenie” with the „Anuluj zmianę” form (D-031): its own
+ * form, so on the settings page it stands outside the profile form. Once
+ * the link expired (`expired`), it says so and how to get a new one: the
+ * address saved again in the form sends a new link (within the daily limit).
+ */
+function pendingEmailNote(pendingEmail: string, expired: boolean, csrfField: string): string[] {
+  const address = `<strong>${escapeHtml(pendingEmail)}</strong>`;
+  return [
+    expired
+      ? `<p class="note">Link potwierdzający dla adresu ${address} wygasł, więc adres nie ` +
+        "został zmieniony: wiadomości przychodzą na dotychczasowy adres. Aby dostać nowy " +
+        "link, wpisz ten adres ponownie w ustawieniach profilu i zapisz; możesz też anulować " +
+        "zmianę.</p>"
+      : `<p class="note">Oczekuje na potwierdzenie: ${address}. ` +
+        "Link potwierdzający wysłaliśmy na ten adres; do potwierdzenia wiadomości przychodzą " +
+        "na dotychczasowy adres.</p>",
+    form("/profil/anuluj-email", [csrfField], "Anuluj zmianę"),
+  ];
+}
 
 /** GET /profil: the signed-in profile only; every form carries the CSRF token. */
 export function profilePage(
@@ -224,6 +426,7 @@ export function profilePage(
   notice: Notice | null = null,
 ): Page {
   const csrf = hidden("csrf", csrfToken);
+  const pending = profile.pendingEmail ?? null;
   return {
     status: 200,
     html: layout("Twój profil", [
@@ -233,6 +436,9 @@ export function profilePage(
       `<p>Firma: <strong>${escapeHtml(profile.name)}</strong></p>`,
       // Always the current address, so a mistyped change is visible at once.
       `<p>Adres powiadomień: <strong>${escapeHtml(profile.email)}</strong></p>`,
+      ...(pending === null
+        ? []
+        : pendingEmailNote(pending, profile.pendingEmailExpired ?? false, csrf)),
       `<p>Powiadomienia: <span class="status">${
         profile.active ? "włączone" : "wyłączone"
       }</span></p>`,
@@ -256,7 +462,6 @@ export function profilePage(
 const FIELD_IDS: Readonly<Record<ProfileFormField, string>> = {
   name: "nazwa",
   email: "email",
-  emailConfirm: "email-powtorz",
   categories: "kategoria-1",
   voivodeships: "wojewodztwo-1",
   counties: "powiaty",
@@ -371,11 +576,15 @@ function errorSummary(errors: ProfileFormErrors): string[] {
 /**
  * GET /profil/ustawienia (200) and an invalid POST (400, the submitted
  * values shown again, escaped). Nothing is saved until every field is valid.
+ * `pendingEmail`: a new address waiting for its confirmation (D-031);
+ * `pendingEmailExpired`: its link expired or was revoked.
  */
 export function settingsPage(
   values: ProfileFormValues,
   csrfToken: string,
   errors: ProfileFormErrors = {},
+  pendingEmail: string | null = null,
+  pendingEmailExpired = false,
 ): Page {
   const invalid = FIELD_ORDER.some((field) => errors[field] !== undefined);
   const fields = [
@@ -398,27 +607,14 @@ export function settingsPage(
       {
         field: "email",
         hint:
-          "Na ten adres wysyłamy codzienną wiadomość. Nowego adresu nie potwierdzamy wiadomością — " +
-          "sprawdź, czy jest poprawny. Po zmianie adresu linki z wcześniejszych wiadomości " +
-          "przestaną działać, a inne urządzenia zostaną wylogowane.",
+          "Na ten adres wysyłamy codzienną wiadomość. Nowy adres zacznie działać dopiero po " +
+          "potwierdzeniu linkiem, który na niego wyślemy (ważnym 24 godziny); wtedy linki " +
+          "z wcześniejszych wiadomości przestaną działać, a inne urządzenia zostaną wylogowane.",
         input: textInput(
           "email",
           "email",
           values.email,
           ' maxlength="254" required autocomplete="email"',
-        ),
-      },
-      errors,
-    ),
-    textControl(
-      {
-        field: "emailConfirm",
-        hint: "Wypełnij tylko przy zmianie adresu.",
-        input: textInput(
-          "email",
-          "email_confirm",
-          values.emailConfirm,
-          ' maxlength="254" autocomplete="off"',
         ),
       },
       errors,
@@ -474,6 +670,9 @@ export function settingsPage(
     html: layout(invalid ? "Błąd: Ustawienia profilu" : "Ustawienia profilu", [
       ...errorSummary(errors),
       paragraph("Zmiany obowiązują od najbliższej codziennej wiadomości."),
+      ...(pendingEmail === null
+        ? []
+        : pendingEmailNote(pendingEmail, pendingEmailExpired, hidden("csrf", csrfToken))),
       form("/profil/ustawienia", fields, "Zapisz"),
       `<nav><p>${link("/profil", "Wróć do profilu bez zapisywania")}</p></nav>`,
     ]),
@@ -622,6 +821,37 @@ export function matchesPage(view: MatchesView): Page {
     `<nav><p>${link("/profil", "Twój profil")} · ${link("/profil/ustawienia", "Ustawienia profilu")}</p></nav>`,
   );
   return { status: 200, html: layout("Pasujące zamówienia", body) };
+}
+
+/** The sample of GET /przyklad: a made-up profile and its matched offers (src/web/example.ts). */
+export interface ExampleView {
+  readonly name: string;
+  /** The profile's rules in one line. */
+  readonly summary: string;
+  readonly items: readonly DigestItemView[];
+}
+
+/**
+ * GET /przyklad (PR-10): a sample digest in the cards of /dopasowania,
+ * public and the same for everyone (constant data, no database).
+ */
+export function examplePage(view: ExampleView): Page {
+  return {
+    status: 200,
+    html: layout("Przykładowe zestawienie", [
+      paragraph(
+        "Tak wygląda zestawienie zamówień dobranych do profilu firmy. Firma, zamawiający " +
+          "i ogłoszenia poniżej są zmyślone.",
+      ),
+      `<p>Profil: <strong>${escapeHtml(view.name)}</strong> — ${escapeHtml(view.summary)}</p>`,
+      `<ol class="matches">${view.items.map(matchItem).join("")}</ol>`,
+      paragraph(
+        "Codzienna wiadomość e-mail pokazuje zamówienia tak samo, a strona profilu " +
+          "„Pasujące zamówienia” — wszystkie aktualnie pasujące.",
+      ),
+      homeLink(),
+    ]),
+  };
 }
 
 /** /dopasowania for a stored profile the schema refuses: it must be corrected first. */
