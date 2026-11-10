@@ -833,7 +833,12 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     token tekstu pasuje do tokenu
     słowa kluczowego, gdy jest równy albo — dla tokenu słowa kluczowego o długości ≥ 4 —
     zaczyna się od tematu = token bez jednej końcowej samogłoski (`aeiouy`, po
-    `comparableText`). Tokeny krótsze niż 4 („bhp”, „it”, „gaz”) i tokeny bez litery
+    `comparableText`). Token słowa kluczowego o długości ≥ 6 kończący się na „nie”/„cie” (po
+    `comparableText`) pasuje też do tokenu tekstu równego mu bez końcowego „ie” — dopełniacz
+    liczby mnogiej „-eń”/„-ęć”, w którym znika ostatnia samogłoska tematu: „szkolenie” →
+    „szkoleń”, „oświetlenie” → „oświetleń”, „sprzątanie” → „sprzątań”, „zajęcie” → „zajęć”.
+    Tylko równość, nigdy prefiks: jako prefiks „malowan” łapałby też imiesłów „malowane”, a
+    „zarzadzan” — „zarządzanego”. Tokeny krótsze niż 4 („bhp”, „it”, „gaz”) i tokeny bez litery
     (liczby: „2024” ≠ „20245”) — tylko równe. Wykluczenia — ta sama reguła. Słowa o tym samym
     ciągu tokenów („Oświetlenie”, „oswietlenie”) liczą się raz, w kolejności profilu; tak
     samo słowo bez własnego dowodu: każde liczone słowo dostaje trafienie (ciąg tokenów tekstu),
@@ -849,7 +854,16 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     rozpoznawany („kabel” ≠ „kable”/„kabli”, „żłobek” ≠ „żłobka”, „węgiel” ≠ „węgla”);
     temat może zaczynać inne słowo („sala” → „salon”, „lampa” → „lampart”) — dotyczy to też
     słów wykluczających, gdzie skutkiem jest cichy brak alertu (wykluczenie „auto” usuwa
-    też „Automatyka budynkowa”). **Koszt:** tokeny tekstu × tokeny słowa na każde słowo,
+    też „Automatyka budynkowa”); dopełniacz liczby mnogiej powstaje tylko z formy „-nie”/„-cie”
+    samego słowa kluczowego — słowo „szkolenia” nie pasuje do „szkoleń”, a „danie” (5 znaków)
+    do „dań”; rzeczowniki na „-cie”, których bezokolicznik ma tę samą postać co dopełniacz
+    liczby mnogiej (np. „-ycie”, „-icie”, „-ucie”, „-ście”: pokrycie/pokryć, zatrucie/zatruć,
+    przejście/przejść, szycie/szyć), pasują też do bezokolicznika — „pokrycie” do „pokryć
+    (koszty)”, „przejście” do „przejść (weryfikację)”. Dla słowa kluczowego to wąskie, pokrewne
+    nadmiarowe dopasowanie, akceptowane; dla słowa wykluczającego (np. „pokrycie”,
+    „przejście”) opis z „pokryć koszty” albo „przejść weryfikację” po cichu usuwa trafną
+    ofertę — ten sam cichy brak alertu co przy tematach wyżej — więc takich słów jako
+    wykluczeń używać ostrożnie. **Koszt:** tokeny tekstu × tokeny słowa na każde słowo,
     ograniczone schematami (tytuł ≤ 1 000, opis ≤ 10 000 znaków, słowo ≤ 100 znaków i ≤ 10
     tokenów, ≤ 100 słów kluczowych i ≤ 100 wykluczających). Bez wzorców z nawrotami, więc
     tekst ze źródła sam niczego nie wydłuża; najgorszy przypadek wymaga też spreparowanego
@@ -860,12 +874,32 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     mnoży się przez liczbę klientów — zmierzyć na danych pilota, zanim doda się
     optymalizację (np. tokenizacja oferty raz na ofertę zamiast raz na parę).
   - **Punkty i próg** (`POINTS`, `MATCH_THRESHOLD`): kategoria +40 (raz, nawet przy kilku
-    kategoriach), słowo kluczowe +30 (pierwsze znalezione; kolejne mają powód z 0 pkt),
-    więcej niż jedno różne słowo +10, region +20, każde słowo wykluczające −100.
+    kategoriach), słowo kluczowe +30, gdy co najmniej jedno liczone słowo ma przydzielone
+    trafienie w tytule, a +15 (`keywordInDescription`), gdy wszystkie przydzielone trafienia
+    są w opisie (punkty dostaje pierwsze słowo z trafieniem w tytule, a bez takiego —
+    pierwsze liczone słowo; pozostałe mają powód z 0 pkt; **zmiana PR-09**, niżej), więcej
+    niż jedno różne słowo +10, region +20, każde słowo wykluczające −100.
     `matched = score ≥ 50 && brak wykluczenia && region ≠ niezgodny`. Uzasadnienie:
     kategoria + region = 60 przechodzi; przy nieznanym regionie potrzeba kategorii i słowa
-    (70); słowo + zgodny region = 50 przechodzi; samo słowo przy nieznanym regionie (30) —
-    nie.
+    (70 z tytułu, 55 z opisu); słowo w tytule + zgodny region = 50 przechodzi; samo słowo z
+    opisu + zgodny region (35) — nie; dwa różne słowa tylko z opisu + zgodny region
+    (15 + 10 + 20 = 45) — nie; samo słowo przy nieznanym regionie (30 / 15) — nie.
+    **Zmiana PR-09 (2026-11-06, kalibracja na danych pilota):** wcześniej słowo dawało +30
+    niezależnie od pola, więc samo słowo z opisu + zgodny region (50) przechodziło. W
+    przeglądzie pilota ciągnik i koparka trafiały do profilu elektrycznego przez
+    „oświetlenie”/„elektryczne” w opisie wyposażenia. Opis wymienia wiele rzeczy pobocznych,
+    tytuł mówi, czego dotyczy zamówienie — stąd niższa waga opisu, bez zmiany progu.
+    Przykłady: „Dostawa ciągnika” z „oświetlenie” w opisie, zgodny region → 35, brak
+    dopasowania; „Modernizacja oświetlenia ulicznego”, zgodny region → 50, dopasowanie;
+    kategoria + słowo z opisu, region nieznany → 55, dopasowanie; kategoria + region → 60;
+    kategoria + słowo w tytule, region nieznany → 70. Powód podaje pole jak wcześniej
+    („słowo: oświetlenie (opis)”), `match:preview` — wynik w punktach. Do tego dwie pomoce
+    operatora: `profile:create` z słowami kluczowymi i bez słów wykluczających wypisuje
+    podpowiedź (niżej), a podsumowanie `match:preview` liczy dopasowania bez słowa
+    kluczowego (niżej). **Koszt:** oferta bez CPV (np. małe zamówienie BZP) nie ma punktów
+    za kategorię, więc słowo tylko z opisu nie przechodzi nawet przy zgodnym regionie (35,
+    z drugim słowem 45) — dla ofert bez CPV słowo kluczowe musi być w tytule; wybieraj słowa,
+    które pojawiają się w tytułach.
   - **Kategorie:** `mvpCategoriesForCpv(offer.categories)` ∩ kategorie profilu → +40 z listą
     kategorii i kodów CPV, które je dały. Oferta z kategoriami MVP spoza profilu → „kategoria:
     niezgodna” (0). Brak kodu dającego kategorię MVP → „kategoria: ogłoszenie nie podaje
@@ -931,7 +965,13 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
       dokładna forma („gaz” ≠ „gazowy”/„gazu”; rada: jeśli słowo się odmienia, dodać obok
       dłuższy temat, „gaz” + „gazow”), wymienione przez `cleanText`, ≤ 40 znaków,
       najwyżej 5; brak słów kluczowych (małe zamówienia BZP bez CPV nigdy nie pasują). Reguła
-      tematu bez zmian (najpierw kalibracja).
+      tematu bez zmian (najpierw kalibracja). Od PR-09: słowa kluczowe bez słów
+      wykluczających → jedna linia „Wskazówka: …” z wąskimi przykładami („ciągnik”,
+      „koparka”, „dostawa paliwa”) i uwagą, że wykluczenie działa też na opis (sprawdzić
+      wynik w `match:preview`) — profil nie jest zmieniany, kod wyjścia bez zmian. Bez
+      szerokich przykładów („pojazd”, „dostawa”): wykluczenie pasuje po temacie w tytule i
+      opisie, więc usunęłoby własne przetargi elektryka („dostawą i montażem”, „40
+      pojazdów”).
     - `profile:show <id>`: profil jako JSON; nieznany id → exit 1.
     - `match:preview <profileId> [--limit N]`: oferty nie `closed`/`cancelled`, od
       najnowszych (`published_at DESC NULLS LAST, id`; domyślnie 100, maks. 1000,
@@ -940,7 +980,12 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
       wstrzykiwany, `matchOpportunity` zostaje czyste) — za wszystkimi pozostałymi, w tej
       samej kolejności, z dopiskiem „(po terminie)”: status w bazie może nie nadążać za
       terminem, więc oferta nie znika z podglądu. Każda z wynikiem, tytułem, zamawiającym,
-      terminem (czas Europe/Warsaw), linkiem i powodami; na końcu „dopasowane X z Y”. Bez
+      terminem (czas Europe/Warsaw), linkiem i powodami; na końcu „dopasowane X z Y”, a od
+      PR-09, gdy są, „…, w tym N bez słowa kluczowego (tylko kategoria i region)” (dopasowane
+      bez żadnego powodu słowa kluczowego — pokazuje, ile daje sama kategoria). Powody w
+      podglądzie zostają z kluczami kategorii (narzędzie operatora); etykiety
+      (`CATEGORY_LABELS`, przeniesione do `src/domain/vocabulary.ts`) widzi klient w
+      digeście i na `/dopasowania` (`formatReasons(…, { categoryLabels })`). Bez
       danych kontaktowych; tekst ze źródła przez `cleanText` (znaki sterujące nie trafiają
       do terminala). Profil nieaktywny też, z informacją, że jest nieaktywny. Zapisany
       wiersz oferty niezgodny ze schematem (`invalid_stored_row`) jest pomijany: ostrzeżenie
@@ -1067,19 +1112,47 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     (także tego samego dnia — dzisiejszy `failed` nie blokuje profilu), aż `attempts` = 3
     (liczone na przebieg, nie na próbę w przebiegu); potem oferta nie jest już wysyłana temu
     profilowi.
-  - **Procedura operatora dla `pending`** (`uncertain`/`pending_today`; zapytanie
-    `SELECT … FROM deliveries WHERE status = 'pending'`): sprawdzić log serwera SMTP /
-    skrzynkę wysłanych (tryb `test`: `EMAIL_OUTBOX_DIR`) dla `profile_id` i daty. Doręczono →
-    `UPDATE deliveries SET status = 'sent', sent_at = now(), attempts = attempts + 1 WHERE …`.
-    Nie doręczono →
-    `UPDATE … SET status = 'failed', error_code = 'operator_reset', attempts = attempts + 1`
-    (kolejny przebieg wyśle, jeśli `attempts < 3` i oferta nadal się kwalifikuje) albo
-    `DELETE` tych wierszy (wyśle jak nowe). Bez decyzji operatora oferty nie trafią do tego
-    profilu, a profil z dzisiejszym `pending` nic dziś nie dostanie.
+  - **Procedura operatora dla `pending`** (`uncertain`/`pending_today`; od PR-09 komendy
+    zamiast ręcznego SQL, `src/cli.ts` + `deliveries-repository.ts`):
+    `deliveries:pending` wypisuje jedną linię JSON `{"status":"ok","pending":[…],
+"truncated":…}` — grupy wierszy `pending` na profil, transport i dzień (`profileId`,
+    `transport`, `digestDate`, `offers`, `oldestCreatedAt`), od najstarszego dnia, najwyżej
+    1 000 grup (`PENDING_DELIVERIES_MAX_GROUPS`, więcej → `truncated: true`); tylko
+    identyfikatory, daty i liczby, bez adresów i tytułów; bez blokady (sam odczyt). Operator
+    sprawdza log serwera SMTP / skrzynkę wysłanych (tryb `test`: `EMAIL_OUTBOX_DIR`) dla
+    profilu i daty, potem `deliveries:resolve <profileId> --sent|--failed [--date
+YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
+    `attempts + 1`, `error_code` pusty; `--failed` (nie doręczono) → wiersze usunięte, więc
+    kolejny digest tym samym transportem wyśle te oferty jak nowe, jeśli nadal się kwalifikują
+    (warunki kandydata: RUNBOOK → „Wysyłki niepewne”).
+    Zmieniane są wyłącznie wiersze `pending` wskazanego profilu w jednym transporcie i — z
+    `--date` — tego dnia. Transport: `--transport`, domyślnie transport bieżącego `EMAIL_MODE`
+    (jak `digest`); czytane jest samo `EMAIL_MODE` (`loadEmailMode`, ten sam schemat), bez
+    `EMAIL_FROM`/`SMTP_URL`, błędne → kod 1 przed otwarciem bazy. (Przegląd właściciela PR-09:
+    wcześniej wszystkich transportów, jak dawny SQL — wiersze innego transportu to osobne
+    doręczenia, a decyzja dotyczy jednego z nich.) Jedna transakcja, która najpierw bierze bez
+    czekania blokadę digestu (`pg_try_advisory_xact_lock(DIGEST_LOCK_KEY)`, zwalniana przy
+    zatwierdzeniu): trwający `digest` (jego zarezerwowane wiersze są `pending` do zapisu
+    wyniku) albo inne `deliveries:resolve` → odmowa, kod 1, nic nie zmienione („a digest run
+    or another deliveries:resolve holds the lock”); `digest` startujący w tej chwili jest
+    pomijany (`skipped`) — RUNBOOK: nie uruchamiać o minucie crona `digest`. Brak pasujących wierszy `pending` → kod 1, nic nie zmienione; komunikat podaje transport (wiersze drugiego mogą nadal czekać, np. po zmianie `EMAIL_MODE`).
+    Wynik: `{"status":"ok","outcome",…,"transport",…,"digestDate",…,"changed":N}`. Oba
+    przełączniki, żaden, powtórzony, zły uuid lub data, `--transport` powtórzony, bez wartości
+    lub inny niż `test`/`smtp` → kod 2 (błąd wywołania jak w pozostałych komendach,
+    sprawdzany przed konfiguracją i bez otwierania bazy). Bez decyzji operatora oferty nie
+    trafią do tego profilu, a profil z dzisiejszym `pending` nic dziś nie dostanie.
   - **Treść** (`buildDigest`, czyste, `src/notifications/digest.ts`; D-013 — po polsku): temat
     tylko z liczby ofert i nazwy profilu (≤ 80 znaków, bez znaków sterujących i CR/LF), nigdy z
     danych źródła. Dla każdej oferty: tytuł, zamawiający, lokalizacja, termin (czas polski) i
-    data publikacji („nie podano”, gdy brak), kategoria (MVP + CPV, gdy są), opis (≤ 300
+    data publikacji („nie podano”, gdy brak), kategoria (MVP + CPV, gdy są; od PR-09
+    etykiety `CATEGORY_LABELS`, np. „Sprzątanie”, także w powodach dopasowania — nigdy surowy
+    klucz; tak samo `/dopasowania`, D-027. Linia „Kategoria:” — etykiety rozdzielone „; ”,
+    bo same zawierają przecinki, potem „ · CPV: ” i kody: „Elektryka; Serwis, naprawy i
+    konserwacja · CPV: 45310000-3, 50700000-2”; bez kategorii MVP samo „CPV: …”. W „Dlaczego
+    pasuje” powód kategorii to same etykiety w cudzysłowach „…”, rozdzielone „, ”, bez kodów
+    (kody są w linii „Kategoria:”): „kategoria: „Elektryka”, „Serwis, naprawy i
+    konserwacja”; słowo: oświetlenie (tytuł); region: mazowieckie” — „; ” rozdziela tylko
+    powody), opis (≤ 300
     znaków, cięty na granicy słowa) i kontakt publiczny — tylko gdy są, powody dopasowania,
     link tylko `http(s)` (`url.href`; inny → „Link: nie podano”). Tekst i HTML z tymi samymi
     wartościami; w HTML każda wartość przez `escapeHtml` (`&`, `<`, `>`, `"`, `'` i grawis),
@@ -1102,6 +1175,8 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     dostaje dwa nowe tokeny profilu, wydawane po `--dry-run` i **przed** rezerwacją
     (`claimDeliveries`) — błąd bazy przy wydawaniu nie zostawia więc wierszy `pending`.
     Stopka zamiast akapitu „odpowiedz na wiadomość” ma dwa akapity z linkami: „Twój profil”
+    (od PR-09 poprzedzony zdaniem, co daje strona: „Na stronie profilu możesz zmienić
+    kategorie, regiony i słowa kluczowe oraz zobaczyć wszystkie pasujące zamówienia.”)
     (`/dostep/<token>`, jednorazowy, 7 dni, z ostrzeżeniem, żeby nie przekazywać wiadomości
     dalej) i wypis (`/wypis/<token>`, 60 dni, „albo odpowiedz na tę wiadomość”); link tylko
     `http(s)`, w HTML przez `escapeHtml`. Nagłówki:
@@ -1397,7 +1472,15 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
       źródła (nadrabianie ponawia nieudane dni, D-021 — pokryty dzień przestaje być problemem);
       `source_stale`, gdy od 36 h (`STATUS_STALE_AFTER_MS`) żaden przebieg nie zakończył się
       `succeeded`/`incomplete` — `ingest` biegnie codziennie, więc jeden opóźniony cykl to
-      jeszcze nie alarm, dwa pominięte już tak; `source_never_run`; `no_enabled_sources`;
+      jeszcze nie alarm, dwa pominięte już tak; `source_incomplete` (od PR-09, C&S L-R2-1 z
+      PR-08), gdy dwa najnowsze nie-`failed` przebiegi źródła z dwóch różnych dni publikacji
+      (na dzień liczy się najnowszy przebieg, kolejność po `started_at`;
+      `listRecentCompletedRuns`) są oba `incomplete` — pojedynczy `incomplete` nie alarmuje
+      (jeden dzień z limitem stron/rekordów albo brakującym szczegółem bywa), dwa z rzędu to
+      wzór (np. limit za niski albo zmiana w źródle). Raport i alert podają każdy z nich:
+      dzień, `runId`, start i powody z podsumowania (`part: reason`, np. `announcements: max_records`;
+      zapis nieczytelny → „nieczytelne”) — bez treści ofert. Nadrabianie (D-021) nie
+      ponawia dni `incomplete` i się nie zmienia; `source_never_run`; `no_enabled_sources`;
     - wysyłki: `deliveries_pending` — każdy wiersz `pending` (wynik niepewny, decyzja
       operatora, D-024), **chyba że trwa `digest`** (jego zarezerwowane wiersze są `pending` do
       zapisu wyniku): advisory lock `DIGEST_LOCK_KEY` trzymany przez inną sesję, odczytany z
@@ -1471,8 +1554,13 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     (znana podatność zależności produkcyjnej = błąd; zależności tylko deweloperskie nie
     blokują CI — obejmuje je dalej pełny `pnpm audit` w Code & Safety Review,
     `docs/SECURITY.md` §13), wersja pnpm z `packageManager`. Klient `pg_dump`/`pg_restore`
-    z `postgresql-client`, z kontrolą wersji ≥ 16 — test backup/restore nie może się po cichu
-    pominąć w CI. Ten test działa w osobnym projekcie Vitest po wszystkich pozostałych
+    przypięty do wersji głównej serwera: `postgresql-client-16` z repozytorium PGDG
+    (apt.postgresql.org, dodanego skryptem z `postgresql-common`, bo Ubuntu 26.04 ma tylko
+    klienta 18; nie meta-pakiet `postgresql-client`, który daje najnowszego klienta),
+    `/usr/lib/postgresql/16/bin` na początku `PATH` i kontrola, że wersja główna to dokładnie
+    16 — `pg_dump` ≥ 17 zapisuje `SET transaction_timeout`, którego serwer 16 nie zna, więc
+    `pg_restore --exit-on-error --single-transaction` kończy się błędem; test backup/restore
+    nie może się też po cichu pominąć w CI. Ten test działa w osobnym projekcie Vitest po wszystkich pozostałych
     (`groupOrder`), bo introspekcja katalogu przez Migrator Kysely w innych plikach ściga się
     z relacjami usuwanymi przez restore w tej samej bazie.
 - **Odrzucone alternatywy:** alert z procesu `ingest`/`digest` (każda komenda musiałaby znać

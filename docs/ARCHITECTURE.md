@@ -494,7 +494,8 @@ pełne reguły i uzasadnienie — D-023. Punkty (`POINTS`, punkt startowy do kal
 | Reguła                                               | Punkty |
 | ---------------------------------------------------- | ------ |
 | kategoria profilu ∈ kategorie MVP z CPV oferty (raz) | +40    |
-| słowo kluczowe w tytule/opisie (pierwsze znalezione) | +30    |
+| słowo kluczowe w tytule (pierwsze znalezione, raz)   | +30    |
+| słowo kluczowe tylko w opisie (gdy żadne w tytule)   | +15    |
 | więcej niż jedno różne słowo kluczowe                | +10    |
 | region zgodny albo profil bez ograniczeń regionu     | +20    |
 | słowo wykluczające (każde znalezione)                | −100   |
@@ -515,8 +516,10 @@ tokenów tekstu, którego nie ma inne liczone słowo; przydział w D-023), `more
 - **Tekst** (`text.ts`): obie strony przez `comparableText` (także bez znaków `\p{Cf}`, np.
   miękkiego łącznika), tokeny = ciągi liter/cyfr; fraza pasuje do kolejnych tokenów; prosta
   odmiana: token słowa ≥ 4 znaki pasuje do tokenu tekstu zaczynającego się od niego bez jednej
-  końcowej samogłoski, krótsze i bez litery (liczby) — tylko dokładnie; ta sama reguła dla
-  wykluczeń. Słowo ≤ 10 tokenów (schemat). Znane ograniczenia i koszt w D-023.
+  końcowej samogłoski, a token ≥ 6 znaków na „nie”/„cie” także do tokenu równego mu bez
+  „ie” (dopełniacz l. mn.: „szkoleń”, „zajęć”; tylko równość, nie prefiks); krótsze i bez
+  litery (liczby) — tylko dokładnie; ta sama reguła dla wykluczeń. Słowo ≤ 10 tokenów
+  (schemat). Znane ograniczenia i koszt w D-023.
 - **Region:** znane województwo oferty spoza województw profilu → niezgodny, niezależnie od
   powiatu (powiaty nigdy nie poszerzają profilu z województwami). W obrębie województwa z
   listy decyduje województwo; zawężania powiatem nie ma (żadne źródło nie podaje jeszcze
@@ -528,7 +531,9 @@ tokenów tekstu, którego nie ma inne liczone słowo; przydział w D-023), `more
   porównywane przez `countyKey` = `comparableText(normalizeCounty(x))` z ujednoliceniem
   „m. st.”/„m.st.”/„miasto stołeczne” i „(miasto na prawach powiatu)”.
 - **Opis** (`format.ts`): `formatReasons` →
-  „kategoria: elektryka (CPV 45310000-3); słowo: oświetlenie (tytuł); region: mazowieckie”.
+  „kategoria: elektryka (CPV 45310000-3); słowo: oświetlenie (tytuł); region: mazowieckie”
+  (`match:preview`); z `categoryLabels` (digest, `/dopasowania`, PR-09) kategoria to same
+  etykiety w cudzysłowach, bez kodów: „kategoria: „Elektryka”; słowo: …”.
 - Status i termin oferty nie są sprawą matchingu: `match:preview` pomija `closed`/`cancelled`,
   oferty po terminie (wobec wstrzykiwanego zegara) pokazuje na końcu z „(po terminie)”, a
   nieprawidłowe zapisane wiersze ofert pomija (ostrzeżenie z id wiersza i ścieżkami pól,
@@ -559,7 +564,9 @@ Szczegóły i uzasadnienie: D-010 (SMTP, biblioteka) i D-024 (wybór ofert, idem
   reguły.
 - `runDigest(deps, { profileId, dryRun })` (`run.ts`): kandydaci raz na przebieg, profile po
   kolei, dla każdego rezerwacja `pending` → wysyłka → `sent`/`failed`; wynik niepewny
-  zostawia `pending` (nigdy nie wysyłany ponownie). Błąd `setup`, `unreachable` lub
+  zostawia `pending` (nigdy nie wysyłany ponownie; decyzja operatora: `deliveries:pending` i
+  `deliveries:resolve`, PR-09 — w jednej transakcji pod `pg_try_advisory_xact_lock(DIGEST_LOCK_KEY)`,
+  odmowa, gdy trwa `digest` albo inne `deliveries:resolve`). Błąd `setup`, `unreachable` lub
   `uncertain` zatrzymuje przebieg (pozostałe profile `not_run`, `errorCode` podsumowania);
   przy `setup`/`unreachable` wiersze są `failed` bez zużycia próby. Zegar, sender, `sleep` i sygnał
   przerwania są wstrzykiwane (`CliDeps.digest`), więc testy działają bez sieci.
@@ -972,6 +979,13 @@ release failed`. `ingest` i `digest` nie blokują się wzajemnie.
   `{"status":"ok","tokens":…,"sessions":…}`. Kontrola schematu jak w `access:link`, bez
   `PUBLIC_BASE_URL`; nieznany profil → kod 1.
 - `digest` przy ustawionym `PUBLIC_BASE_URL` dodaje do e-maili linki (§4.5).
+- `deliveries:pending` i `deliveries:resolve <profileId> --sent|--failed [--date] [--transport]`
+  (PR-09, D-024) — decyzja operatora o wierszach `pending` (`deliveries-repository.ts`):
+  `listPendingDeliveries` (grupy profil × transport × dzień digestu, tylko id, daty i liczby,
+  najwyżej 1000) i `resolvePendingDeliveries` (jedna transakcja: najpierw
+  `pg_try_advisory_xact_lock(DIGEST_LOCK_KEY)` bez czekania — zajęty → odmowa, kod 1; potem
+  `UPDATE … sent` albo `DELETE` tylko wierszy `pending` profilu, transportu i dnia; transport
+  domyślnie z samego `EMAIL_MODE`, `loadEmailMode`; 0 zmienionych → kod 1).
 - `status [--notify]` (PR-07A, D-028) — raport operatora, jedna linia JSON na stdout; tylko
   odczyt, bez blokady. Kolejność kontroli: argumenty (kod 2) → konfiguracja (z `--notify`:
   `OPERATOR_EMAIL` i zmienne e-mail jak w `digest`, kod 1) → baza. Oczekujące migracje →
@@ -981,6 +995,10 @@ release failed`. `ingest` i `digest` nie blokują się wzajemnie.
   `incomplete`; `source_failed`, gdy ostatni przebieg jest `failed` albo nieudany dzień z
   ostatnich 36 h nie został później pokryty przebiegiem `succeeded`/`incomplete` tego źródła;
   `source_stale` — brak takiego przebiegu od 36 h (`STATUS_STALE_AFTER_MS`); `source_never_run`;
+  `source_incomplete` (PR-09) — dwa najnowsze nie-`failed` przebiegi źródła z dwóch różnych dni
+  publikacji (dzień liczony raz, jego najnowszym przebiegiem; `listRecentCompletedRuns`, jedno
+  zapytanie z `LATERAL … LIMIT 2` na źródło) są oba `incomplete` — alert podaje ich powody
+  (`part: reason`, `nieczytelne` przy nieczytelnym zapisie); pojedynczy `incomplete` nie alarmuje;
   `no_enabled_sources`; `deliveries_pending` — wiersze `pending`, chyba że trwa `digest`
   (advisory lock `DIGEST_LOCK_KEY` trzymany przez inną sesję, odczyt z `pg_locks`, bez
   blokowania); `deliveries_failed` — wiersze `failed` z dniem digestu od wczoraj (Polska),

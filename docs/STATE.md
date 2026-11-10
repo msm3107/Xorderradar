@@ -1,11 +1,13 @@
 # Current State
 
 Current phase: PHASE 4 — PILOT
-Current PR: PR-08 — Drugie źródło: Baza Konkurencyjności (adapter `bk`)
-Status: PR-07B **MERGED in PR #13 (e01aa0b)**. PR-08 (owner's choice 2026-11-04) **PR #14 open for
-the owner's review** (not merged); owner-review round done: Code & Safety Review PASS (round 6),
-Quality Review ACCEPT (round 3). AC1 (`source:preview bk` against the live source) is the
-owner's step on the VPS.
+Current PR: PR-09 — Kalibracja dopasowań i narzędzia operatora
+Status: PR-08 **MERGED in PR #14 (366618e)**. PR-09 (owner's choice 2026-11-06: scoring
+calibration, operator delivery commands, category labels/footer, `source_incomplete`) **PR
+READY** (Code & Safety Review PASS, Quality Review ACCEPT); owner review of PR #15 PASS with
+one Medium + two QoL asks, implemented in a fix round awaiting the reviewers; scope in
+`docs/PR_PLAN.md` → PR-09. Owner steps on the VPS for PR-08 (AC1, `bk`
+backfill, DEPLOY §6) remain in Blockers.
 
 ## Completed
 
@@ -682,8 +684,125 @@ Round-1 fixes:
 
 ## In progress
 
+**PR-09 — Kalibracja dopasowań i narzędzia operatora** (`docs/PR_PLAN.md` → PR-09) —
+PR READY: Code & Safety Review PASS (round 3), Quality Review ACCEPT (round 2); awaiting owner
+review. D-023, D-024, D-028 updated.
+
+- Scoring (D-023): a keyword gives +30 when a counted keyword's assigned hit is in the title,
+  +15 (`POINTS.keywordInDescription`) when all are in the description; threshold 50 and other
+  points unchanged. Keyword-only in the description + region = 35 (no match; pilot cases
+  tractor/excavator via „oświetlenie”/„elektryczne” pinned in `tests/matching.test.ts`),
+  title keyword + region 50 and category + region 60 match as before, category + description
+  keyword with unknown region 55. `profile:create` prints a „Wskazówka” line (keywords without
+  exclude keywords); `match:preview` appends „w tym N bez słowa kluczowego (tylko kategoria i
+  region)” when N > 0. Changed tracked assertion: the `POINTS` `toEqual` (new key).
+- Operator commands (D-024): `deliveries:pending` (JSON groups per profile, transport, day:
+  ids, dates, counts; ≤ 1000 groups, `truncated`) and
+  `deliveries:resolve <profileId> --sent|--failed [--date]` (one transaction,
+  `pg_try_advisory_xact_lock(DIGEST_LOCK_KEY)`, only `pending` rows of the profile/day;
+  `--sent` → `sent`, `--failed` → delete). Refusal exit 1 while a digest (or another
+  `deliveries:resolve`) holds the lock or when no row matches. Both/neither switch, bad
+  uuid/date → exit 2 (usage, before the database is opened). README „Wynik niepewny” and
+  RUNBOOK use the commands instead of SQL.
+- Labels and footer: `CATEGORY_LABELS` moved to `src/domain/vocabulary.ts`; the digest
+  (category line and reasons) and `/dopasowania` show labels, never keys; `match:preview`
+  keeps keys with their CPV codes. Since the Quality fix round: the reason shows labels only,
+  each in „…”, joined with „, ” and without codes („kategoria: „Elektryka”, „Serwis, naprawy i
+  konserwacja””; „; ” only between reasons); the „Kategoria:” line joins labels with „; ”
+  (labels contain commas) and then „ · CPV: ” with the codes („CPV: …” alone without an MVP
+  category). Digest footer says what the profile page offers. Changed tracked assertions:
+  `tests/digest.test.ts` (the „Kategoria”/„Dlaczego pasuje” lines of the first test and the
+  CPV-only line: `CPV ` → `CPV: `) and `tests/integration/web-profile.test.ts` (the reason).
+- `status` (D-028): new problem `source_incomplete` when the two newest non-failed runs of
+  a source (two different publication days, newest run per day) are both `incomplete`; a single
+  one does not alarm. The report and the `--notify` alert list day, `runId`, start and
+  `part: reason`. `evaluateStatus` takes `completedRuns` (test fixture helpers gained the
+  parameter). RUNBOOK „Alert statusu” row. Catch-up (D-021) unchanged.
+- Tests: `tests/deliveries-cli.test.ts` (new), DB tests for pending/resolve (lock held,
+  only target rows, end-to-end resend after `--failed`, no resend after `--sent`) and for
+  `source_incomplete` with the alert. 2014 tests (+53).
+- C&S Review PASS → fix round (low findings and nits): lock refusal names „a digest run or
+  another deliveries:resolve” (result `lock_busy`), RUNBOOK: not at the digest cron minute
+  (7:30); DB test of the `truncated` boundary (1001 → 1000 + `truncated`, exactly 1000 → not);
+  `CATEGORY_LABELS` imported from the domain (re-export in `profile-form.ts` dropped; the
+  import in `tests/web-profile-form.test.ts` moved, assertions unchanged); labels joined with
+  „; ”; stale exit-code remark removed; Next action updated. 2017 tests (+3).
+- Quality Review CHANGES REQUESTED → fix round (with C&S nits N1, N2): the `profile:create`
+  hint gives narrow excludes („ciągnik”, „koparka”, „dostawa paliwa”) and says exclusion also
+  applies to the description (the broad „pojazd”/„dostawa” would drop an electrician's own
+  tenders); README and D-023 state that offers without CPV need a title keyword; category
+  wording in „Dlaczego pasuje” and on the „Kategoria:” line (above; `CATEGORY_SEPARATOR`
+  removed); footer „Na stronie profilu możesz zmienić kategorie, regiony i słowa kluczowe oraz
+  zobaczyć wszystkie pasujące zamówienia.”; README/RUNBOOK uncertain-delivery procedure: the
+  recipient address from `profile:show` (field `email`, not to be pasted into tickets or
+  logs) and `--sent` as the default when the outcome cannot be established; the lock refusal
+  names „another deliveries:resolve” in README, the usage text and the doc comment. New test:
+  the „Kategoria:” line with labels and more than five codes. 2018 tests (+1).
+- C&S round 3 PASS (nits only) → Quality round 2 ACCEPT: `docs/PRODUCT.md` example of
+  „dlaczego pasuje” aligned with the labelled wording; the singular „kategoria:” prefix stays
+  (a reason-type tag like „słowo:”/„region:”; revisit together with the „Kategoria:” field
+  label only if pilot customers ask). Watch in the pilot: a profile with many categories that
+  all hit one CPV-rich offer gets a long reason (~200 characters).
+- Owner review of PR #15 (PASS, one Medium + two QoL) → fix round: (1) D-023 genitive plural:
+  a keyword token of ≥ 6 characters ending in „nie”/„cie” also matches a text word equal to it
+  without „ie” („szkolenie” → „szkoleń”, „oświetlenie” → „oświetleń”, „sprzątanie” →
+  „sprzątań”, „zajęcie” → „zajęć”), equality only, never a prefix („malowane”,
+  „zarządzanego” do not match); `KeywordToken.genitivePlural` in `src/matching/text.ts`, no
+  stemmer; known limit: only from the „-nie”/„-cie” form itself („szkolenia” ≠ „szkoleń”).
+  No existing matching expectation changed.
+  (2) `deliveries:resolve … [--transport test|smtp]`: only rows of that transport change
+  (`transport` filter on both the UPDATE and the DELETE); default the current `EMAIL_MODE`'s
+  transport via `loadEmailMode` (EMAIL_MODE alone, same schema, no SMTP secrets; invalid →
+  exit 1 before the database); with `--transport` EMAIL_MODE is not read;
+  repeated/missing/other value → exit 2; the JSON output adds `transport`;
+  `deliveries:pending` already listed it. Changed tracked assertions (stricter, forced by the
+  new field): the resolve request/stdout `toEqual`s in `tests/deliveries-cli.test.ts` and the
+  `--sent --date` stdout `toEqual` in `tests/integration/digest.test.ts` gained
+  `transport: "test"`.
+  (3) RUNBOOK step 3: after
+  `--failed` an offer returns only in a later digest over the same transport that still finds
+  it a candidate (not `closed`/`cancelled`, deadline not passed, first stored ≤ 7 days before
+  the run, matches the profile as it is then, within 50 per e-mail / 10 000 candidates; one
+  e-mail a day). README, D-023, D-024, ARCHITECTURE, PR_PLAN updated. 2053 tests (+35).
+  Code & Safety Review of the round: PASS with four Lows, fixed: (L1) when `deliveries:resolve`
+  changes 0 rows the message names the transport („…has no pending deliveries over transport
+  "test"; nothing was changed.”, with `--date` „…of that day over transport "test"…”) — the
+  old „the profile has no pending deliveries” was false while rows of the other transport
+  were pending (e.g. after `EMAIL_MODE` changed test → smtp). Changed tracked assertions
+  (stricter, forced by the new text): the two exact messages of „exits 1 when no pending row
+  matches” in `tests/deliveries-cli.test.ts`, and the `--date` case in
+  `tests/integration/digest.test.ts` („exits 1 and changes nothing…”), from
+  `toContain("no pending deliveries of that day")` to the exact message (`toBe`). (L2) D-023
+  and `src/matching/text.ts`: known limit — for „-ycie”/„-icie” nouns the genitive plural
+  equals the infinitive („pokrycie” → „pokryć koszty”, „zużycie” → „zużyć”, „użycie” →
+  „użyć”; narrow, related meaning, accepted; generalised in the doc-only round below). (L3) README `profile:create` row
+  mentions the genitive plural. (L4) comments: `digestDate` null = every pending row of the
+  profile and transport (`ResolveRequest`, `ResolveArgs`); which commands read the e-mail
+  variables (`runCli`, `loadEmailConfig`). Tests added: exclude „szkolenie” removes
+  „Organizacja szkoleń”; the „-ycie” over-match documented; resolve with `--transport smtp`
+  and 0 rows names „smtp”; `EMAIL_MODE=smtp` with a malformed `SMTP_URL` holding a password
+  resolves over smtp and prints neither the URL nor the password. 2057 tests (+4).
+  Quality Review of the round ACCEPT → doc-only round (no code or test change): (L-a) D-023
+  and the `src/matching/text.ts` comment generalise the known limit to „-cie” nouns whose
+  infinitive has the same form („-ycie”, „-icie”, „-ucie”, „-ście”: pokrycie/pokryć,
+  zatrucie/zatruć, przejście/przejść, szycie/szyć) — accepted for include keywords, a silent
+  missing alert for exclude keywords („przejście” vs „przejść weryfikację”), so such excludes
+  with care; (L-b) README: the e-mail variables are read by `digest` and `status --notify`;
+  tips: README `profile:create` — type the singular „-nie”/„-cie” form („szkolenie”, not
+  „szkolenia”); RUNBOOK step 3 — after `--failed` the offer returns in the next `digest`
+  (the nearest 7:30 cron — tomorrow's when resolved after today's run), earlier only via a
+  manual `digest` with no other `sent`/`pending` row of that profile and transport today;
+  Code & Safety re-check PASS, its Low L1 („czyli jutro” too narrow when resolving between
+  the 06:30 alert and the 7:30 cron) folded in by the coordinator (wording only).
+- CI fix (owner-approved addition to PR-09): the `ubuntu-latest` runner image moved to 26.04,
+  where `postgresql-client` gives client 18; pg_dump ≥ 17 writes `SET transaction_timeout`,
+  which the `postgres:16` service rejects, so the backup/restore test failed. `ci.yml` now
+  adds the PGDG repository (the runner has none; `apt.postgresql.org.sh -y` from
+  `postgresql-common`), installs `postgresql-client-16`, puts `/usr/lib/postgresql/16/bin` on `PATH` and requires
+  major 16; D-028 CI sentence updated. No code or test change.
+
 **PR-08 — Drugie źródło: Baza Konkurencyjności (adapter `bk`)** (`docs/PR_PLAN.md` → PR-08) —
-PR READY for the owner's review (not merged); D-030 new.
+**MERGED in PR #14 (366618e)**; D-030 new.
 
 - `src/sources/bk/adapter.ts`: day listing (`/api/announcements/search`, current-version
   publication date, one page of 250; two sort orders only over 250 — see the owner-review
@@ -805,12 +924,24 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
 
 ## Next action
 
-1. PR-08: owner review of the PR (not merged by the agents); check CI on its head. After the
-   merge, on the VPS: PR-07B checklist (`docs/DEPLOY.md` §13) if not done yet, then PR-08 AC1
-   and the `bk` backfill (Blockers). Follow-ups from the PR-08 reviews (owner to choose the PR):
-   - `status` does not warn when the same source day is repeatedly `incomplete` (C&S L-R2-1);
-     a short listing now fails the day (owner-review round), but single detail skips
-     (`detail_missing`/`detail_invalid`) are still visible only in the ingest summary/log.
+1. PR-09: PR READY (Code & Safety Review PASS round 3, Quality Review ACCEPT round 2); owner
+   review PASS with three asks → fix round done (PR-09 section), next: Code & Safety Review
+   and Quality Review of the round, then back to the owner (not merged by the agents); check
+   CI on its head. On the VPS
+   (PR-08 is merged, 366618e): PR-07B checklist (`docs/DEPLOY.md` §13) if not done yet, then
+   PR-08 AC1 and the `bk` backfill (Blockers). Follow-ups from the PR-08 reviews (owner to
+   choose the PR):
+   - Backup client version (found by the PR-09 CI fix, later PR): README/D-028/RUNBOOK
+     „klient ≥ 16 / nie starszy niż serwer” and the version check in
+     `src/operations/backup.ts` are too permissive — a newer client (17+) makes a dump that a
+     16 server cannot restore (`SET transaction_timeout`); require the server's major or
+     document the restore-side limit.
+   - Calibration aid (Quality Review of PR-09, out of scope): a `match:preview` counter of
+     near misses — offers dropped only because the keyword was in the description (they would
+     match with a title keyword) — for calibrating pilot profiles.
+   - (Done in PR-09: `status` reports `source_incomplete` when the two newest days of a
+     source are both `incomplete` — C&S L-R2-1. A single day's detail skips
+     (`detail_missing`/`detail_invalid`) are still visible only in the ingest summary/log.)
    - Partial value (owner's review, QoL): when only some orders of a `bk` offer have a value,
      the value stays `null`; showing „wartość części: …” in the digest needs a separate field
      and a digest text change (D-030 value rule), so it is a separate PR.
@@ -829,10 +960,11 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
    external uptime check recommended in DEPLOY §10 (the heartbeat covers the cron commands).
    Follow-ups from the PR-06B reviews (owner to choose the PR):
    - (Done in PR-07A: `\p{Cc}` refused at input — C&S L-c.)
-   - Category labels: match reasons on `/dopasowania` and in the digest show raw keys
-     („kategoria: sprzatanie”) next to the form's „Sprzątanie” (reuse `CATEGORY_LABELS`).
-   - Digest footer wording could say what the profile page offers („zmień kategorie i regiony,
-     zobacz pasujące zamówienia”).
+   - (Done in PR-09: match reasons on `/dopasowania` and in the digest show category labels
+     from `CATEGORY_LABELS` instead of raw keys.)
+   - (Done in PR-09: the digest footer says what the profile page offers („Na stronie profilu
+     możesz zmienić kategorie, regiony i słowa kluczowe oraz zobaczyć wszystkie pasujące
+     zamówienia.”).)
    - When a source starts providing counties, update the counties hint/note (`src/web/pages.ts`)
      and D-023/D-027.
    - Re-measure `/dopasowania` on pilot data (C&S measured 8.5–9 s for 5 000 candidates with 3.2 KB descriptions).
@@ -843,17 +975,16 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
    - Accessibility nits (Quality Low): the repeated „Szczegóły ogłoszenia” summary label could
      name the offer; find-in-page does not search closed `<details>` in some browsers.
      Pilot follow-ups from the owner's PR #9 review (owner to choose the PR):
-   - Matching calibration (changes PR-04 scoring): in the owner's real-data run 7 of 26 offers
-     matched only on a description keyword, several false positives (agricultural tractor,
-     excavator/forklift, telescopic loader via „oświetlenie”/„elektryczne”). Options: fewer
-     points for a description-only keyword hit (e.g. 15), and/or a `profile:create` hint to add
-     exclude words („ciągnik”, „pojazd”, „dostawa”). Needs calibration on pilot profiles.
-   - Operator commands `deliveries:pending` and `deliveries:resolve <profileId> --sent|--failed`
-     instead of the manual SQL in README „Wynik niepewny”.
+   - (Done in PR-09: a description-only keyword hit gives +15 and `profile:create` hints at
+     exclude words, D-023; further calibration on pilot profiles if real runs still show false
+     positives.)
+   - (Done in PR-09: operator commands `deliveries:pending` and `deliveries:resolve` replace
+     the manual SQL in README „Wynik niepewny”, D-024.)
    - README example of the `List-Unsubscribe` header without ` (Wypisz)` (C&S L-1, cosmetic).
    - Before real customers: confirm `smtp` explicitly (SECURITY §10/§14) and send one digest to an own
-     mailbox first. Optional follow-ups from the PR-05 Quality Review: cap the CPV codes repeated
-     in „Dlaczego pasuje”; Polish date format („3.11.2026, 11:00”); a different heading for a new
+     mailbox first. Optional follow-ups from the PR-05 Quality Review: (done in PR-09 for the digest
+     and `/dopasowania` — the reason shows labels only; `match:preview` keeps the codes) cap
+     the CPV codes repeated in „Dlaczego pasuje”; Polish date format („3.11.2026, 11:00”); a different heading for a new
      profile's first e-mail (up to 7 days of offers); the other „CPV spoza słownika … kategoria
      niesprawdzalna” wording. Known limits: the stderr pending count misses profiles reported
      `not_run`; a server that closes with an error reply at the greeting spends attempts (D-024).
@@ -876,7 +1007,8 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
      scoring before the digest relies on it.
    - Deferred from the owner's PR #8 review: tokenize each offer once per digest run instead
      of once per pair (measure first); for pilot calibration, a "matched only by CPV" counter
-     in `match:preview` (category + unrestricted region = 60 matches 8–26 offers per profile
+     in `match:preview` (done in PR-09: „bez słowa kluczowego”) (category + unrestricted
+     region = 60 matches 8–26 offers per profile
      with no keyword; CPV prefix `4533` is broad) and a stem threshold of 3 for letter-only
      words (needs false-positive calibration, e.g. "sad" → "sadzenie").
    - Optional from the PR-04 Quality Review: a `match:preview --all` mode that also prints
@@ -887,7 +1019,8 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
      by an explicit ESLint allowlist (no new neutral module; vocabulary moved to
      `src/domain`); `comparableText` drops `\p{Cf}` (soft hyphen); the missing-CPV reason exists (worded
      "kategoria: ogłoszenie nie podaje kodu CPV" since PR-05); small contracts (no CPV) match on title + description
-     keywords — keyword-only ones reach 50 only with region match/unrestricted.
+     keywords — keyword-only ones need a title keyword plus region match/unrestricted (since
+     PR-09 a keyword found only in the description gives 15: 35 with the region, below 50).
 
    Still deferred from the PR-03C reviews:
 
@@ -1046,6 +1179,18 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-09, PR-09 owner-review round (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test_pr09
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2057 tests passed in 58 files,
+none skipped (run by the coder, after the Code & Safety Lows). No dependency changes; no network requests to live sources; no
+e-mail sent.
+
+2026-11-06, PR-09 before the PR (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2018 tests passed in 58 files,
+none skipped (run by the coder, C&S round 3, Quality round 2 and the coordinator). Full
+`pnpm audit`: unchanged (1 moderate, dev-only minimatch via eslint). No dependency changes; no
+network requests to live sources; no e-mail sent. Working-tree fingerprint unchanged across
+every reviewer run.
 
 2026-11-05, PR-08 owner-review round (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
 REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 1961 tests passed in 57 files,

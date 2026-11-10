@@ -532,3 +532,69 @@ właściciela 2026-11-04.
 
 **Poza zakresem:** załączniki (`/api/files/…`), archiwalna wersja Bazy, logowanie, wersje
 historyczne ogłoszeń, zmiany matchingu, kolejne źródła.
+
+---
+
+## PR-09 — Kalibracja dopasowań i narzędzia operatora (przed pilotażem)
+
+**Cel:** etap 3a `docs/LAUNCH_ROADMAP.md`. Mniej fałszywych dopasowań z samego opisu, koniec
+ręcznego SQL przy niepewnych wysyłkach, czytelne etykiety w digeście i głośny sygnał o
+powtarzanym `incomplete`. Zakres: wybór właściciela 2026-11-06 (wszystkie 4 punkty).
+
+**Zakres:**
+
+1. **Kalibracja scoringu (zmiana D-023):**
+   - słowo kluczowe daje +30, gdy co najmniej jedno liczone słowo ma przydzielone trafienie
+     w tytule; gdy wszystkie przydzielone trafienia są w opisie — +15 (`POINTS`); próg 50 i
+     pozostałe punkty bez zmian. Skutek: samo słowo z opisu + zgodny region = 35 (nie
+     przechodzi); kategoria + słowo z opisu przy nieznanym regionie = 55 (przechodzi);
+     powód w `match:preview`/digeście pokazuje pole i punkty jak dziś;
+   - `profile:create`: gdy profil ma słowa kluczowe, a nie ma słów wykluczających — jedna
+     linia podpowiedzi na stderr (wąskie przykłady: „ciągnik”, „koparka”, „dostawa
+     paliwa”, z uwagą, że wykluczenie działa też na opis — sprawdzić w `match:preview`), kod
+     wyjścia bez zmian; profil nie jest zmieniany;
+   - `match:preview`: licznik dopasowań bez żadnego słowa kluczowego („tylko kategoria”,
+     czyli kategoria + region), obok dotychczasowych liczników.
+2. **Komendy operatora (D-024):**
+   - `deliveries:pending` — lista wierszy `pending`: `profileId`, `digestDate`, liczba ofert,
+     najstarszy `created_at`; tylko identyfikatory i liczby, bez e-maili i tytułów (JSON);
+   - `deliveries:resolve <profileId> --sent|--failed [--date YYYY-MM-DD]` — to samo co SQL z
+     README „Wynik niepewny” (`--sent`: `sent`, `sent_at`, `attempts + 1`; `--failed`:
+     usunięcie wierszy `pending`, kolejny digest wyśle oferty jak nowe), w jednej
+     transakcji, tylko wiersze `pending`; odmowa (kod 1, bez zmian), gdy działa `digest`
+     (ten sam advisory lock co `digest`) albo gdy profil nie ma wierszy `pending`; błędne
+     wywołanie (oba lub żaden przełącznik, zły uuid lub data) → kod 2 jak w innych
+     komendach, przed otwarciem bazy; wynik: liczba zmienionych wierszy;
+   - README „Wynik niepewny” i RUNBOOK używają komend zamiast SQL.
+3. **Etykiety i stopka:** powód kategorii w digeście i na `/dopasowania` z etykietą
+   (`CATEGORY_LABELS`, „kategoria: „Sprzątanie””, etykiety w cudzysłowach, bez kodów CPV),
+   nie z kluczem; linia „Kategoria:” — etykiety i „ · CPV: ” z kodami; stopka digestu mówi,
+   co daje strona profilu („Na stronie profilu możesz zmienić kategorie, regiony i słowa
+   kluczowe oraz zobaczyć wszystkie pasujące zamówienia.”).
+4. **`source_incomplete` w `status` (C&S L-R2-1 z PR-08):** nowy problem, gdy dwa
+   najnowsze nie-`failed` przebiegi źródła (dwa różne dni publikacji) są oba `incomplete`;
+   pojedynczy `incomplete` nie alarmuje. Alert operatora podaje powody (`part`, `reason`)
+   bez treści ofert; RUNBOOK „Alert statusu” — co zrobić. Nadrabianie (D-021) bez zmian.
+
+**Przegląd właściciela (PR #15, PASS z uwagami):** (a) słowo kluczowe ≥ 6 znaków na
+„-nie”/„-cie” pasuje też do dopełniacza l. mn. („szkoleń”, „zajęć”; tylko równe słowo, nie
+prefiks; D-023); (b) `deliveries:resolve … [--transport test|smtp]` zmienia tylko wiersze
+tego transportu, domyślnie transportu z `EMAIL_MODE` (czytane samo `EMAIL_MODE`), wynik
+z polem `transport` (D-024); (c) RUNBOOK: kiedy oferta wraca po `--failed` (warunki
+kandydata digestu).
+
+**Kryteria akceptacji:**
+
+1. Oferta dopasowana dziś tylko słowem z opisu przy zgodnym regionie (50) nie przechodzi;
+   słowo w tytule + region (50) i kategoria + region (60) przechodzą jak dotąd (testy z
+   przypadkami z pilota: ciągnik/koparka przez „oświetlenie”/„elektryczne”).
+2. `deliveries:resolve` zmienia wyłącznie wiersze `pending` wskazanego profilu i dnia,
+   atomowo; odmawia przy działającym `digest` (test DB z trzymanym lockiem).
+3. Digest i `/dopasowania` nie pokazują surowego klucza kategorii.
+4. `status` zgłasza `source_incomplete` przy dwóch kolejnych `incomplete`, nie przy jednym;
+   `--notify` wysyła alert z kodami; istniejące problemy bez zmian.
+5. D-023 i D-024 zaktualizowane; README, RUNBOOK, STATE.
+
+**Poza zakresem:** „wartość części”, etykieta netto/brutto, `region_unknown` dla wielu
+województw, wczesne przerwanie dnia z samymi odrzuceniami (follow-upy PR-08), tokenizacja
+raz na ofertę, zmiany progu 50, słownik wykluczeń w produkcie, nowe źródła.

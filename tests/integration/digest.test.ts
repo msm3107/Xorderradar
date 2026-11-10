@@ -18,6 +18,10 @@ import {
   hashSecretToken,
 } from "../../src/infrastructure/db/access-repository.js";
 import { createCompanyProfile } from "../../src/infrastructure/db/company-profiles-repository.js";
+import {
+  listPendingDeliveries,
+  PENDING_DELIVERIES_MAX_GROUPS,
+} from "../../src/infrastructure/db/deliveries-repository.js";
 import { migrateToLatest } from "../../src/infrastructure/db/database.js";
 import { upsertOpportunity } from "../../src/infrastructure/db/opportunities-repository.js";
 import { upsertSource } from "../../src/infrastructure/db/sources-repository.js";
@@ -761,6 +765,369 @@ describe.skipIf(skipWithoutDatabase)("digest (PostgreSQL)", () => {
     // Deleting a profile deletes its delivery history.
     await sql`DELETE FROM company_profiles WHERE id = ${profile.id}`.execute(schema.db);
     expect(await deliveries()).toEqual([]);
+  });
+
+  describe("operator decision on pending deliveries (PR-09, D-024)", () => {
+    /** Runs `deliveries:pending` or `deliveries:resolve` against the test schema. */
+    async function operator(args: string[], env: Record<string, string> = {}) {
+      let stdout = "";
+      let stderr = "";
+      const code = await runCli(
+        args,
+        {
+          env: { NODE_ENV: "test", DATABASE_URL: schema.url, ...env },
+          stdout: (text) => (stdout += text),
+          stderr: (text) => (stderr += text),
+        },
+        defaultCliDeps,
+      );
+      // Ids, dates and counts only.
+      expect(stdout + stderr).not.toContain("example.invalid");
+      expect(stdout + stderr).not.toContain("Modernizacja");
+      return { code, stdout, stderr };
+    }
+
+    async function rows() {
+      return schema.db
+        .selectFrom("deliveries")
+        .select(["profile_id", "opportunity_id", "status", "attempts", "error_code"])
+        .select(sql<string>`digest_date::text`.as("digest_date"))
+        .select(sql<boolean>`sent_at IS NOT NULL`.as("has_sent_at"))
+        .orderBy("profile_id")
+        .orderBy("opportunity_id")
+        .execute();
+    }
+
+    /**
+     * `profile`: two pending rows of 2026-10-31, one of 2026-11-01, one sent
+     * and one failed; a second profile: one pending row of 2026-10-31.
+     */
+    async function seed() {
+      const [other] = await moreProfiles();
+      if (other === undefined) throw new Error("no second profile");
+      const offers = [];
+      for (let index = 0; index < 5; index++) offers.push((await store()).id);
+      const insert = (
+        profileId: string,
+        offerId: string | undefined,
+        day: string,
+        status: "pending" | "sent" | "failed",
+        createdAt: string,
+      ) =>
+        sql`
+        INSERT INTO deliveries
+          (profile_id, opportunity_id, transport, digest_date, status, attempts, error_code,
+           created_at, sent_at)
+        VALUES (
+          ${profileId}, ${offerId ?? ""}, 'test', ${day}::date, ${status},
+          ${status === "pending" ? 0 : 1}, ${status === "failed" ? "smtp_transient" : null},
+          ${createdAt}::timestamptz, ${status === "sent" ? createdAt : null}::timestamptz
+        )
+      `.execute(schema.db);
+      await insert(profile.id, offers[0], "2026-10-31", "pending", "2026-10-31T06:00:05Z");
+      await insert(profile.id, offers[1], "2026-10-31", "pending", "2026-10-31T06:00:01Z");
+      await insert(profile.id, offers[2], "2026-11-01", "pending", "2026-11-01T06:00:01Z");
+      await insert(profile.id, offers[3], "2026-10-31", "sent", "2026-10-31T06:00:01Z");
+      await insert(profile.id, offers[4], "2026-10-31", "failed", "2026-10-31T06:00:01Z");
+      await insert(other.id, offers[0], "2026-10-31", "pending", "2026-10-31T06:00:02Z");
+      return { other, offers };
+    }
+
+    it("lists the pending rows per profile, transport and day, oldest day first", async () => {
+      const { other } = await seed();
+      const result = await operator(["deliveries:pending"]);
+      expect(result.code).toBe(ExitCode.Ok);
+      const firstDay = [
+        {
+          profileId: profile.id,
+          transport: "test",
+          digestDate: "2026-10-31",
+          offers: 2,
+          oldestCreatedAt: "2026-10-31T06:00:01.000Z",
+        },
+        {
+          profileId: other.id,
+          transport: "test",
+          digestDate: "2026-10-31",
+          offers: 1,
+          oldestCreatedAt: "2026-10-31T06:00:02.000Z",
+        },
+      ].sort((a, b) => a.profileId.localeCompare(b.profileId));
+      expect(JSON.parse(result.stdout)).toEqual({
+        status: "ok",
+        pending: [
+          ...firstDay,
+          {
+            profileId: profile.id,
+            transport: "test",
+            digestDate: "2026-11-01",
+            offers: 1,
+            oldestCreatedAt: "2026-11-01T06:00:01.000Z",
+          },
+        ],
+        truncated: false,
+      });
+    });
+
+    it("--sent --date marks only that profile's pending rows of that day as sent", async () => {
+      const { other, offers } = await seed();
+      const before = await rows();
+      const result = await operator([
+        "deliveries:resolve",
+        profile.id,
+        "--sent",
+        "--date",
+        "2026-10-31",
+      ]);
+      expect(result.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(result.stdout)).toEqual({
+        status: "ok",
+        outcome: "sent",
+        transport: "test",
+        digestDate: "2026-10-31",
+        changed: 2,
+      });
+      const after = await rows();
+      const resolved = new Set([offers[0], offers[1]]);
+      for (const row of after) {
+        const old = before.find(
+          (candidate) =>
+            candidate.profile_id === row.profile_id &&
+            candidate.opportunity_id === row.opportunity_id,
+        );
+        if (row.profile_id === profile.id && resolved.has(row.opportunity_id)) {
+          expect(row).toMatchObject({
+            status: "sent",
+            attempts: 1,
+            error_code: null,
+            has_sent_at: true,
+            digest_date: "2026-10-31",
+          });
+        } else {
+          // The other day, the sent and failed rows, the other profile: unchanged.
+          expect(row).toEqual(old);
+        }
+      }
+      expect(after).toHaveLength(before.length);
+      expect(after.filter((row) => row.profile_id === other.id)).toMatchObject([
+        { status: "pending" },
+      ]);
+    });
+
+    it("--failed deletes every pending row of the profile and nothing else", async () => {
+      const { offers } = await seed();
+      const result = await operator(["deliveries:resolve", profile.id, "--failed"]);
+      expect(result.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(result.stdout)).toMatchObject({ outcome: "failed", changed: 3 });
+      const left = await rows();
+      expect(
+        left
+          .filter((row) => row.profile_id === profile.id)
+          .map((row) => [row.opportunity_id, row.status])
+          .sort(),
+      ).toEqual(
+        [
+          [offers[3], "sent"],
+          [offers[4], "failed"],
+        ].sort(),
+      );
+      expect(left.filter((row) => row.status === "pending")).toHaveLength(1);
+    });
+
+    it("changes only the chosen transport's rows: EMAIL_MODE's by default, else --transport", async () => {
+      const { other, offers } = await seed();
+      // The profile's pending smtp rows: separate deliveries of the same offers.
+      for (const [offer, day] of [
+        [offers[0], "2026-10-31"],
+        [offers[2], "2026-11-01"],
+      ] as const) {
+        await sql`
+          INSERT INTO deliveries (profile_id, opportunity_id, transport, digest_date, status)
+          VALUES (${profile.id}, ${offer ?? ""}, 'smtp', ${day}::date, 'pending')
+        `.execute(schema.db);
+      }
+      const pendingOf = async (profileId: string, transport: "test" | "smtp") =>
+        (
+          await schema.db
+            .selectFrom("deliveries")
+            .select("opportunity_id")
+            .where("profile_id", "=", profileId)
+            .where("transport", "=", transport)
+            .where("status", "=", "pending")
+            .execute()
+        )
+          .map((row) => row.opportunity_id)
+          .sort();
+      const testRows = [offers[0], offers[1], offers[2]].sort();
+
+      // EMAIL_MODE=smtp without EMAIL_FROM/SMTP_URL: the smtp row of that day only.
+      const smtpDay = await operator(
+        ["deliveries:resolve", profile.id, "--failed", "--date", "2026-10-31"],
+        { EMAIL_MODE: "smtp" },
+      );
+      expect(smtpDay.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(smtpDay.stdout)).toEqual({
+        status: "ok",
+        outcome: "failed",
+        transport: "smtp",
+        digestDate: "2026-10-31",
+        changed: 1,
+      });
+      expect(await pendingOf(profile.id, "smtp")).toEqual([offers[2]]);
+      expect(await pendingOf(profile.id, "test")).toEqual(testRows);
+
+      // EMAIL_MODE unset (test): the three test rows; the smtp row is left.
+      const byDefault = await operator(["deliveries:resolve", profile.id, "--sent"]);
+      expect(byDefault.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(byDefault.stdout)).toMatchObject({ transport: "test", changed: 3 });
+      expect(await pendingOf(profile.id, "test")).toEqual([]);
+      expect(await pendingOf(profile.id, "smtp")).toEqual([offers[2]]);
+
+      // --transport overrides EMAIL_MODE.
+      const flag = await operator(
+        ["deliveries:resolve", profile.id, "--sent", "--transport", "smtp"],
+        { EMAIL_MODE: "test" },
+      );
+      expect(flag.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(flag.stdout)).toMatchObject({ transport: "smtp", changed: 1 });
+      expect(await pendingOf(profile.id, "smtp")).toEqual([]);
+      const smtpRows = await schema.db
+        .selectFrom("deliveries")
+        .select(["opportunity_id", "status", "attempts"])
+        .where("transport", "=", "smtp")
+        .execute();
+      expect(smtpRows).toEqual([{ opportunity_id: offers[2], status: "sent", attempts: 1 }]);
+      // The other profile's row: untouched throughout.
+      expect(await pendingOf(other.id, "test")).toEqual([offers[0]]);
+    });
+
+    it("exits 1 and changes nothing when no pending row matches", async () => {
+      await seed();
+      const before = await rows();
+      const noDay = await operator([
+        "deliveries:resolve",
+        profile.id,
+        "--sent",
+        "--date",
+        "2026-10-30",
+      ]);
+      expect(noDay.code).toBe(ExitCode.Failure);
+      expect(noDay.stdout).toBe("");
+      expect(noDay.stderr).toBe(
+        "Deliveries not resolved: the profile has no pending deliveries of that day over " +
+          'transport "test"; nothing was changed.\n',
+      );
+      const unknown = await operator([
+        "deliveries:resolve",
+        "00000000-0000-4000-8000-00000000dead",
+        "--failed",
+      ]);
+      expect(unknown.code).toBe(ExitCode.Failure);
+      expect(await rows()).toEqual(before);
+    });
+
+    it("refuses, changing nothing, while a digest run holds the lock; works once it ends", async () => {
+      await seed();
+      const before = await rows();
+      const logger = createLogger("error", () => {});
+      const locked = await withDigestLock(
+        schema.db,
+        () => operator(["deliveries:resolve", profile.id, "--failed"]),
+        { logger },
+      );
+      if (!locked.acquired) throw new Error("lock not acquired");
+      expect(locked.value.code).toBe(ExitCode.Failure);
+      expect(locked.value.stdout).toBe("");
+      expect(locked.value.stderr).toContain(
+        "a digest run or another deliveries:resolve holds the lock",
+      );
+      expect(await rows()).toEqual(before);
+
+      // The lock is released by then: the same decision goes through.
+      const result = await operator(["deliveries:resolve", profile.id, "--failed"]);
+      expect(result.code).toBe(ExitCode.Ok);
+      // And the resolve released its transaction lock: a digest runs.
+      const digest = await run([]);
+      expect(digest.report.status).not.toBe("skipped");
+    });
+
+    it("an uncertain send resolved --failed is sent again by the next digest; --sent is not", async () => {
+      const offer = await store();
+      const uncertain = fakeSender(["uncertain"]);
+      await run([], { digest: { createSender: () => uncertain.sender } });
+      expect(await deliveries()).toMatchObject([{ opportunity_id: offer.id, status: "pending" }]);
+
+      const failed = await operator(["deliveries:resolve", profile.id, "--failed"]);
+      expect(failed.code).toBe(ExitCode.Ok);
+      const nextDay = fakeSender();
+      const tomorrow = await run([], {
+        digest: { createSender: () => nextDay.sender, now: () => NEXT_DAY },
+      });
+      expect(only(tomorrow.report)).toMatchObject({ status: "sent", sent: 1, uncertain: 0 });
+      expect(nextDay.sent[0]?.email.text).toContain(offer.title);
+      expect(tomorrow.stderr).not.toContain("operator decision");
+
+      // Once more uncertain (a day later: one digest a day), now resolved --sent: never sent again.
+      const day = (days: number) => new Date(NOW.getTime() + days * DAY_MS);
+      const another = await store();
+      const uncertainAgain = fakeSender(["uncertain"]);
+      await run([], { digest: { createSender: () => uncertainAgain.sender, now: () => day(2) } });
+      const sent = await operator(["deliveries:resolve", profile.id, "--sent"]);
+      expect(JSON.parse(sent.stdout)).toMatchObject({ outcome: "sent", changed: 1 });
+      const later = fakeSender();
+      const dayAfter = await run([], {
+        digest: { createSender: () => later.sender, now: () => day(3) },
+      });
+      expect(only(dayAfter.report)).toMatchObject({ uncertain: 0 });
+      expect(later.sent.map((item) => item.email.text).join("\n")).not.toContain(another.title);
+      expect(await deliveries()).toMatchObject([
+        { status: "sent", has_sent_at: true },
+        { status: "sent", has_sent_at: true },
+      ]);
+    });
+
+    it("lists at most PENDING_DELIVERIES_MAX_GROUPS groups and says when there are more", async () => {
+      // One profile, one pending row per offer, each on its own digest day
+      // (2024-01-01 + n): every row is a group.
+      await sql`
+        WITH offers AS (
+          INSERT INTO opportunities
+            (source_id, source_url, issuer_name, title, fetched_at, fingerprint, content_hash,
+             status)
+          SELECT 'test-source', 'https://zamowienia.example.gov.pl/limit/' || g,
+                 'Gmina Przykładowa', 'Oferta ' || g, now(), 'limit-fp-' || g, 'hash-1', 'open'
+            FROM generate_series(1, ${PENDING_DELIVERIES_MAX_GROUPS + 1}::int) AS g
+          RETURNING id, fingerprint
+        )
+        INSERT INTO deliveries (profile_id, opportunity_id, transport, digest_date, status)
+        SELECT ${profile.id}::uuid, id, 'test',
+               DATE '2024-01-01' + substring(fingerprint FROM 10)::int, 'pending'
+          FROM offers
+      `.execute(schema.db);
+
+      const over = await listPendingDeliveries(schema.db);
+      expect(over.truncated).toBe(true);
+      expect(over.groups).toHaveLength(PENDING_DELIVERIES_MAX_GROUPS);
+      // Oldest day first: the newest day (2024-01-01 + 1001) is the one left out.
+      expect(over.groups[0]).toMatchObject({
+        profileId: profile.id,
+        digestDate: "2024-01-02",
+        offers: 1,
+      });
+      expect(over.groups.at(-1)?.digestDate).toBe("2026-09-27");
+      const listed = await operator(["deliveries:pending"]);
+      expect(listed.code).toBe(ExitCode.Ok);
+      const parsed = JSON.parse(listed.stdout) as { pending: unknown[]; truncated: boolean };
+      expect(parsed.pending).toHaveLength(PENDING_DELIVERIES_MAX_GROUPS);
+      expect(parsed.truncated).toBe(true);
+
+      // Exactly the limit: everything listed, not truncated.
+      await sql`DELETE FROM deliveries WHERE digest_date = DATE '2026-09-28'`.execute(schema.db);
+      const exact = await listPendingDeliveries(schema.db);
+      expect(exact.truncated).toBe(false);
+      expect(exact.groups).toHaveLength(PENDING_DELIVERIES_MAX_GROUPS);
+      expect(exact.groups.at(-1)?.digestDate).toBe("2026-09-27");
+    });
   });
 
   describe("web links (PR-06A)", () => {

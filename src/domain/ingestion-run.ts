@@ -59,6 +59,16 @@ export const ingestionRunCountersSchema = z.strictObject({
 
 export type IngestionRunCounters = z.output<typeof ingestionRunCountersSchema>;
 
+/**
+ * Why a run is `incomplete`, per part of the source (e.g. a notice type):
+ * stored in `ingestion_runs.incomplete`, read back by `status` (D-028).
+ */
+export const incompleteListSchema = z
+  .array(z.strictObject({ part: z.string().min(1).max(100), reason: z.enum(incompleteReasons) }))
+  .max(100);
+
+export type IncompletePart = z.output<typeof incompleteListSchema>[number];
+
 /** One source's part of an `ingest` run, as stored in `ingestion_runs`. */
 export const ingestionRunSummarySchema = z
   .strictObject({
@@ -69,11 +79,7 @@ export const ingestionRunSummarySchema = z
     startedAt: z.date(),
     finishedAt: z.date(),
     counters: ingestionRunCountersSchema,
-    incomplete: z
-      .array(
-        z.strictObject({ part: z.string().min(1).max(100), reason: z.enum(incompleteReasons) }),
-      )
-      .max(100),
+    incomplete: incompleteListSchema,
     errorCode: errorCodeSchema.nullable(),
   })
   .refine((run) => run.finishedAt.getTime() >= run.startedAt.getTime(), {

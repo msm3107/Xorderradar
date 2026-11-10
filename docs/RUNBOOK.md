@@ -71,20 +71,21 @@ node dist/main.js status | jq .
 
 Kody problemów i co zrobić (kilka kodów naraz — zacznij od pierwszego):
 
-| Kod                     | Znaczenie                                                                                                                  | Co zrobić                                                                                                                                                                                                                                                           |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status_internal_error` | `status` zakończył się nieoczekiwanym błędem (błąd programu); alert ma tylko ten kod, bez treści błędu.                    | Uruchom `node dist/main.js status` ręcznie (kod `1`, `Internal error: …`) i `node dist/main.js health`. Powtarza się — zgłoś błąd (wersja, godzina); do naprawy sprawdzaj źródła i wysyłki zapytaniami z tego runbooka.                                             |
-| `database_unavailable`  | `status` nie odczytał bazy (powód i kod w alercie, np. `unreachable (ECONNREFUSED)`, `authentication_failed (28P01)`).     | Sprawdź, czy PostgreSQL działa i czy `DATABASE_URL` jest aktualny: `node dist/main.js health`. Po naprawie — `status`. Inne komendy (ingest, digest) też wtedy nie działają.                                                                                        |
-| `schema_not_ready`      | Są oczekujące migracje (np. po wdrożeniu nowej wersji); komendy odmawiają pracy.                                           | `node dist/main.js migrate`, potem `node dist/main.js health`.                                                                                                                                                                                                      |
-| `no_enabled_sources`    | Żadne źródło nie jest włączone — nic nie jest pobierane.                                                                   | Włącz źródło (niżej, „Źródła”), jeśli wyłączenie nie było celowe.                                                                                                                                                                                                   |
-| `source_failed`         | Ostatni przebieg źródła się nie udał albo nieudany dzień z ostatnich 36 h nie został jeszcze pobrany (`runId`, kod błędu). | Zobacz kod błędu (niżej) i `/var/log/radar/ingest.log`. Gdy przyczyna minęła: `node dist/main.js ingest <sourceId>` — nadrabianie pobiera nieudane dni samo. Dzień pobrany później przestaje być problemem.                                                         |
-| `source_never_run`      | Włączone źródło nie ma żadnego przebiegu.                                                                                  | Pierwsze wdrożenie: `node dist/main.js ingest --from <wczoraj−30> --to <wczoraj>` (README, „Cron”). Inaczej sprawdź, czy cron w ogóle działa.                                                                                                                       |
-| `source_stale`          | Od 36 h żaden przebieg źródła nie zakończył się `succeeded`/`incomplete`.                                                  | Sprawdź, czy cron uruchamia `ingest` (log crona, `/var/log/radar/ingest.log` — ostatnia linia z dzisiejszą datą). Uruchom `node dist/main.js ingest` ręcznie i obserwuj kod wyjścia.                                                                                |
-| `deliveries_pending`    | Wysyłki z niepewnym wynikiem czekają na decyzję operatora (a żaden `digest` nie trwa).                                     | Procedura „Wysyłki niepewne” niżej. Bez decyzji te oferty nie trafią do profilu, a profil z dzisiejszym `pending` nic dziś nie dostanie.                                                                                                                            |
-| `deliveries_failed`     | Wysyłki z dniem digestu od wczoraj się nie udały: „do ponowienia” (kolejny `digest` spróbuje sam) i „bez dalszych prób”.   | Kody `smtp_…` w alercie. Błąd konfiguracji (logowanie, TLS) — popraw `SMTP_URL`/`EMAIL_FROM`, kolejny `digest` wyśle. Odrzucony adres (np. `smtp_550`) — sprawdź adres profilu z klientem. Alert znika, gdy wysyłka się uda albo gdy błąd jest starszy niż wczoraj. |
-| `backup_dir_unreadable` | `BACKUP_DIR` nie da się odczytać (kod w alercie, np. `ENOENT` — brak katalogu, `EACCES` — brak uprawnień).                 | Sprawdź katalog i prawa: `ls -ld /var/backups/radar` (`radar:radar 0700`), wartość `BACKUP_DIR` w `/etc/radar/radar.env`.                                                                                                                                           |
-| `backup_missing`        | W `BACKUP_DIR` nie ma żadnej kopii `radar-<RRRRMMDDTGGMMSSZ>.dump`.                                                        | Pierwsze wdrożenie: `node dist/main.js backup /var/backups/radar`. Inaczej — `/var/log/radar/backup.log` i niżej, „Backup i odtworzenie”.                                                                                                                           |
-| `backup_stale`          | Najnowsza kopia (czas z nazwy pliku) jest starsza niż 26 h — nocny backup nie zadziałał (wychodzi w `status` z 7:45).      | Ostatnia linia `/var/log/radar/backup.log` (powód, np. `unreachable`, `version_mismatch`, `write_failed`), po naprawie `node dist/main.js backup /var/backups/radar` ręcznie.                                                                                       |
+| Kod                     | Znaczenie                                                                                                                  | Co zrobić                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `status_internal_error` | `status` zakończył się nieoczekiwanym błędem (błąd programu); alert ma tylko ten kod, bez treści błędu.                    | Uruchom `node dist/main.js status` ręcznie (kod `1`, `Internal error: …`) i `node dist/main.js health`. Powtarza się — zgłoś błąd (wersja, godzina); do naprawy sprawdzaj źródła i wysyłki zapytaniami z tego runbooka.                                                                                                                                                                                                                                                                          |
+| `database_unavailable`  | `status` nie odczytał bazy (powód i kod w alercie, np. `unreachable (ECONNREFUSED)`, `authentication_failed (28P01)`).     | Sprawdź, czy PostgreSQL działa i czy `DATABASE_URL` jest aktualny: `node dist/main.js health`. Po naprawie — `status`. Inne komendy (ingest, digest) też wtedy nie działają.                                                                                                                                                                                                                                                                                                                     |
+| `schema_not_ready`      | Są oczekujące migracje (np. po wdrożeniu nowej wersji); komendy odmawiają pracy.                                           | `node dist/main.js migrate`, potem `node dist/main.js health`.                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `no_enabled_sources`    | Żadne źródło nie jest włączone — nic nie jest pobierane.                                                                   | Włącz źródło (niżej, „Źródła”), jeśli wyłączenie nie było celowe.                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `source_failed`         | Ostatni przebieg źródła się nie udał albo nieudany dzień z ostatnich 36 h nie został jeszcze pobrany (`runId`, kod błędu). | Zobacz kod błędu (niżej) i `/var/log/radar/ingest.log`. Gdy przyczyna minęła: `node dist/main.js ingest <sourceId>` — nadrabianie pobiera nieudane dni samo. Dzień pobrany później przestaje być problemem.                                                                                                                                                                                                                                                                                      |
+| `source_never_run`      | Włączone źródło nie ma żadnego przebiegu.                                                                                  | Pierwsze wdrożenie: `node dist/main.js ingest --from <wczoraj−30> --to <wczoraj>` (README, „Cron”). Inaczej sprawdź, czy cron w ogóle działa.                                                                                                                                                                                                                                                                                                                                                    |
+| `source_stale`          | Od 36 h żaden przebieg źródła nie zakończył się `succeeded`/`incomplete`.                                                  | Sprawdź, czy cron uruchamia `ingest` (log crona, `/var/log/radar/ingest.log` — ostatnia linia z dzisiejszą datą). Uruchom `node dist/main.js ingest` ręcznie i obserwuj kod wyjścia.                                                                                                                                                                                                                                                                                                             |
+| `source_incomplete`     | Dwa najnowsze przebiegi źródła (dwa różne dni) zakończyły się `incomplete` (dzień, `runId`, powody `part: reason`).        | Powody w alercie: `max_records`/`max_pages` — dzień przekroczył limit (`--limit` w cronie lub limit źródła), sprawdź liczby w `ingest.log` i zgłoś przy domyślnym limicie; `detail_missing`/`detail_invalid` — po stronie źródła (niżej, „Baza Konkurencyjności”), ponów dzień `ingest <sourceId> --date <dzień>`; `invalid_cursor`/`repeated_cursor` — zgłoś jak zmianę formatu. Nadrabianie nie ponawia dni `incomplete`. Alert znika, gdy jeden z dwóch najnowszych dni przejdzie bez braków. |
+| `deliveries_pending`    | Wysyłki z niepewnym wynikiem czekają na decyzję operatora (a żaden `digest` nie trwa).                                     | Procedura „Wysyłki niepewne” niżej (`deliveries:pending`, `deliveries:resolve`). Bez decyzji te oferty nie trafią do profilu, a profil z dzisiejszym `pending` nic dziś nie dostanie.                                                                                                                                                                                                                                                                                                            |
+| `deliveries_failed`     | Wysyłki z dniem digestu od wczoraj się nie udały: „do ponowienia” (kolejny `digest` spróbuje sam) i „bez dalszych prób”.   | Kody `smtp_…` w alercie. Błąd konfiguracji (logowanie, TLS) — popraw `SMTP_URL`/`EMAIL_FROM`, kolejny `digest` wyśle. Odrzucony adres (np. `smtp_550`) — sprawdź adres profilu z klientem. Alert znika, gdy wysyłka się uda albo gdy błąd jest starszy niż wczoraj.                                                                                                                                                                                                                              |
+| `backup_dir_unreadable` | `BACKUP_DIR` nie da się odczytać (kod w alercie, np. `ENOENT` — brak katalogu, `EACCES` — brak uprawnień).                 | Sprawdź katalog i prawa: `ls -ld /var/backups/radar` (`radar:radar 0700`), wartość `BACKUP_DIR` w `/etc/radar/radar.env`.                                                                                                                                                                                                                                                                                                                                                                        |
+| `backup_missing`        | W `BACKUP_DIR` nie ma żadnej kopii `radar-<RRRRMMDDTGGMMSSZ>.dump`.                                                        | Pierwsze wdrożenie: `node dist/main.js backup /var/backups/radar`. Inaczej — `/var/log/radar/backup.log` i niżej, „Backup i odtworzenie”.                                                                                                                                                                                                                                                                                                                                                        |
+| `backup_stale`          | Najnowsza kopia (czas z nazwy pliku) jest starsza niż 26 h — nocny backup nie zadziałał (wychodzi w `status` z 7:45).      | Ostatnia linia `/var/log/radar/backup.log` (powód, np. `unreachable`, `version_mismatch`, `write_failed`), po naprawie `node dist/main.js backup /var/backups/radar` ręcznie.                                                                                                                                                                                                                                                                                                                    |
 
 Nieudany dzień jest w `source_failed` tylko, dopóki jego nieudany przebieg ma mniej niż 36 h;
 starszy przestaje być wymieniany. Trwająca awaria nie znika jednak z alertu: kolejne nieudane
@@ -261,31 +262,73 @@ nadrabia tylko wczoraj, a nie 31 dni.
 
 ## Wysyłki niepewne i ponowne wysłanie
 
-Zasady: `docs/DECISIONS.md` D-024; zapytania także w README, „Digest (e-mail)”.
+Zasady: `docs/DECISIONS.md` D-024; komendy także w README, „Digest (e-mail)”.
 
 Wynik niepewny (`pending`) — połączenie zerwane w trakcie wysyłki albo przerwany proces.
 **Nie ponawiaj na ślepo** (klient mógłby dostać e-mail dwa razy):
 
-```sql
-SELECT profile_id, digest_date::text, count(*) AS offers
-  FROM deliveries WHERE status = 'pending'
-  GROUP BY profile_id, digest_date ORDER BY digest_date;
+```sh
+node dist/main.js deliveries:pending | jq .
+# {"status":"ok","pending":[{"profileId":"…","transport":"smtp","digestDate":"2026-11-02","offers":3,"oldestCreatedAt":"…"}],"truncated":false}
 ```
 
 1. Sprawdź log serwera SMTP / skrzynkę wysłanych dla tego profilu i dnia (tryb `test`: pliki
-   w `EMAIL_OUTBOX_DIR`).
-2. E-mail doszedł:
+   w `EMAIL_OUTBOX_DIR`). Adres odbiorcy — `node dist/main.js profile:show <profileId>`
+   (pole `email`; nie wklejaj go do zgłoszeń ani logów):
 
-   ```sql
-   UPDATE deliveries SET status = 'sent', sent_at = now(), attempts = attempts + 1
-     WHERE status = 'pending' AND profile_id = '<profileId>';
+   ```sh
+   node dist/main.js profile:show <profileId> | jq -r .email
    ```
 
-3. Nie doszedł — kolejny `digest` wyśle te oferty jak nowe (jeśli nadal się kwalifikują):
+   Gdy wyniku nie da się ustalić, domyślnie `--sent` (krok 2): oferty i tak są widoczne na
+   `/dopasowania`, podwójny e-mail podważa zaufanie, a `--failed` wysłałby je jeszcze raz
+   jako nowe.
 
-   ```sql
-   DELETE FROM deliveries WHERE status = 'pending' AND profile_id = '<profileId>';
+2. E-mail doszedł — wiersze stają się `sent` (`sent_at` teraz, `attempts + 1`):
+
+   ```sh
+   node dist/main.js deliveries:resolve <profileId> --sent --date <digestDate> --transport <transport>
    ```
+
+3. Nie doszedł — wiersze są usuwane:
+
+   ```sh
+   node dist/main.js deliveries:resolve <profileId> --failed --date <digestDate> --transport <transport>
+   ```
+
+   Oferta wraca dopiero w kolejnym `digest` tym samym transportem i tylko wtedy, gdy w chwili
+   tego przebiegu nadal spełnia warunki kandydata digestu:
+   - status inny niż `closed`/`cancelled` i termin składania ofert nieminiony (`deadline` ≥
+     chwila przebiegu; oferta bez terminu przechodzi);
+   - pierwszy zapis (`first_seen_at`) najwyżej 7 dni (`DIGEST_NEW_DAYS`) przed chwilą
+     przebiegu — starsza oferta nie jest już „nowa” i nie wróci, choć wiersz usunięto;
+   - profil jest aktywny, a oferta pasuje do niego w obecnym kształcie (wynik ≥ 50, żadne
+     słowo wykluczające, region nie jest niezgodny);
+   - mieści się w 50 ofertach na e-mail (`DIGEST_MAX_ITEMS`; najbliższy termin pierwszy,
+     nadmiar w kolejnych dniach, póki spełnia te warunki) i wśród 10 000 kandydatów przebiegu
+     (`DIGEST_CANDIDATE_LIMIT`).
+
+   Najwyżej jeden e-mail dziennie na profil i transport: gdy profil ma już tego dnia (w
+   Polsce) wiersz `sent` albo `pending` w tym transporcie, oferta czeka do następnego dnia.
+   W praktyce oferta wraca w najbliższym przebiegu `digest` z crona o 7:30 (jutro, gdy
+   rozstrzygasz po dzisiejszym przebiegu); wcześniej — tylko po ręcznym `digest` i tylko
+   wtedy, gdy profil nie ma już dziś żadnego innego wiersza `sent` ani `pending` w tym
+   transporcie.
+
+Bez `--date` komenda obejmuje wszystkie wiersze `pending` profilu w danym transporcie.
+Zmienia tylko wiersze `pending` tego profilu i transportu, w jednej transakcji, i wypisuje
+`{"status":"ok",…,"transport":…,"changed":N}`. Transport: `--transport test|smtp` (pole
+`transport` z `deliveries:pending`); bez niego — transport bieżącego `EMAIL_MODE`, jak w
+`digest` (czytane jest samo `EMAIL_MODE`, bez `EMAIL_FROM` i `SMTP_URL`; błędne
+`EMAIL_MODE` → kod `1`, baza nie jest otwierana).
+Odmawia (kod `1`, nic nie zmienia), gdy właśnie trwa `digest` albo inne `deliveries:resolve`
+(ta sama blokada; „a digest run or another deliveries:resolve holds the lock”) — spróbuj
+ponownie po ich końcu — albo gdy profil nie ma pasujących wierszy `pending`. Nie uruchamiaj
+`deliveries:resolve` o minucie crona `digest` (7:30): przy zajętej blokadzie odmawia, a gdy
+sam ją weźmie pierwszy, poranny `digest` jest pominięty (`skipped`) i trzeba go uruchomić
+ręcznie (`node dist/main.js digest`). Brak lub oba przełączniki `--sent`/`--failed`, zła
+data albo `--transport` podany dwa razy, bez wartości lub inny niż `test`/`smtp` → kod `2` z
+opisem użycia, baza nie jest otwierana.
 
 Wysyłki `failed` z wyczerpanymi próbami (`attempts` = 3) nie są już ponawiane. Po usunięciu
 przyczyny (np. poprawiony adres profilu) można je wysłać ponownie, usuwając te wiersze:

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { MVP_CATEGORIES } from "../src/domain/vocabulary.js";
+import { CATEGORY_LABELS, MVP_CATEGORIES } from "../src/domain/vocabulary.js";
 import {
-  CATEGORY_LABELS,
   FIELD_ORDER,
   formValuesFromStored,
   formValuesFromSubmission,

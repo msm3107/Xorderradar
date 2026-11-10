@@ -288,6 +288,19 @@ export function profileWarnings(profile: CompanyProfileInput): string[] {
         `Jeśli słowo się odmienia, dodaj obok dłuższy temat (np. „gaz” + „gazow”).`,
     );
   }
+  if (profile.includeKeywords.length > 0 && profile.excludeKeywords.length === 0) {
+    // Pilot: a keyword deep in a description ("oświetlenie" of a tractor)
+    // matched offers from other trades; excluding words cut them (D-023).
+    // Narrow examples only: an exclude matches the title and the description
+    // by stem, so "dostawa" or "pojazd" would drop an electrician's own
+    // tenders ("dostawą i montażem", "40 pojazdów").
+    warnings.push(
+      "Wskazówka: profil ma słowa kluczowe, ale nie ma słów wykluczających. Słowo kluczowe " +
+        "znalezione w opisie może dopasować zamówienie z innej branży — rozważ wąskie słowa " +
+        "wykluczające (np. „ciągnik”, „koparka”, „dostawa paliwa”); wykluczenie działa też " +
+        "na opis — sprawdź wynik w match:preview.",
+    );
+  }
   if (profile.includeKeywords.length === 0) {
     warnings.push(
       "Uwaga: profil nie ma słów kluczowych. Ogłoszenia małych zamówień BZP " +
@@ -346,8 +359,9 @@ export interface MatchPreviewOptions {
 
 /**
  * The text of `match:preview`: every matched offer with its score, title,
- * issuer, deadline, link and reasons, then "dopasowane X z Y" (plus the
- * number of skipped invalid rows, if any). An offer whose deadline has passed
+ * issuer, deadline, link and reasons, then "dopasowane X z Y" (plus, when
+ * there are any, the matches without a keyword — category and region only —
+ * and the number of skipped invalid rows). An offer whose deadline has passed
  * is shown last with "(po terminie)": the stored status may lag behind the
  * deadline, and the operator should see the match rather than lose it. Source
  * text goes through `cleanText`, so control characters (terminal escapes) in
@@ -386,7 +400,19 @@ export function formatMatchPreview(
       `  dlaczego: ${cleanText(formatReasons(result.reasons))}`,
     );
   }
+  // Matches without any keyword (category + region only): how much the
+  // category alone brings in, for calibrating the profile (PR-09).
+  const categoryOnly = items.filter(
+    (item) => !item.result.reasons.some((reason) => reason.kind === "keyword"),
+  ).length;
+  const withoutKeyword =
+    categoryOnly > 0
+      ? `, w tym ${String(categoryOnly)} bez słowa kluczowego (tylko kategoria i region)`
+      : "";
   const skipped = options.skipped > 0 ? `, pominięto ${invalidRows(options.skipped)}` : "";
-  lines.push("", `dopasowane ${String(items.length)} z ${String(candidates.length)}${skipped}`);
+  lines.push(
+    "",
+    `dopasowane ${String(items.length)} z ${String(candidates.length)}${withoutKeyword}${skipped}`,
+  );
   return `${lines.join("\n")}\n`;
 }

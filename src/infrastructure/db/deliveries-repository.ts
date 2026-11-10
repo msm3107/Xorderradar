@@ -169,3 +169,125 @@ export async function markDeliveries(
     .where("status", "=", "pending")
     .execute();
 }
+
+/** Groups listed by `deliveries:pending` at most (one per profile, transport and day). */
+export const PENDING_DELIVERIES_MAX_GROUPS = 1000;
+
+/** The pending rows of one profile, transport and digest day: ids and counts only. */
+export interface PendingDeliveryGroup {
+  readonly profileId: string;
+  readonly transport: DeliveryTransport;
+  /** `YYYY-MM-DD`. */
+  readonly digestDate: string;
+  readonly offers: number;
+  /** The oldest claim among them (when the e-mail was about to be sent). */
+  readonly oldestCreatedAt: Date;
+}
+
+export interface PendingDeliveries {
+  readonly groups: readonly PendingDeliveryGroup[];
+  /** More groups exist than PENDING_DELIVERIES_MAX_GROUPS. */
+  readonly truncated: boolean;
+}
+
+/**
+ * Every `pending` row (an uncertain send or a run stopped between claim and
+ * outcome, D-024), grouped per profile, transport and digest day, oldest day
+ * first. Ids, dates and counts only — never addresses or offer titles.
+ */
+export async function listPendingDeliveries(db: Kysely<Database>): Promise<PendingDeliveries> {
+  const { rows } = await sql<{
+    profile_id: string;
+    transport: DeliveryTransport;
+    digest_date: string;
+    offers: string;
+    oldest_created_at: Date;
+  }>`
+    SELECT
+      profile_id,
+      transport,
+      to_char(digest_date, 'YYYY-MM-DD') AS digest_date,
+      count(*) AS offers,
+      min(created_at) AS oldest_created_at
+    FROM deliveries
+    WHERE status = 'pending'
+    GROUP BY profile_id, transport, digest_date
+    ORDER BY digest_date, profile_id, transport
+    LIMIT ${PENDING_DELIVERIES_MAX_GROUPS + 1}
+  `.execute(db);
+  return {
+    groups: rows.slice(0, PENDING_DELIVERIES_MAX_GROUPS).map((row) => ({
+      profileId: row.profile_id,
+      transport: row.transport,
+      digestDate: row.digest_date,
+      // count(*) is bigint, which `pg` returns as text.
+      offers: Number(row.offers),
+      oldestCreatedAt: row.oldest_created_at,
+    })),
+    truncated: rows.length > PENDING_DELIVERIES_MAX_GROUPS,
+  };
+}
+
+export interface ResolveRequest {
+  readonly profileId: string;
+  /** Only rows of this transport change: the other transport's e-mails are separate deliveries. */
+  readonly transport: DeliveryTransport;
+  /** `YYYY-MM-DD`; null: every pending row of the profile and transport. */
+  readonly digestDate: string | null;
+  /**
+   * `sent`: the e-mail arrived — the rows become `sent` (`sent_at` now,
+   * `attempts + 1`). `failed`: it did not — the rows are deleted, so the next
+   * digest sends those offers as new (if they still qualify).
+   */
+  readonly outcome: "sent" | "failed";
+  /** The digest's advisory-lock key (DIGEST_LOCK_KEY): nothing changes while a digest runs. */
+  readonly digestLockKey: number;
+}
+
+/** `lock_busy`: a digest run (or another `deliveries:resolve`) holds the digest lock. */
+export type ResolveResult =
+  { readonly status: "resolved"; readonly changed: number } | { readonly status: "lock_busy" };
+
+/**
+ * The operator's decision on pending deliveries (`deliveries:resolve`,
+ * D-024) in one transaction: only rows still `pending` of the profile and
+ * transport (and day) change. The digest lock is taken first without waiting
+ * (`pg_try_advisory_xact_lock`, released at commit/rollback): while a digest
+ * holds it — its claimed rows are `pending` until it records the outcome —
+ * nothing changes (`lock_busy`, also while another resolve holds it); and
+ * while this transaction holds it, a digest starting meanwhile is skipped.
+ * `changed` 0: no pending row matched.
+ */
+export async function resolvePendingDeliveries(
+  db: Kysely<Database>,
+  request: ResolveRequest,
+): Promise<ResolveResult> {
+  return db.transaction().execute(async (trx): Promise<ResolveResult> => {
+    const { rows } = await sql<{
+      acquired: boolean;
+    }>`SELECT pg_try_advisory_xact_lock(${request.digestLockKey}::bigint) AS acquired`.execute(trx);
+    if (rows[0]?.acquired !== true) return { status: "lock_busy" };
+    const day = request.digestDate;
+    const changed =
+      request.outcome === "sent"
+        ? await trx
+            .updateTable("deliveries")
+            .set({ status: "sent", sent_at: sql<Date>`now()`, error_code: null })
+            .set((eb) => ({ attempts: eb("attempts", "+", 1) }))
+            .where("profile_id", "=", request.profileId)
+            .where("transport", "=", request.transport)
+            .where("status", "=", "pending")
+            .$if(day !== null, (qb) => qb.where("digest_date", "=", sql<Date>`${day}::date`))
+            .returning("id")
+            .execute()
+        : await trx
+            .deleteFrom("deliveries")
+            .where("profile_id", "=", request.profileId)
+            .where("transport", "=", request.transport)
+            .where("status", "=", "pending")
+            .$if(day !== null, (qb) => qb.where("digest_date", "=", sql<Date>`${day}::date`))
+            .returning("id")
+            .execute();
+    return { status: "resolved", changed: changed.length };
+  });
+}
