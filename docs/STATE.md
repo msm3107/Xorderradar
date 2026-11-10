@@ -2,12 +2,11 @@
 
 Current phase: PHASE 4 — PILOT
 Current PR: PR-10 — Wejście bez pułapek (UX/QOL series PR-10 – PR-13)
-Status: PR-08 **MERGED in PR #14 (366618e)**. PR-09 **PR READY in PR #15** (Code & Safety
-Review PASS, Quality Review ACCEPT), in owner review. PR-10 (first PR of the UX/QOL series
-from the independent UX audit of 2026-11-06; plan in `docs/PR_PLAN.md` → PR-10 – PR-13,
-`docs/LAUNCH_ROADMAP.md` → 3d) **READY locally** (Code & Safety Review PASS, Quality Review
-ACCEPT), built on top of PR-09; its PR opens for owner review after PR #15 is merged. Owner
-steps on the VPS for PR-08 (AC1, `bk` backfill, DEPLOY §6) remain in Blockers.
+Status: PR-08 **MERGED in PR #14 (366618e)**. PR-09 **MERGED in PR #15 (42dd008)**. PR-10
+(first PR of the UX/QOL series from the independent UX audit of 2026-11-06; plan in
+`docs/PR_PLAN.md` → PR-10 – PR-13, `docs/LAUNCH_ROADMAP.md` → 3d) **READY** (Code & Safety
+Review PASS, Quality Review ACCEPT), base branch merged in after PR #15; its PR opens for owner
+review. Owner steps on the VPS for PR-08 (AC1, `bk` backfill, DEPLOY §6) remain in Blockers.
 
 ## Completed
 
@@ -793,6 +792,63 @@ review. D-023, D-024, D-028 updated.
   (a reason-type tag like „słowo:”/„region:”; revisit together with the „Kategoria:” field
   label only if pilot customers ask). Watch in the pilot: a profile with many categories that
   all hit one CPV-rich offer gets a long reason (~200 characters).
+- Owner review of PR #15 (PASS, one Medium + two QoL) → fix round: (1) D-023 genitive plural:
+  a keyword token of ≥ 6 characters ending in „nie”/„cie” also matches a text word equal to it
+  without „ie” („szkolenie” → „szkoleń”, „oświetlenie” → „oświetleń”, „sprzątanie” →
+  „sprzątań”, „zajęcie” → „zajęć”), equality only, never a prefix („malowane”,
+  „zarządzanego” do not match); `KeywordToken.genitivePlural` in `src/matching/text.ts`, no
+  stemmer; known limit: only from the „-nie”/„-cie” form itself („szkolenia” ≠ „szkoleń”).
+  No existing matching expectation changed.
+  (2) `deliveries:resolve … [--transport test|smtp]`: only rows of that transport change
+  (`transport` filter on both the UPDATE and the DELETE); default the current `EMAIL_MODE`'s
+  transport via `loadEmailMode` (EMAIL_MODE alone, same schema, no SMTP secrets; invalid →
+  exit 1 before the database); with `--transport` EMAIL_MODE is not read;
+  repeated/missing/other value → exit 2; the JSON output adds `transport`;
+  `deliveries:pending` already listed it. Changed tracked assertions (stricter, forced by the
+  new field): the resolve request/stdout `toEqual`s in `tests/deliveries-cli.test.ts` and the
+  `--sent --date` stdout `toEqual` in `tests/integration/digest.test.ts` gained
+  `transport: "test"`.
+  (3) RUNBOOK step 3: after
+  `--failed` an offer returns only in a later digest over the same transport that still finds
+  it a candidate (not `closed`/`cancelled`, deadline not passed, first stored ≤ 7 days before
+  the run, matches the profile as it is then, within 50 per e-mail / 10 000 candidates; one
+  e-mail a day). README, D-023, D-024, ARCHITECTURE, PR_PLAN updated. 2053 tests (+35).
+  Code & Safety Review of the round: PASS with four Lows, fixed: (L1) when `deliveries:resolve`
+  changes 0 rows the message names the transport („…has no pending deliveries over transport
+  "test"; nothing was changed.”, with `--date` „…of that day over transport "test"…”) — the
+  old „the profile has no pending deliveries” was false while rows of the other transport
+  were pending (e.g. after `EMAIL_MODE` changed test → smtp). Changed tracked assertions
+  (stricter, forced by the new text): the two exact messages of „exits 1 when no pending row
+  matches” in `tests/deliveries-cli.test.ts`, and the `--date` case in
+  `tests/integration/digest.test.ts` („exits 1 and changes nothing…”), from
+  `toContain("no pending deliveries of that day")` to the exact message (`toBe`). (L2) D-023
+  and `src/matching/text.ts`: known limit — for „-ycie”/„-icie” nouns the genitive plural
+  equals the infinitive („pokrycie” → „pokryć koszty”, „zużycie” → „zużyć”, „użycie” →
+  „użyć”; narrow, related meaning, accepted; generalised in the doc-only round below). (L3) README `profile:create` row
+  mentions the genitive plural. (L4) comments: `digestDate` null = every pending row of the
+  profile and transport (`ResolveRequest`, `ResolveArgs`); which commands read the e-mail
+  variables (`runCli`, `loadEmailConfig`). Tests added: exclude „szkolenie” removes
+  „Organizacja szkoleń”; the „-ycie” over-match documented; resolve with `--transport smtp`
+  and 0 rows names „smtp”; `EMAIL_MODE=smtp` with a malformed `SMTP_URL` holding a password
+  resolves over smtp and prints neither the URL nor the password. 2057 tests (+4).
+  Quality Review of the round ACCEPT → doc-only round (no code or test change): (L-a) D-023
+  and the `src/matching/text.ts` comment generalise the known limit to „-cie” nouns whose
+  infinitive has the same form („-ycie”, „-icie”, „-ucie”, „-ście”: pokrycie/pokryć,
+  zatrucie/zatruć, przejście/przejść, szycie/szyć) — accepted for include keywords, a silent
+  missing alert for exclude keywords („przejście” vs „przejść weryfikację”), so such excludes
+  with care; (L-b) README: the e-mail variables are read by `digest` and `status --notify`;
+  tips: README `profile:create` — type the singular „-nie”/„-cie” form („szkolenie”, not
+  „szkolenia”); RUNBOOK step 3 — after `--failed` the offer returns in the next `digest`
+  (the nearest 7:30 cron — tomorrow's when resolved after today's run), earlier only via a
+  manual `digest` with no other `sent`/`pending` row of that profile and transport today;
+  Code & Safety re-check PASS, its Low L1 („czyli jutro” too narrow when resolving between
+  the 06:30 alert and the 7:30 cron) folded in by the coordinator (wording only).
+- CI fix (owner-approved addition to PR-09): the `ubuntu-latest` runner image moved to 26.04,
+  where `postgresql-client` gives client 18; pg_dump ≥ 17 writes `SET transaction_timeout`,
+  which the `postgres:16` service rejects, so the backup/restore test failed. `ci.yml` now
+  adds the PGDG repository (the runner has none; `apt.postgresql.org.sh -y` from
+  `postgresql-common`), installs `postgresql-client-16`, puts `/usr/lib/postgresql/16/bin` on `PATH` and requires
+  major 16; D-028 CI sentence updated. No code or test change.
 
 **PR-08 — Drugie źródło: Baza Konkurencyjności (adapter `bk`)** (`docs/PR_PLAN.md` → PR-08) —
 **MERGED in PR #14 (366618e)**; D-030 new.
@@ -917,15 +973,18 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
 
 ## Next action
 
-0. PR-10: READY locally (Code & Safety Review PASS, Quality Review ACCEPT). After PR #15
-   (PR-09) is merged: rebase on the base branch, rerun `pnpm check`, open the PR for owner
-   review. Then PR-11 – PR-13 in order (`docs/PR_PLAN.md`). Each PR opens only when ready for
-   owner review.
-1. PR-09: PR READY (Code & Safety Review PASS round 3, Quality Review ACCEPT round 2) → owner
-   review of the PR (not merged by the agents); check CI on its head. On the VPS
+0. PR-10: READY (Code & Safety Review PASS, Quality Review ACCEPT), base branch merged in
+   after PR #15 → owner review of its PR (not merged by the agents). Then PR-11 – PR-13 in
+   order (`docs/PR_PLAN.md`). Each PR opens only when ready for owner review.
+1. PR-09: MERGED in PR #15 (42dd008). On the VPS
    (PR-08 is merged, 366618e): PR-07B checklist (`docs/DEPLOY.md` §13) if not done yet, then
    PR-08 AC1 and the `bk` backfill (Blockers). Follow-ups from the PR-08 reviews (owner to
    choose the PR):
+   - Backup client version (found by the PR-09 CI fix, later PR): README/D-028/RUNBOOK
+     „klient ≥ 16 / nie starszy niż serwer” and the version check in
+     `src/operations/backup.ts` are too permissive — a newer client (17+) makes a dump that a
+     16 server cannot restore (`SET transaction_timeout`); require the server's major or
+     document the restore-side limit.
    - Calibration aid (Quality Review of PR-09, out of scope): a `match:preview` counter of
      near misses — offers dropped only because the keyword was in the description (they would
      match with a title keyword) — for calibrating pilot profiles.
@@ -1171,12 +1230,23 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
 
 ## Last verification
 
+2026-11-10, PR-10 after merging the base branch (PR #15, 42dd008) in (Node 22, pnpm 10.28.0,
+PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2133 tests passed in 61 files,
+none skipped (2094 PR-10 + 39 from the PR-09 owner-review round). Conflicts only in README,
+STATE and one `src/cli.ts` config block (both sides kept).
+
 2026-11-09, PR-10 before the PR (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
 REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2094 tests passed in 61 files,
 none skipped (run by the coder, the Code & Safety and Quality reviewers and the coordinator).
 No dependency changes; no network requests to live sources; no e-mail sent (tests use the
 `test` transport and in-memory senders). Working-tree fingerprint unchanged across every
 reviewer run.
+
+2026-11-09, PR-09 owner-review round (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test_pr09
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2057 tests passed in 58 files,
+none skipped (run by the coder, after the Code & Safety Lows). No dependency changes; no network requests to live sources; no
+e-mail sent.
 
 2026-11-06, PR-09 before the PR (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
 REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2018 tests passed in 58 files,

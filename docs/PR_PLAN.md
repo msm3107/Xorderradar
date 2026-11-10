@@ -576,6 +576,13 @@ powtarzanym `incomplete`. Zakres: wybór właściciela 2026-11-06 (wszystkie 4 p
    pojedynczy `incomplete` nie alarmuje. Alert operatora podaje powody (`part`, `reason`)
    bez treści ofert; RUNBOOK „Alert statusu” — co zrobić. Nadrabianie (D-021) bez zmian.
 
+**Przegląd właściciela (PR #15, PASS z uwagami):** (a) słowo kluczowe ≥ 6 znaków na
+„-nie”/„-cie” pasuje też do dopełniacza l. mn. („szkoleń”, „zajęć”; tylko równe słowo, nie
+prefiks; D-023); (b) `deliveries:resolve … [--transport test|smtp]` zmienia tylko wiersze
+tego transportu, domyślnie transportu z `EMAIL_MODE` (czytane samo `EMAIL_MODE`), wynik
+z polem `transport` (D-024); (c) RUNBOOK: kiedy oferta wraca po `--failed` (warunki
+kandydata digestu).
+
 **Kryteria akceptacji:**
 
 1. Oferta dopasowana dziś tylko słowem z opisu przy zgodnym regionie (50) nie przechodzi;
