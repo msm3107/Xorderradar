@@ -6,40 +6,50 @@ import {
   type CompanyProfileSettings,
 } from "../domain/company-profile.js";
 import type { StoredProfileSettings } from "../infrastructure/db/company-profiles-repository.js";
-import { countyKey } from "../matching/match.js";
 import { plural } from "../notifications/digest.js";
 
 /**
- * The profile form (PR-06B, D-027, D-031): the submitted values, their validation
- * with the domain schema plus profile:create's county-name check (both
- * reused, no rule is repeated here) and the Polish message for each issue.
- * Pure: no I/O.
+ * The profile form (PR-06B, D-027, D-031, PR-13): the submitted values, their
+ * validation with the domain schema (reused, no rule is repeated here), the
+ * region choice and the Polish message for each issue. Counties are not on
+ * the form since PR-13: only the operator sets them (a save leaves them as
+ * stored). Pure: no I/O.
  */
 
-/** The form's fields that occur once (urlencoded names). */
+/** The form's fields that occur once (urlencoded names); `region` is the radio pair. */
 export const PROFILE_FORM_SINGLE_FIELDS = [
   "csrf",
   "name",
   "email",
-  "counties",
+  "region",
   "include_keywords",
   "exclude_keywords",
 ] as const;
 /** The checkbox groups: any number of values, also none. */
 export const PROFILE_FORM_MULTIPLE_FIELDS = ["categories", "voivodeships"] as const;
 
+/**
+ * The region radio's values (PR-13): the whole country, or only the ticked
+ * voivodeships. The choice is explicit, so an empty list is never a forgotten
+ * one.
+ */
+export const REGION_ALL = "all";
+export const REGION_SELECTED = "selected";
+
 /** What the customer sees in the form; textareas hold one entry per line. */
 export interface ProfileFormValues {
   readonly name: string;
   readonly email: string;
   readonly categories: readonly string[];
+  /** The region radio as submitted: REGION_ALL, REGION_SELECTED or anything else (refused). */
+  readonly region: string;
   readonly voivodeships: readonly string[];
-  readonly counties: string;
   readonly includeKeywords: string;
   readonly excludeKeywords: string;
 }
 
-export type ProfileFormField = keyof ProfileFormValues;
+/** A field with a label and its own messages; the region radio's go to `voivodeships`. */
+export type ProfileFormField = Exclude<keyof ProfileFormValues, "region">;
 
 /** Polish messages per field, in the order of the form. */
 export type ProfileFormErrors = Partial<Record<ProfileFormField, readonly string[]>>;
@@ -50,7 +60,6 @@ export const FIELD_LABELS: Readonly<Record<ProfileFormField, string>> = {
   email: "Adres e-mail",
   categories: "Kategorie",
   voivodeships: "Województwa",
-  counties: "Powiaty",
   includeKeywords: "Słowa kluczowe",
   excludeKeywords: "Słowa wykluczające",
 };
@@ -61,7 +70,6 @@ export const FIELD_ORDER: readonly ProfileFormField[] = [
   "email",
   "categories",
   "voivodeships",
-  "counties",
   "includeKeywords",
   "excludeKeywords",
 ];
@@ -89,8 +97,8 @@ export function formValuesFromStored(stored: StoredProfileSettings): ProfileForm
     name: stored.name,
     email: stored.email,
     categories: stored.categories,
+    region: stored.voivodeships.length === 0 ? REGION_ALL : REGION_SELECTED,
     voivodeships: stored.voivodeships,
-    counties: stored.counties.join("\n"),
     includeKeywords: stored.includeKeywords.join("\n"),
     excludeKeywords: stored.excludeKeywords.join("\n"),
   };
@@ -105,8 +113,8 @@ export function formValuesFromSubmission(
     name: single.name,
     email: single.email,
     categories: multiple.categories,
+    region: single.region,
     voivodeships: multiple.voivodeships,
-    counties: single.counties,
     includeKeywords: single.include_keywords,
     excludeKeywords: single.exclude_keywords,
   };
@@ -122,19 +130,64 @@ const SCHEMA_FIELDS: Readonly<Record<string, ProfileFormField>> = {
   email: "email",
   categories: "categories",
   voivodeships: "voivodeships",
-  counties: "counties",
   includeKeywords: "includeKeywords",
   excludeKeywords: "excludeKeywords",
 };
 
 /**
+ * The stored profile's fields a form save rewrites (PR-13). Not `counties`
+ * (the operator's only), `email` (a new address waits in pending_email, the
+ * stored one stays) or `active` (its own buttons).
+ */
+const FORM_REWRITTEN_FIELDS: ReadonlySet<string> = new Set([
+  "name",
+  "categories",
+  "voivodeships",
+  "includeKeywords",
+  "excludeKeywords",
+]);
+
+/**
+ * Can saving the form correct a stored profile the schema refuses at these
+ * field paths (DomainError `invalid_stored_row`, e.g. `counties.0`)? Only
+ * when every path is a field the form rewrites; anything else (or no path)
+ * needs the operator.
+ */
+export function correctableInForm(fields: readonly string[]): boolean {
+  return (
+    fields.length > 0 &&
+    fields.every((path) => FORM_REWRITTEN_FIELDS.has(path.split(".", 1)[0] ?? ""))
+  );
+}
+
+/** The region radio's messages (PR-13): a contradiction is refused, never guessed. */
+export const REGION_ERRORS = {
+  unknown: "Wybierz „Cała Polska” albo „Wybrane województwa”.",
+  allWithTicked:
+    "Zaznaczono „Cała Polska” i województwa. Wybierz „Wybrane województwa” albo odznacz " +
+    "województwa.",
+  selectedWithout: "Zaznacz co najmniej jedno województwo albo wybierz „Cała Polska”.",
+} as const;
+
+/** The region radio against the ticked voivodeships; null when they agree. */
+function regionError(values: ProfileFormValues): string | null {
+  if (values.region === REGION_ALL) {
+    return values.voivodeships.length === 0 ? null : REGION_ERRORS.allWithTicked;
+  }
+  if (values.region === REGION_SELECTED) {
+    return values.voivodeships.length > 0 ? null : REGION_ERRORS.selectedWithout;
+  }
+  return REGION_ERRORS.unknown;
+}
+
+/**
  * Validates the form with the domain's settings schema. A new address is not
  * typed twice: it takes effect only through the confirmation link sent to it
- * (D-031), so a typo cannot lock the customer out.
+ * (D-031), so a typo cannot lock the customer out. The region radio must
+ * agree with the ticked voivodeships (PR-13).
  */
 export function validateProfileForm(values: ProfileFormValues): ProfileFormResult {
   const lists = {
-    counties: entries(values.counties),
     includeKeywords: entries(values.includeKeywords),
     excludeKeywords: entries(values.excludeKeywords),
   };
@@ -143,7 +196,6 @@ export function validateProfileForm(values: ProfileFormValues): ProfileFormResul
     email: values.email,
     categories: values.categories,
     voivodeships: values.voivodeships,
-    counties: lists.counties.map((entry) => entry.value),
     includeKeywords: lists.includeKeywords.map((entry) => entry.value),
     excludeKeywords: lists.excludeKeywords.map((entry) => entry.value),
   };
@@ -155,48 +207,33 @@ export function validateProfileForm(values: ProfileFormValues): ProfileFormResul
     found.set(field, messages);
   };
 
-  const countyIssues = new Set<number>();
   if (!result.success) {
     for (const issue of result.error.issues) {
       const field = SCHEMA_FIELDS[String(issue.path[0])];
       // Every schema field is on the form; an unknown path would be a bug.
       if (field === undefined) throw new Error("Profile form issue outside the form's fields");
       const index = issue.path[1];
-      const list =
-        field === "counties" || field === "includeKeywords" || field === "excludeKeywords"
-          ? lists[field]
-          : [];
+      const list = field === "includeKeywords" || field === "excludeKeywords" ? lists[field] : [];
       const line = typeof index === "number" ? list[index]?.line : undefined;
-      if (field === "counties" && typeof index === "number") countyIssues.add(index);
       add(field, issueMessage(field, issue, line));
     }
   }
+  const region = regionError(values);
+  if (region !== null) add("voivodeships", region);
   // Control characters (a pasted tab, NUL): refused here and by profile:create,
   // never by the stored-row schema (D-028). Entries are trimmed like the schema does.
   if (hasControlCharacter(values.name.trim())) {
     add("name", "Nazwa firmy zawiera znaki sterujące (np. tabulator) — wpisz wartość ponownie.");
   }
-  for (const field of ["counties", "includeKeywords", "excludeKeywords"] as const) {
-    lists[field].forEach((entry, index) => {
-      if (!hasControlCharacter(entry.value)) return;
+  for (const field of ["includeKeywords", "excludeKeywords"] as const) {
+    for (const entry of lists[field]) {
+      if (!hasControlCharacter(entry.value)) continue;
       add(
         field,
         `Wiersz ${String(entry.line)}: wpis zawiera znaki sterujące (np. tabulator) — wpisz wartość ponownie.`,
       );
-      // One message per entry: no county check on top.
-      if (field === "counties") countyIssues.add(index);
-    });
-  }
-  // The rule of profile:create (src/profile-commands.ts): an entry that is no
-  // county name at all ("powiat", "m. st.") could never match an offer.
-  lists.counties.forEach((entry, index) => {
-    if (!countyIssues.has(index) && countyKey(entry.value) === null) {
-      add(
-        "counties",
-        `Wiersz ${String(entry.line)}: wpisz nazwę powiatu, np. warszawski zachodni.`,
-      );
     }
-  });
+  }
   if (result.success && found.size === 0) return { ok: true, settings: result.data };
   return { ok: false, errors: capped(found) };
 }
@@ -234,7 +271,6 @@ function moreErrors(count: number): string {
 
 /** Too many entries in a list (the schema allows 100). */
 const LIST_LIMITS: Partial<Record<ProfileFormField, string>> = {
-  counties: "Wpisz najwyżej 100 powiatów, każdy w osobnym wierszu.",
   includeKeywords: "Wpisz najwyżej 100 słów kluczowych, jedno w wierszu.",
   excludeKeywords: "Wpisz najwyżej 100 słów wykluczających, jedno w wierszu.",
 };
@@ -264,7 +300,6 @@ function issueMessage(
       return "Wybierz kategorie z listy.";
     case "voivodeships":
       return "Wybierz województwa z listy.";
-    case "counties":
     case "includeKeywords":
     case "excludeKeywords":
       if (issue.path.length === 1) {

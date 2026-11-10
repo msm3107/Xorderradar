@@ -365,6 +365,48 @@ i nowy link dla właściciela:
 node dist/main.js access:link <profileId>     # link jest sekretem — tylko właścicielowi
 ```
 
+## Powiaty profilu (tylko operator, PR-13)
+
+Klient nie zmienia powiatów: formularz ustawień ich nie ma, a jego zapis zostawia zapisane
+powiaty bez zmian (formularz sprzed PR-13 z polem powiatów jest odrzucany — 400, nic nie
+zapisane). Ustawienia pokazują klientowi zapisane powiaty tylko do odczytu i odsyłają do
+obsługi. Prośbę o zmianę obsługuje operator:
+
+- nowy profil — pole `counties` w pliku `profile:create` (z kontrolą nazwy powiatu i
+  ostrzeżeniem „powiaty bez województw”);
+- istniejący profil — SQL (jak wyżej, po `SET ROLE radar;`), w jednej transakcji.
+
+**Uwaga: zły wpis blokuje klienta.** Formularz nie nadpisuje powiatów, więc wpis odrzucany
+przez schemat (pusty albo z samych spacji, `NULL`, dłuższy niż 100 znaków, więcej niż 100
+wpisów) sprawia, że `/dopasowania` i CSV pokazują tylko „napisz do obsługi”, a **każdy zapis
+ustawień** kończy się 409 „Nie zapisano zmian” (nic nie zapisane; w logu `warn` „profile
+settings not saved” z `profileId` i `fields: ["counties…"]`). Digest pomija taki profil
+(„invalid stored profile skipped”). Dlatego najpierw zanotuj obecną wartość, a zmianę
+sprawdź przed `COMMIT`:
+
+```sql
+SELECT counties FROM company_profiles WHERE id = '<profileId>';  -- obecna wartość (do cofnięcia)
+BEGIN;
+UPDATE company_profiles SET counties = ARRAY['warszawski zachodni'], updated_at = now() WHERE id = '<profileId>';
+-- albo usunięcie: SET counties = '{}'
+SELECT counties,
+       cardinality(counties) <= 100
+         AND NOT EXISTS (SELECT 1 FROM unnest(counties) AS c
+                         WHERE c IS NULL OR btrim(c) = '' OR char_length(btrim(c)) > 100) AS ok
+  FROM company_profiles WHERE id = '<profileId>';
+COMMIT;    -- tylko przy ok = t i dokładnie tych nazwach; przy wątpliwości: ROLLBACK;
+```
+
+SQL pomija kontrole `profile:create`: wpisz samą nazwę powiatu (np. `warszawski zachodni`,
+bez „powiat”), bez tabulatorów i znaków sterujących. Po `COMMIT` sprawdź
+`match:preview <profileId>` (widzi tylko zatwierdzone dane) — profil musi się wczytać, a
+wynik ma mieć sens; jeśli nie, od razu przywróć zanotowaną wartość tym samym przepisem.
+`ok` odrzuca też element `NULL` (np. `ARRAY[NULL]`), ale obcina tylko spacje ASCII; pełną
+kontrolę schematem robi `match:preview`. Powiaty nie zawężają listy w obrębie województwa
+(ogłoszenia nie podają powiatu); w profilu bez województw przepuszczają tylko zamówienia z
+kategorią i słowem kluczowym. Zmiana działa od razu na `/dopasowania` i od najbliższego
+digestu.
+
 ## Oceny trafności (`feedback:report`, D-032)
 
 Klienci oceniają zamówienia linkami „Trafne”/„Nietrafne” z digestu (bez logowania, 60 dni,
@@ -392,12 +434,13 @@ profili (`profiles[]`) albo ich medianę. Firma z wieloma „nietrafne” w jedn
 sprawdź jej profil (`match:preview <profileId>`) i słowa wykluczające razem z firmą.
 
 Przy wdrażaniu firmy w pilotaż poleć ocenianie hurtem na `/dopasowania` (jedno kliknięcie na
-zamówienie, cała lista na jednej stronie) zamiast pojedynczych linków z e-maili — więcej ocen
-w krótszym czasie.
+zamówienie, 50 zamówień na stronę, kolejne strony linkiem „Następna strona”, od PR-13) zamiast
+pojedynczych linków z e-maili — więcej ocen w krótszym czasie.
 
 Klient może też pobrać swoją listę dopasowań jako CSV („Pobierz listę jako plik CSV” na
-`/dopasowania`: te same zamówienia i limit co strona, separator `;`, UTF-8 z BOM — otwiera się
-w Excelu i Arkuszach Google).
+`/dopasowania`, przy kilku stronach „Pobierz tę stronę jako plik CSV” — zamówienia oglądanej
+strony, pozostałe strony z ich stron; CSV całej listy czeka na decyzję właściciela; separator `;`, UTF-8 z BOM — otwiera się w Excelu i Arkuszach Google). Lista kończy
+się na 20 stronach (1000 zamówień); większy nadmiar to sygnał do zawężenia profilu.
 
 ## E-maile dostępu i kontakt (`serve`, D-031)
 

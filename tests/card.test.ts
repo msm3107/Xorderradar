@@ -435,6 +435,7 @@ describe("the same card in the e-mail and on /dopasowania (PR-11 AC3)", () => {
       stateAt: "2026-11-09 10:00",
       windowDays: 7,
       items: [offerCard(item, NOW)],
+      pagination: { page: 1, pages: 1, offset: 0, listed: 1, limit: 1000 },
       more: 0,
       truncated: false,
     }).html;

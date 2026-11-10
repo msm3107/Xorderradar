@@ -79,9 +79,15 @@ export const companyProfilePatchSchema = z
 
 /**
  * What a customer edits on the web profile form (PR-06B): every field except
- * `active`, which has its own buttons. The input schema's rules, unchanged.
+ * `active`, which has its own buttons, and — since PR-13 (D-027) — `counties`,
+ * which only the operator sets (`profile:create`, SQL — docs/RUNBOOK.md): no
+ * source gives an offer's county yet. Without the key, a save leaves the
+ * stored counties as they are. The input schema's rules, unchanged.
  */
-export const companyProfileSettingsSchema = companyProfileInputSchema.omit({ active: true });
+export const companyProfileSettingsSchema = companyProfileInputSchema.omit({
+  active: true,
+  counties: true,
+});
 
 export type CompanyProfileInput = z.input<typeof companyProfileInputSchema>;
 export type CompanyProfileSettings = z.input<typeof companyProfileSettingsSchema>;

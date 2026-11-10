@@ -70,17 +70,21 @@ import {
   loginRequiredPage,
   loginRefusedPage,
   matchesBusyPage,
+  matchesHref,
   matchesTooManyPage,
   matchesPage,
   matchesUnavailablePage,
+  type MatchesPagination,
   type Page,
   profilePage,
+  profileSaveBlockedPage,
   settingsPage,
   STYLESHEET,
   unsubscribeConfirmPage,
   unsubscribedPage,
 } from "./pages.js";
 import {
+  correctableInForm,
   EMAIL_CHANGE_LIMIT_ERRORS,
   formValuesFromStored,
   formValuesFromSubmission,
@@ -117,9 +121,10 @@ import {
 export const MAX_BODY_BYTES = 8 * 1024;
 /**
  * The profile form's own limit (D-027): up to 100 keywords of up to 100
- * characters in two lists, plus counties, urlencoded (a Polish letter takes
- * 6 bytes). Typical Polish text needs about 1.5 bytes per character, so full
- * lists fit; every other route keeps MAX_BODY_BYTES.
+ * characters in two lists, urlencoded (a Polish letter takes 6 bytes); no
+ * counties since PR-13, the limit is unchanged. Typical Polish text needs
+ * about 1.5 bytes per character, so full lists fit; every other route keeps
+ * MAX_BODY_BYTES.
  */
 export const PROFILE_FORM_MAX_BYTES = 64 * 1024;
 /**
@@ -135,14 +140,23 @@ export const LINK_REQUEST_MAX_IPS = 10_000;
 /** Fields of the rating form of /dopasowania (csrf, oferta, werdykt). */
 const RATING_FORM_FIELDS = ["csrf", "oferta", "werdykt"] as const;
 /**
- * The same with the optional `nastepna` (the card after the rated one, the
- * anchor to return to after „Nietrafne”, which moves the rated card last).
+ * Its optional fields, each at most once: `nastepna` (the card after the
+ * rated one, the anchor to return to after „Nietrafne”, which moves the
+ * rated card last) and `strona` (the list page to return to, PR-13).
  */
-const RATING_FORM_FIELDS_WITH_NEXT = [...RATING_FORM_FIELDS, "nastepna"] as const;
-/** Most `name=value` pairs in the profile form: 6 fields, 10 categories, 16 voivodeships. */
+const RATING_FORM_OPTIONAL_FIELDS = ["nastepna", "strona"] as const;
+/**
+ * Most `name=value` pairs in the profile form: 6 single fields (csrf, name,
+ * email, region, 2 keyword lists), 10 categories, 16 voivodeships.
+ */
 export const PROFILE_FORM_MAX_FIELDS = 64;
-/** Matching offers shown on /dopasowania; the rest are counted (as in the digest). */
+/** Matching offers on one page of /dopasowania (and in its CSV, PR-13). */
 export const MATCHES_SHOWN = 50;
+/**
+ * Pages of /dopasowania at most (PR-13): MATCHES_MAX_PAGES × MATCHES_SHOWN
+ * offers are listed, the rest only counted. `?strona=` above it is a 404.
+ */
+export const MATCHES_MAX_PAGES = 20;
 /** Retry-After of the 503 when the wait for the /dopasowania slot is refused or runs out. */
 export const MATCHES_RETRY_AFTER_SECONDS = 5;
 /** Longest wait for the /dopasowania slot before the 503 (D-027). */
@@ -392,11 +406,13 @@ const utf8 = new TextDecoder("utf-8", { fatal: true });
 
 /**
  * Parses a urlencoded body strictly: valid UTF-8, exactly the expected
- * fields, each once. null for anything else (a 400).
+ * fields, each once, plus any of the `optional` ones, each at most once.
+ * null for anything else (a 400).
  */
 export function parseForm(
   body: Buffer,
   fields: readonly string[],
+  optional: readonly string[] = [],
 ): Readonly<Record<string, string>> | null {
   let text: string;
   try {
@@ -406,11 +422,37 @@ export function parseForm(
   }
   const values = new Map<string, string>();
   for (const [name, value] of new URLSearchParams(text)) {
-    if (!fields.includes(name) || values.has(name)) return null;
+    if ((!fields.includes(name) && !optional.includes(name)) || values.has(name)) return null;
     values.set(name, value);
   }
-  if (values.size !== fields.length) return null;
+  if (!fields.every((name) => values.has(name))) return null;
   return Object.fromEntries(values);
+}
+
+/**
+ * A /dopasowania page number (PR-13): only a canonical positive decimal
+ * integer (no sign, no leading zero, no exponent, at most 6 digits) up to
+ * `maxPages`; null for anything else.
+ */
+export function parsePageNumber(value: string, maxPages: number): number | null {
+  if (!/^[1-9][0-9]{0,5}$/.test(value)) return null;
+  const page = Number(value);
+  return page <= maxPages ? page : null;
+}
+
+/**
+ * The page asked for in a /dopasowania(.csv) URL (PR-13): 1 without
+ * `strona`; the number when it occurs exactly once and parsePageNumber takes
+ * it (after URL decoding); null — a 404 — for anything else (empty, 0,
+ * negative, leading zeros, `1e2`, repeated, above `maxPages`). Other query
+ * parameters are ignored, as on every route.
+ */
+export function matchesPageFromUrl(url: string, maxPages: number): number | null {
+  const at = url.indexOf("?");
+  const values = at === -1 ? [] : new URLSearchParams(url.slice(at + 1)).getAll("strona");
+  if (values.length === 0) return 1;
+  if (values.length > 1) return null;
+  return parsePageNumber(values[0] ?? "", maxPages);
 }
 
 export interface MultiValueForm<S extends string, M extends string> {
@@ -493,6 +535,8 @@ export interface WebServerOptions {
   readonly matchesMaxWaitMs?: number;
   /** Most requests waiting for the /dopasowania slot (tests). Default: MATCHES_MAX_WAITERS. */
   readonly matchesMaxWaiters?: number;
+  /** Most pages of /dopasowania (tests). Default: MATCHES_MAX_PAGES. */
+  readonly matchesMaxPages?: number;
   /** Longest wait of /zdrowie for the database (tests). Default: HEALTH_TIMEOUT_MS. */
   readonly healthTimeoutMs?: number;
   /** The database check of /zdrowie (tests). Default: `select 1` over `db`. */
@@ -602,6 +646,11 @@ function createHealthCheck(
   };
 }
 
+/** The page limit of /dopasowania: WebServerOptions.matchesMaxPages or MATCHES_MAX_PAGES. */
+function matchesMaxPages(options: WebServerOptions): number {
+  return options.matchesMaxPages ?? MATCHES_MAX_PAGES;
+}
+
 /** The render time of /dopasowania and /przyklad: WebServerOptions.now or the real clock. */
 function clock(options: WebServerOptions): Date {
   return options.now === undefined ? new Date() : options.now();
@@ -707,6 +756,8 @@ async function handle(
             {},
             stored.pendingEmail,
             stored.pendingEmailExpired,
+            stored.counties,
+            options.contactEmail ?? null,
           ),
         );
       }
@@ -714,12 +765,25 @@ async function handle(
       case "matches_csv": {
         const session = await currentSession(req, db);
         if (session === null) return unauthenticated(req);
-        return withMatchesSlot(res, state, session.sessionId, async () => {
+        // A malformed page is refused before any work; one past the end is clamped later.
+        const maxPages = matchesMaxPages(options);
+        const page = matchesPageFromUrl(req.url ?? "", maxPages);
+        if (page === null) return pageReply(errorPage(404));
+        const kind = route.name === "matches" ? "page" : "csv";
+        const href = matchesHref(page, kind);
+        return withMatchesSlot(res, state, session.sessionId, href, kind, async () => {
           const now = clock(options);
-          const list = await matchesList(db, session.profileId, now);
-          if (list === "invalid") return pageReply(matchesUnavailablePage());
+          const list = await matchesList(db, session.profileId, now, page, maxPages);
+          if (list !== null && "invalidFields" in list) {
+            return pageReply(
+              matchesUnavailablePage(
+                correctableInForm(list.invalidFields),
+                options.contactEmail ?? null,
+              ),
+            );
+          }
           if (list === null) return unauthenticated(req);
-          return route.name === "matches"
+          return kind === "page"
             ? matchesReply(list, now, csrfTokenFor(session.token))
             : matchesCsvReply(list, now);
         });
@@ -838,9 +902,9 @@ async function handle(
       );
     }
     case "matches_feedback":
-      return rateFromList(req, body, db);
+      return rateFromList(req, body, db, matchesMaxPages(options));
     case "profile_settings":
-      return saveProfileSettings(req, body, db, state.mail);
+      return saveProfileSettings(req, body, options, state.mail);
     case "profile_unsubscribe":
     case "profile_resubscribe":
     case "profile_cancel_email":
@@ -950,13 +1014,17 @@ function redirectToProfile(notice: Notice): Reply {
  * valid one is saved and answered with 303 to /profil. A new address waits
  * for its confirmation: the link to it and the notice to the current
  * address are sent after the response. Concurrent saves: the last one wins.
+ * A stored value the form does not rewrite (operator-set counties) that the
+ * schema refuses rolls the save back: 409 with the operator's contact
+ * (PR-13), logged with the profile id and field paths only.
  */
 async function saveProfileSettings(
   req: IncomingMessage,
   body: Buffer,
-  db: Kysely<Database>,
+  options: WebServerOptions,
   mail: AccessMailer,
 ): Promise<Reply> {
+  const { db } = options;
   const form = parseMultiValueForm(
     body,
     PROFILE_FORM_SINGLE_FIELDS,
@@ -978,10 +1046,34 @@ async function saveProfileSettings(
   const result = validateProfileForm(values);
   if (!result.ok) {
     return pageReply(
-      settingsPage(values, csrf, result.errors, stored.pendingEmail, stored.pendingEmailExpired),
+      settingsPage(
+        values,
+        csrf,
+        result.errors,
+        stored.pendingEmail,
+        stored.pendingEmailExpired,
+        stored.counties,
+        options.contactEmail ?? null,
+      ),
     );
   }
-  const saved = await updateProfileSettings(db, session.profileId, result.settings, session.token);
+  // Only this refusal: the merged row is checked after the UPDATE, in its
+  // transaction, so nothing was written (and no e-mail is sent).
+  const saved = await updateProfileSettings(
+    db,
+    session.profileId,
+    result.settings,
+    session.token,
+  ).catch((error: unknown) => {
+    if (!(error instanceof DomainError) || error.code !== "invalid_stored_row") throw error;
+    options.logger.warn("profile settings not saved", {
+      errorCode: "invalid_stored_row",
+      profileId: session.profileId,
+      fields: error.fields,
+    });
+    return "blocked" as const;
+  });
+  if (saved === "blocked") return pageReply(profileSaveBlockedPage(options.contactEmail ?? null));
   if (saved === null) return unauthenticated(req);
   if (saved.kind === "email_change_limit") {
     return pageReply(
@@ -991,6 +1083,8 @@ async function saveProfileSettings(
         EMAIL_CHANGE_LIMIT_ERRORS,
         stored.pendingEmail,
         stored.pendingEmailExpired,
+        stored.counties,
+        options.contactEmail ?? null,
       ),
     );
   }
@@ -1007,18 +1101,22 @@ async function saveProfileSettings(
 /**
  * Runs `compute` in the one /dopasowania slot (D-027): 429 when this session
  * already has MATCHES_MAX_PER_SESSION requests in progress, 503 when the wait
- * is refused or runs out. Shared by the page and its CSV (PR-12).
+ * is refused or runs out. Shared by the page and its CSV (PR-12). `href`:
+ * the URL asked for, rebuilt from its parsed page (matchesHref) — where the
+ * 503 page reloads to and the 429 page links (PR-13); `kind`: a page or its CSV.
  */
 async function withMatchesSlot(
   res: ServerResponse,
   state: ServerState,
   sessionId: string,
+  href: string,
+  kind: "page" | "csv",
   compute: () => Promise<Reply>,
 ): Promise<Reply> {
   const counts = state.matchesPerSession;
   const inProgress = counts.get(sessionId) ?? 0;
   if (inProgress >= MATCHES_MAX_PER_SESSION) {
-    return pageReply(matchesTooManyPage(), {
+    return pageReply(matchesTooManyPage(href), {
       "Retry-After": String(MATCHES_RETRY_AFTER_SECONDS),
     });
   }
@@ -1028,7 +1126,7 @@ async function withMatchesSlot(
     // A client already gone or gone while waiting: nothing computed, nothing to release.
     if (slot === "gone") throw new RequestAbortedError();
     if (slot !== "acquired") {
-      return pageReply(matchesBusyPage(), {
+      return pageReply(matchesBusyPage(href, kind), {
         "Retry-After": String(MATCHES_RETRY_AFTER_SECONDS),
       });
     }
@@ -1056,29 +1154,48 @@ interface MatchesList {
   readonly active: boolean;
   readonly hasVoivodeships: boolean;
   readonly hasCounties: boolean;
-  /** At most MATCHES_SHOWN: the digest's order, offers rated „Nietrafne” last. */
+  /**
+   * One page, at most MATCHES_SHOWN: the digest's order, offers rated
+   * „Nietrafne” last — across the whole list, before it is cut into pages.
+   */
   readonly shown: readonly RatedItem[];
-  /** Matching offers beyond the shown ones. */
+  /** The offer right after the page (on the next page or on none), null: none. */
+  readonly following: RatedItem | null;
+  readonly pagination: MatchesPagination;
+  /** Matching offers beyond the page limit. */
   readonly more: number;
   readonly truncated: boolean;
 }
 
+/** A stored profile the schema refuses at these field paths (names only, never values). */
+interface InvalidStoredProfile {
+  readonly invalidFields: readonly string[];
+}
+
 /**
  * The digest's candidates and rules for this one profile (D-027), with its
- * ratings read in one query (PR-12); "invalid": a stored profile the schema
- * refuses (the form can correct it); null: no such profile.
+ * ratings read in one query (PR-12), cut to page `page` of at most
+ * `maxPages` (PR-13) — one computation, whichever the page. A page past the
+ * last one shows the last one (the list may have shrunk since the link was
+ * made). InvalidStoredProfile: a stored profile the schema refuses (the
+ * form or, for e.g. counties, only the operator can correct it); null: no
+ * such profile.
  */
 async function matchesList(
   db: Kysely<Database>,
   profileId: string,
   now: Date,
-): Promise<MatchesList | "invalid" | null> {
-  const profile = await getCompanyProfile(db, profileId).catch((error: unknown) => {
-    if (error instanceof DomainError && error.code === "invalid_stored_row")
-      return "invalid" as const;
-    throw error;
-  });
-  if (profile === "invalid" || profile === null) return profile;
+  page: number,
+  maxPages: number,
+): Promise<MatchesList | InvalidStoredProfile | null> {
+  const profile = await getCompanyProfile(db, profileId).catch(
+    (error: unknown): InvalidStoredProfile => {
+      if (error instanceof DomainError && error.code === "invalid_stored_row")
+        return { invalidFields: error.fields };
+      throw error;
+    },
+  );
+  if (profile === null || "invalidFields" in profile) return profile;
   const candidates = await readDigestCandidates(db, now);
   const items = (await matchingItems(profile, candidates.offers)).sort(digestOrder);
   const verdicts = await feedbackVerdicts(
@@ -1092,12 +1209,20 @@ async function matchesList(
     ...rated.filter((entry) => entry.verdict !== "not_relevant"),
     ...rated.filter((entry) => entry.verdict === "not_relevant"),
   ];
+  const limit = maxPages * MATCHES_SHOWN;
+  const listed = Math.min(ordered.length, limit);
+  const pages = Math.max(1, Math.ceil(listed / MATCHES_SHOWN));
+  const shownPage = Math.min(page, pages);
+  const offset = (shownPage - 1) * MATCHES_SHOWN;
+  const end = Math.min(offset + MATCHES_SHOWN, listed);
   return {
     active: profile.active,
     hasVoivodeships: profile.voivodeships.length > 0,
     hasCounties: profile.counties.length > 0,
-    shown: ordered.slice(0, MATCHES_SHOWN),
-    more: Math.max(0, ordered.length - MATCHES_SHOWN),
+    shown: ordered.slice(offset, end),
+    following: ordered[end] ?? null,
+    pagination: { page: shownPage, pages, offset, listed, limit },
+    more: ordered.length - listed,
     truncated: candidates.truncated,
   };
 }
@@ -1117,24 +1242,30 @@ function matchesReply(list: MatchesList, now: Date, csrf: string): Reply {
           opportunityId: item.offer.id,
           verdict,
           csrf,
-          next: list.shown[index + 1]?.item.offer.id ?? null,
+          // The last card's next is the next page's first: it moves up after „Nietrafne”.
+          next: (list.shown[index + 1] ?? list.following)?.item.offer.id ?? null,
+          page: list.pagination.page,
         },
       })),
+      pagination: list.pagination,
       more: list.more,
       truncated: list.truncated,
     }),
   );
 }
 
-/** GET /dopasowania.csv (PR-12, D-032): the same rows, order and limit as the page. */
+/**
+ * GET /dopasowania.csv (PR-12, D-032): the same rows and order as the page;
+ * since PR-13 the page asked for (`?strona=N`, file name `…-strona-N.csv`).
+ */
 function matchesCsvReply(list: MatchesList, now: Date): Reply {
+  const { page } = list.pagination;
+  const name = `dopasowania-${warsawDay(now)}${page > 1 ? `-strona-${String(page)}` : ""}.csv`;
   return {
     status: 200,
     body: matchesCsv(list.shown.map(({ item, verdict }) => ({ offer: item.offer, verdict }))),
     contentType: "text/csv; charset=utf-8",
-    headers: {
-      "Content-Disposition": `attachment; filename="dopasowania-${warsawDay(now)}.csv"`,
-    },
+    headers: { "Content-Disposition": `attachment; filename="${name}"` },
   };
 }
 
@@ -1145,17 +1276,22 @@ function matchesCsvReply(list: MatchesList, now: Date): Reply {
  * the card; after „Nietrafne” (the card moves last) to the card that
  * followed it (`nastepna`), when that is a well-formed id. `nastepna` only
  * picks the anchor: never what is rated, never checked against the list.
+ * `strona` (PR-13) picks the page to return to: parsePageNumber, anything
+ * else is page 1 — the Location is rebuilt from the number, never echoed.
  */
 async function rateFromList(
   req: IncomingMessage,
   body: Buffer,
   db: Kysely<Database>,
+  maxPages: number,
 ): Promise<Reply> {
-  const form = parseForm(body, RATING_FORM_FIELDS_WITH_NEXT) ?? parseForm(body, RATING_FORM_FIELDS);
+  const form = parseForm(body, RATING_FORM_FIELDS, RATING_FORM_OPTIONAL_FIELDS);
   const session = await currentSession(req, db);
   if (session === null) return unauthenticated(req);
-  const submitted =
-    form?.csrf ?? singleFieldValue(body, "csrf", RATING_FORM_FIELDS_WITH_NEXT.length);
+  // The fallback only decides 403 or 400 for a body that does not parse. Its
+  // bound stays the pre-PR-13 one (4 pairs): a malformed body of 5 or more
+  // pairs is a missing token (403), as before `strona` was added.
+  const submitted = form?.csrf ?? singleFieldValue(body, "csrf", RATING_FORM_FIELDS.length + 1);
   if (!csrfMatches(session.token, submitted)) return pageReply(errorPage(403));
   if (form === null) return pageReply(errorPage(400));
   const opportunityId = form.oferta ?? "";
@@ -1168,7 +1304,12 @@ async function rateFromList(
     verdict === "not_relevant" && next !== undefined && isOpportunityId(next)
       ? next
       : opportunityId;
-  return { status: 303, body: "", headers: { Location: `/dopasowania#oferta-${anchor}` } };
+  const page = form.strona === undefined ? 1 : (parsePageNumber(form.strona, maxPages) ?? 1);
+  return {
+    status: 303,
+    body: "",
+    headers: { Location: `${matchesHref(page)}#oferta-${anchor}` },
+  };
 }
 
 /**
@@ -1261,7 +1402,8 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       const started = performance.now();
       const rawMethod = req.method ?? "";
       const method = LOGGED_METHODS.has(rawMethod) ? rawMethod : "OTHER";
-      // Only the path is routed; the query is ignored and nothing of the URL is logged.
+      // Only the path is routed; the query is ignored (but /dopasowania's `strona`, read
+      // by its route) and nothing of the URL is logged.
       const path = (req.url ?? "").split("?", 1)[0] ?? "";
       const route = matchRoute(path);
       const finish = (reply: Reply): void => {

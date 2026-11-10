@@ -1185,7 +1185,6 @@ describe.skipIf(skipWithoutDatabase)("digest (PostgreSQL)", () => {
           includeKeywords: profileInput.includeKeywords,
           excludeKeywords: profileInput.excludeKeywords,
           voivodeships: profileInput.voivodeships,
-          counties: profileInput.counties,
         },
         session.sessionToken,
       );
