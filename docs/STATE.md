@@ -734,8 +734,8 @@ Review ACCEPT (all 6 ACs met). D-031 new; D-026 and D-027 changed. Migration
   `dropped`; `deploy/radar.env.example` could say „when an address change is requested”.
 
 **PR-09 — Kalibracja dopasowań i narzędzia operatora** (`docs/PR_PLAN.md` → PR-09) —
-PR READY: Code & Safety Review PASS (round 3), Quality Review ACCEPT (round 2); awaiting owner
-review. D-023, D-024, D-028 updated.
+MERGED in PR #15 (42dd008) after owner review PASS: Code & Safety Review PASS (round 3),
+Quality Review ACCEPT (round 2). D-023, D-024, D-028 updated.
 
 - Scoring (D-023): a keyword gives +30 when a counted keyword's assigned hit is in the title,
   +15 (`POINTS.keywordInDescription`) when all are in the description; threshold 50 and other
