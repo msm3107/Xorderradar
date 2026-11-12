@@ -79,16 +79,17 @@ describe("buildDigest", () => {
       "1. Modernizacja oświetlenia w szkole",
       "   Wartość szacunkowa: nie podano",
       "   Termin składania ofert: 05.11.2026 (czw) 12:00 — za 4 dni",
+      "   Dlaczego pasuje: Elektryka · słowo „oświetlenie” w tytule · mazowieckie",
+      `   Otwórz ogłoszenie: ${one.offer.sourceUrl}`,
       "   Zamawiający: Gmina Przykładowa",
       "   Lokalizacja: Przykładowo, woj. mazowieckie",
+      "   Opis: Wymiana opraw oświetleniowych na LED.",
       "   Data publikacji: 30.10.2026",
       "   Kontakt: Jan Kowalski, kontakt@example.invalid, 000 000 000",
-      "   Dlaczego pasuje: Elektryka · słowo „oświetlenie” w tytule · mazowieckie",
-      "   Opis: Wymiana opraw oświetleniowych na LED.",
-      `   Link: ${one.offer.sourceUrl}`,
       "   Szczegóły dopasowania: CPV: 45310000-3",
     ];
-    // In this order, one card: the title, the rows, the link, the details last.
+    // In this order, one card: the title, value, deadline and why, the link, the
+    // rest, the details last.
     const textLines = text.split("\n");
     const at = textLines.indexOf(lines[1] ?? "");
     expect(textLines.slice(at - 2, at + lines.length - 1)).toEqual([
@@ -96,11 +97,21 @@ describe("buildDigest", () => {
       "",
       ...lines.slice(1),
     ]);
-    // The same content in the HTML part (the link is the button, below).
-    for (const line of lines.slice(1, -2)) {
-      const value = line.replace(/^ *(?:\d+\. |[^:]+: )/u, "");
-      expect(html).toContain(escapeHtml(value));
+    // The same content in the HTML part, in the same order (the link is the button).
+    let from = 0;
+    for (const line of lines.slice(1)) {
+      if (line.includes("Otwórz ogłoszenie:")) continue;
+      const value = escapeHtml(line.replace(/^ *(?:\d+\. |[^:]+: )/u, ""));
+      const found = html.indexOf(value, from);
+      expect(found, line).toBeGreaterThan(from);
+      from = found;
     }
+    expect(html.indexOf("<b>Dlaczego pasuje:</b>")).toBeLessThan(
+      html.indexOf("<b>Otwórz ogłoszenie</b>"),
+    );
+    expect(html.indexOf("<b>Otwórz ogłoszenie</b>")).toBeLessThan(
+      html.indexOf("<b>Zamawiający:</b>"),
+    );
     expect(html).toContain("<small>Szczegóły dopasowania: CPV: 45310000-3</small>");
     expect(html).toContain(
       `<a href="${one.offer.sourceUrl}" style="display:inline-block;padding:6px 14px;` +
@@ -195,8 +206,10 @@ describe("buildDigest", () => {
     const lines = text.split("\n");
     const at = lines.indexOf(`   Źródło: ${attribution}`);
     expect(at).toBeGreaterThan(-1);
+    // Visible with the offer, after its description; the link comes before (after the lead).
     expect(lines[at - 1]).toMatch(/^ {3}Opis: /u);
-    expect(lines[at + 1]).toBe(`   Link: ${bk.offer.sourceUrl}`);
+    expect(lines[at + 1]).toMatch(/^ {3}Data publikacji: /u);
+    expect(lines.indexOf(`   Otwórz ogłoszenie: ${bk.offer.sourceUrl}`)).toBeLessThan(at);
     expect(html).toContain(escapeHtml(attribution));
 
     // BZP offers carry no such line (D-015): their output is unchanged.
@@ -429,9 +442,10 @@ describe("category labels in the digest (PR-09)", () => {
     expect(text).toContain(
       "   Dlaczego pasuje: Elektryka · Sprzątanie · słowo „oświetlenie” w opisie · mazowieckie\n",
     );
+    // The lead's last line (PR-11, owner's review of PR #17).
     expect(html).toContain(
       "<b>Dlaczego pasuje:</b> Elektryka · Sprzątanie · słowo „oświetlenie” w opisie · " +
-        "mazowieckie<br>",
+        "mazowieckie</p>",
     );
     for (const part of [text, html]) {
       expect(part).not.toMatch(/\bsprzatanie\b|\belektryka\b/u);
@@ -595,6 +609,32 @@ describe("rating links in the digest (PR-12)", () => {
     expect(html).not.toContain("<form");
     expect(html).not.toContain("<i>");
     expect(html).toContain(footer);
+  });
+
+  it("ends each card with the rating links, after the match details (D-030 order)", () => {
+    const { text, html } = buildDigest(profile, [item()], NOW, { overflow: 0, links });
+    const textOrder = [
+      "   Otwórz ogłoszenie: ",
+      "   Szczegóły dopasowania: ",
+      "   Oceń jako trafne: ",
+    ];
+    const textAt = textOrder.map((marker) => text.indexOf(marker));
+    expect(textAt.every((at) => at >= 0)).toBe(true);
+    expect(textAt).toEqual([...textAt].sort((a, b) => a - b));
+    // The one card: from its box to its closing tag.
+    const start = html.indexOf('<div style="border:1px solid');
+    const card = html.slice(start, html.indexOf("</div>", start) + "</div>".length);
+    const htmlOrder = [
+      "<b>Otwórz ogłoszenie</b></a>",
+      "<small>Szczegóły dopasowania:",
+      "<small>Czy to zamówienie pasuje?</small>",
+      "</div>",
+    ];
+    const htmlAt = htmlOrder.map((marker) => card.indexOf(marker));
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(htmlAt.every((at) => at >= 0)).toBe(true);
+    expect(htmlAt).toEqual([...htmlAt].sort((a, b) => a - b));
+    expect(htmlAt[3]).toBe(card.length - "</div>".length);
   });
 
   it("adds no rating link or footer note without the rating link builder", () => {

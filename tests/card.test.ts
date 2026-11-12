@@ -10,6 +10,8 @@ import {
   offerCard,
   SNIPPET_MAX_CHARS,
   whySentence,
+  type CardRow,
+  type OfferCard,
 } from "../src/notifications/card.js";
 import { buildDigest } from "../src/notifications/digest.js";
 import { matchesPage } from "../src/web/pages.js";
@@ -69,6 +71,11 @@ function card(overrides: Partial<Opportunity> = {}, now = NOW) {
   return offerCard({ offer: value, reasons: matchOpportunity(value, profile).reasons }, now);
 }
 
+/** Every labelled row of a card, in its order. */
+function allRows(value: OfferCard): CardRow[] {
+  return [...value.lead, ...value.body, ...value.more];
+}
+
 describe("value (PR-11)", () => {
   it.each([
     ["120000.00", "PLN", "120 000,00 PLN"],
@@ -91,12 +98,12 @@ describe("value (PR-11)", () => {
       "120 000,00 PLN (źródło nie podaje, netto czy brutto)",
     );
     expect(formatValue(null, null)).toBe("nie podano");
-    expect(card().rows[0]).toEqual({
+    expect(card().lead[0]).toEqual({
       label: "Wartość szacunkowa",
       value: "nie podano",
       urgent: false,
     });
-    expect(card({ estimatedValue: "48500.00", currency: "PLN" }).rows[0]?.value).toBe(
+    expect(card({ estimatedValue: "48500.00", currency: "PLN" }).lead[0]?.value).toBe(
       "48 500,00 PLN (źródło nie podaje, netto czy brutto)",
     );
   });
@@ -311,41 +318,55 @@ describe("match details (PR-11)", () => {
 });
 
 describe("offerCard (PR-11)", () => {
-  it("has the rows in the one order every renderer shows", () => {
+  it("groups the rows in the one order every renderer shows (owner's review of PR #17)", () => {
     const bk = card({
       sourceId: "bk",
       estimatedValue: "120000.00",
       currency: "PLN",
-      contact: { name: "Anna Nowak", email: "zamowienia@example.invalid" },
+      contact: { email: "zamowienia@example.invalid", phone: "000 000 000" },
     });
     expect(bk.title).toBe("Modernizacja oświetlenia ulicznego");
-    expect(bk.rows.map((row) => row.label)).toEqual([
+    // How much, until when and why first; then the button (url); then the rest.
+    expect(bk.lead.map((row) => row.label)).toEqual([
       "Wartość szacunkowa",
       "Termin składania ofert",
+      "Dlaczego pasuje",
+    ]);
+    expect(bk.url).toBe("https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/id/1");
+    // The attribution stays with the visible body, never among the folded rows.
+    expect(bk.body.map((row) => row.label)).toEqual([
       "Zamawiający",
       "Lokalizacja",
-      "Data publikacji",
-      "Kontakt",
-      "Dlaczego pasuje",
       "Opis",
       "Źródło",
     ]);
-    expect(bk.rows.find((row) => row.label === "Data publikacji")?.value).toBe("06.11.2026");
-    expect(bk.url).toBe("https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/id/1");
+    expect(bk.more.map((row) => row.label)).toEqual(["Data publikacji", "Kontakt"]);
+    expect(bk.more.find((row) => row.label === "Data publikacji")?.value).toBe("06.11.2026");
+    expect(bk.more.find((row) => row.label === "Kontakt")?.value).toBe(
+      "zamowienia@example.invalid, 000 000 000",
+    );
     expect(bk.matchDetails).toEqual(["CPV: 45310000-3"]);
+  });
+
+  it("keeps a missing publication date in the card as not given", () => {
+    expect(card({ publishedAt: null }).more).toEqual([
+      { label: "Data publikacji", value: "nie podano", urgent: false },
+    ]);
   });
 
   it("marks only the deadline row urgent", () => {
     const soon = card({ deadline: new Date("2026-11-10T09:00:00.000Z") });
-    expect(soon.rows.filter((row) => row.urgent).map((row) => row.label)).toEqual([
-      "Termin składania ofert",
-    ]);
-    expect(card().rows.some((row) => row.urgent)).toBe(false);
+    expect(
+      allRows(soon)
+        .filter((row) => row.urgent)
+        .map((row) => row.label),
+    ).toEqual(["Termin składania ofert"]);
+    expect(allRows(card()).some((row) => row.urgent)).toBe(false);
   });
 
   it("keeps a short description whole, with no full text to unfold", () => {
     const short = card();
-    expect(short.rows.find((row) => row.label === "Opis")?.value).toBe("Wymiana opraw na LED.");
+    expect(short.body.find((row) => row.label === "Opis")?.value).toBe("Wymiana opraw na LED.");
     expect(short.fullDescription).toBeNull();
     const exact = "a".repeat(SNIPPET_MAX_CHARS);
     expect(card({ description: exact }).fullDescription).toBeNull();
@@ -354,7 +375,7 @@ describe("offerCard (PR-11)", () => {
   it("cuts a long description at a word boundary and keeps the whole one apart", () => {
     const words = Array.from({ length: 80 }, (_, index) => `słowo${String(index)}`).join(" ");
     const long = card({ description: `  ${words}\n` });
-    const excerpt = long.rows.find((row) => row.label === "Opis")?.value ?? "";
+    const excerpt = long.body.find((row) => row.label === "Opis")?.value ?? "";
     expect(excerpt.endsWith("…")).toBe(true);
     expect(Array.from(new Intl.Segmenter().segment(excerpt)).length).toBeLessThanOrEqual(
       SNIPPET_MAX_CHARS,
@@ -366,10 +387,13 @@ describe("offerCard (PR-11)", () => {
 
   it("leaves out a missing description and contact, and says a missing link is not given", () => {
     const bare = card({ description: null, contact: null, sourceUrl: "javascript:alert(1)" });
-    expect(bare.rows.map((row) => row.label)).not.toContain("Opis");
-    expect(bare.rows.map((row) => row.label)).not.toContain("Kontakt");
+    expect(allRows(bare).map((row) => row.label)).not.toContain("Opis");
+    expect(allRows(bare).map((row) => row.label)).not.toContain("Kontakt");
     expect(bare.url).toBeNull();
-    expect(bare.rows.at(-1)).toEqual({ label: "Link", value: "nie podano", urgent: false });
+    // Where the button would be: the lead's last row.
+    expect(bare.lead.at(-1)).toEqual({ label: "Link", value: "nie podano", urgent: false });
+    expect(allRows(bare).filter((row) => row.label === "Link")).toHaveLength(1);
+    expect(allRows(card()).map((row) => row.label)).not.toContain("Link");
     expect(bare.fullDescription).toBeNull();
   });
 
@@ -380,7 +404,7 @@ describe("offerCard (PR-11)", () => {
       description: "Opis\tz\ttabulatorami",
     });
     expect(messy.title).toBe("Tytuł z łamaniem");
-    for (const row of messy.rows) expect(row.value).not.toMatch(/[\p{Cc}]/u);
+    for (const row of allRows(messy)) expect(row.value).not.toMatch(/[\p{Cc}]/u);
   });
 });
 
@@ -396,10 +420,14 @@ describe("the same card in the e-mail and on /dopasowania (PR-11 AC3)", () => {
       .replace(/&amp;/g, "&");
   }
 
-  it("shows the same labels and values, in the same order, in every renderer", () => {
+  it.each([
+    ["with a link", "https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl/ogloszenia/1?a=1&b=2"],
+    ["without a usable link", "javascript:alert(1)"],
+  ])("shows the same content, in the same order, in every renderer (%s)", (_case, sourceUrl) => {
     // Every row present, an urgent deadline (tomorrow) and characters that need escaping.
     const value = offer({
       sourceId: "bk",
+      sourceUrl,
       estimatedValue: "120000.00",
       currency: "PLN",
       deadline: new Date("2026-11-10T09:00:00.000Z"),
@@ -407,25 +435,44 @@ describe("the same card in the e-mail and on /dopasowania (PR-11 AC3)", () => {
       contact: { name: "Anna Nowak", email: "zamowienia@example.invalid" },
     });
     const item = { offer: value, reasons: matchOpportunity(value, profile).reasons };
-    const expected = offerCard(item, NOW).rows.map((row) => [
-      row.label,
-      row.urgent ? `PILNE ${row.value}` : row.value,
-    ]);
+    const model = offerCard(item, NOW);
+    const pairs = (rows: readonly CardRow[]) =>
+      rows.map((row) => [row.label, row.urgent ? `PILNE ${row.value}` : row.value]);
+    // The card's order: lead, the button (when there is a link), body, more, the match details.
+    const expected = [
+      ...pairs(model.lead),
+      ...(model.url === null ? [] : [["Otwórz ogłoszenie", model.url]]),
+      ...pairs(model.body),
+      ...pairs(model.more),
+      ["Szczegóły dopasowania", model.matchDetails.join(" · ")],
+    ];
     expect(expected.map(([label]) => label)).toContain("Źródło");
+    expect(expected.map(([label]) => label)).toContain("Kontakt");
     expect(expected[1]?.[1]).toMatch(/^PILNE /u);
+    expect(expected[3]?.[0]).toBe(model.url === null ? "Link" : "Otwórz ogłoszenie");
 
     const { text, html } = buildDigest(profile, [item], NOW, { overflow: 0 });
     const lines = text.split("\n");
     const titleAt = lines.indexOf("1. Modernizacja oświetlenia ulicznego");
     const textRows = lines
-      .slice(titleAt + 1, titleAt + 1 + expected.length)
+      .slice(titleAt + 1, lines.indexOf("", titleAt))
       .map((line) => /^ {3}([^:]+): (.*)$/u.exec(line)?.slice(1, 3));
     expect(textRows).toEqual(expected);
 
-    const mailCard = /<p style="margin:0">(.*?)<\/p>/su.exec(html)?.[1] ?? "";
-    const mailRows = mailCard
-      .split("<br>")
-      .map((part) => /^<b>(.*?):<\/b> (.*)$/su.exec(part)?.slice(1, 3).map(visible));
+    // A row's line, the button or the small match details, in document order.
+    const mailCard = /<div style="border[^>]*>(.*?)<\/div>/su.exec(html)?.[1] ?? "";
+    const mailRows = [
+      ...mailCard.matchAll(
+        /<b>([^<]*?):<\/b> (.*?)(?=<br>|<\/p>)|<a href="([^"]*)"[^>]*><b>([^<]*)<\/b><\/a>|<small>([^:<]*): (.*?)<\/small>/gsu,
+      ),
+    ].map((match) =>
+      (match[1] !== undefined
+        ? [match[1], match[2] ?? ""]
+        : match[3] !== undefined
+          ? [match[4] ?? "", match[3]]
+          : [match[5] ?? "", match[6] ?? ""]
+      ).map(visible),
+    );
     expect(mailRows).toEqual(expected);
 
     const page = matchesPage({
@@ -434,12 +481,20 @@ describe("the same card in the e-mail and on /dopasowania (PR-11 AC3)", () => {
       hasCounties: false,
       stateAt: "2026-11-09 10:00",
       windowDays: 7,
-      items: [offerCard(item, NOW)],
+      items: [model],
       more: 0,
       truncated: false,
     }).html;
-    const pageRows = [...page.matchAll(/<dt>(.*?):<\/dt><dd>(.*?)<\/dd>/gsu)].map((match) =>
-      match.slice(1, 3).map(visible),
+    const pageCard = /<article>(.*?)<\/article>/su.exec(page)?.[1] ?? "";
+    const pageRows = [
+      ...pageCard.matchAll(
+        /<dt>(.*?):<\/dt><dd>(.*?)<\/dd>|<a class="button" href="([^"]*)"[^>]*>(.*?)<\/a>/gsu,
+      ),
+    ].map((match) =>
+      (match[1] !== undefined
+        ? [match[1], (match[2] ?? "").replace(/<\/li><li>/g, " · ")]
+        : [match[4] ?? "", match[3] ?? ""]
+      ).map(visible),
     );
     expect(pageRows).toEqual(expected);
   });

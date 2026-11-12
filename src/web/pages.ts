@@ -5,6 +5,7 @@ import {
   FULL_DESCRIPTION_LABEL,
   DESCRIPTION_LABEL,
   MATCH_DETAILS_LABEL,
+  MORE_LABEL,
   OPEN_LABEL,
   URGENT_WORD,
   type CardRow,
@@ -72,6 +73,7 @@ input[type=text],input[type=email],textarea{box-sizing:border-box;width:100%;fon
 .matches article{border:1px solid var(--line);border-left:.3rem solid var(--accent);border-radius:.4rem;background:var(--card);padding:.2rem 1rem .8rem;margin:1rem 0}
 .matches h2{font-size:1.1rem;margin:.6rem 0 .5rem}
 .matches dl{display:grid;grid-template-columns:max-content 1fr;gap:.2rem .8rem;margin:0}
+.matches dl+dl{margin-top:.8rem}
 .matches dt{font-weight:bold}
 .matches dd{margin:0;overflow-wrap:anywhere}
 .pilne{color:var(--error)}
@@ -802,10 +804,13 @@ function cardRow(row: CardRow, more = ""): string {
 }
 
 /**
- * One offer card (src/notifications/card.ts, the digest's content): the rows
- * in a grid, the full description under the excerpt when it was cut, one
- * "Otwórz ogłoszenie" button and the match details, both disclosures native
- * <details> (no script).
+ * One offer card (src/notifications/card.ts, the digest's content) in the
+ * card's order: the lead rows in a grid, one "Otwórz ogłoszenie" button, the
+ * body rows (the full description under the excerpt when it was cut), then
+ * one native <details> (no script) with the more rows and the match
+ * details. Its summary names what is inside, so the contact is not hidden
+ * from someone who looks for it. The two disclosures are never nested.
+ * With `feedback` (PR-12), the rating form ends the card, after <details>.
  */
 function cardItem(card: MatchesItem): string {
   const full =
@@ -813,31 +818,40 @@ function cardItem(card: MatchesItem): string {
       ? ""
       : `<details><summary>${FULL_DESCRIPTION_LABEL}</summary>` +
         `<p>${escapeHtml(card.fullDescription)}</p></details>`;
-  const rows = card.rows.map((row) => cardRow(row, row.label === DESCRIPTION_LABEL ? full : ""));
+  const lead = card.lead.map((row) => cardRow(row));
+  const body = card.body.map((row) => cardRow(row, row.label === DESCRIPTION_LABEL ? full : ""));
   // Only an http(s) URL (offerCard checked it); a new tab must not reach back to this page.
   const button =
     card.url === null
       ? ""
       : `<p><a class="button" href="${escapeHtml(card.url)}" rel="noopener noreferrer">` +
         `${OPEN_LABEL}</a></p>`;
-  const details =
-    card.matchDetails.length === 0
-      ? ""
-      : `<details><summary>${MATCH_DETAILS_LABEL}</summary><ul>` +
-        `${card.matchDetails.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></details>`;
-  const { feedback } = card;
-  if (feedback === undefined) {
-    return (
-      `<li><article><h2>${escapeHtml(card.title)}</h2><dl>${rows.join("")}</dl>` +
-      `${button}${details}</article></li>`
+  const more = card.more.map((row) => cardRow(row));
+  if (card.matchDetails.length > 0) {
+    more.push(
+      `<dt>${MATCH_DETAILS_LABEL}:</dt><dd><ul>` +
+        `${card.matchDetails.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></dd>`,
     );
   }
+  const inside = [
+    ...card.more.map((row) => row.label),
+    ...(card.matchDetails.length > 0 ? [MATCH_DETAILS_LABEL] : []),
+  ].map((label) => label.toLocaleLowerCase("pl"));
+  const details =
+    more.length === 0
+      ? ""
+      : `<details><summary>${MORE_LABEL} (${escapeHtml(inside.join(", "))})</summary>` +
+        `<dl>${more.join("")}</dl></details>`;
+  const inner =
+    `<h2>${escapeHtml(card.title)}</h2><dl>${lead.join("")}</dl>${button}` +
+    `<dl>${body.join("")}</dl>${details}`;
+  const { feedback } = card;
+  if (feedback === undefined) return `<li><article>${inner}</article></li>`;
   // An anchor for the redirect after rating; a „Nietrafne” card is greyed (and listed last).
   const greyed = feedback.verdict === "not_relevant" ? ' class="nietrafne"' : "";
   return (
     `<li id="oferta-${escapeHtml(feedback.opportunityId)}"><article${greyed}>` +
-    `<h2>${escapeHtml(card.title)}</h2><dl>${rows.join("")}</dl>` +
-    `${button}${details}${feedbackForm(card.title, feedback)}</article></li>`
+    `${inner}${feedbackForm(card.title, feedback)}</article></li>`
   );
 }
 
@@ -881,18 +895,18 @@ export function matchesPage(view: MatchesView): Page {
     );
   } else {
     body.push(
-      paragraph(`${window} Najbliższy termin na górze. Stan na ${view.stateAt} (czas polski).`),
-      paragraph("Lista obejmuje także zamówienia, które już wysłaliśmy e-mailem."),
+      // Short above the list, so the first card's button stays on a phone's first screen.
       paragraph(
-        "Oceń zamówienia przyciskami „Trafne” i „Nietrafne” — pomagasz nam lepiej je dobierać. " +
-          "Ocenione jako nietrafne są wyszarzone i na końcu listy.",
+        `${window} Najbliższy termin na górze. Stan na ${view.stateAt} (czas polski). ` +
+          "Lista obejmuje także zamówienia, które już wysłaliśmy e-mailem.",
       ),
-      `<p>${link("/dopasowania.csv", "Pobierz listę jako plik CSV")} (Excel, Arkusze Google)` +
+      // One line on a 390 px phone; with more offers, one parenthesis says the CSV holds the shown ones.
+      `<p>${link("/dopasowania.csv", "Pobierz listę jako CSV")} (Excel, Arkusze Google` +
         (view.more > 0
-          ? ` (pierwsze ${String(view.items.length)} z ${String(view.items.length + view.more)} ` +
-            "— zawęź profil, aby mieć wszystkie)"
+          ? `; pierwsze ${String(view.items.length)} z ${String(view.items.length + view.more)} ` +
+            "— zawęź profil, aby mieć wszystkie"
           : "") +
-        ".</p>",
+        ").</p>",
       `<ol class="matches">${view.items.map(cardItem).join("")}</ol>`,
     );
     if (view.more > 0) {
@@ -912,6 +926,11 @@ export function matchesPage(view: MatchesView): Page {
       );
     }
     body.push(
+      // Under the list: each card asks „Czy to zamówienie pasuje?” itself.
+      paragraph(
+        "Oceń zamówienia przyciskami „Trafne” i „Nietrafne” — pomagasz nam lepiej je dobierać. " +
+          "Ocenione jako nietrafne są wyszarzone i na końcu listy.",
+      ),
       paragraph(
         "Dane pochodzą z publicznych ogłoszeń. Termin mógł się zmienić, a postępowanie mogło " +
           "zostać odwołane — przed złożeniem oferty sprawdź ogłoszenie w źródle.",

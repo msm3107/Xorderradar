@@ -846,24 +846,36 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
         `<p><a class="button" href="${later.opportunity.sourceUrl}" rel="noopener noreferrer">` +
           "Otwórz ogłoszenie</a></p>",
       );
-      // One native disclosure per offer: the CPV code and the technical reasons.
+      // One native disclosure per offer: the publication date, the CPV code and the technical reasons.
       expect(
         html.match(
-          /<details><summary>Szczegóły dopasowania<\/summary><ul><li>CPV: 45310000-3<\/li><\/ul><\/details>/g,
+          /<dt>Szczegóły dopasowania:<\/dt><dd><ul><li>CPV: 45310000-3<\/li><\/ul><\/dd><\/dl><\/details>/g,
         ),
       ).toHaveLength(2);
-      // The value, the deadline counted from the injected clock, the buyer, place and publication day.
+      // The value, the deadline counted from the injected clock and why first (PR-11, owner's
+      // review of PR #17); the buyer and place after the button; the publication day folded.
       for (const deadline of [soonerDeadline, laterDeadline]) {
         const expected = formatDeadline(deadline, at);
         const marker = expected.urgent ? '<strong class="pilne">PILNE</strong> ' : "";
         expect(html).toContain(
           "<dl><dt>Wartość szacunkowa:</dt><dd>nie podano</dd>" +
             `<dt>Termin składania ofert:</dt><dd>${marker}${expected.text}</dd>` +
-            "<dt>Zamawiający:</dt><dd>Gmina Przykładowa</dd>" +
-            "<dt>Lokalizacja:</dt><dd>woj. mazowieckie</dd>" +
-            `<dt>Data publikacji:</dt><dd>${formatPolishDay(publishedAt)}</dd>`,
+            "<dt>Dlaczego pasuje:</dt>",
         );
       }
+      const count = (needle: string) => html.split(needle).length - 1;
+      expect(
+        count(
+          "Otwórz ogłoszenie</a></p><dl><dt>Zamawiający:</dt><dd>Gmina Przykładowa</dd>" +
+            "<dt>Lokalizacja:</dt><dd>woj. mazowieckie</dd>",
+        ),
+      ).toBe(2);
+      expect(
+        count(
+          "<details><summary>Więcej szczegółów (data publikacji, szczegóły dopasowania)</summary>" +
+            `<dl><dt>Data publikacji:</dt><dd>${formatPolishDay(publishedAt)}</dd>`,
+        ),
+      ).toBe(2);
       // Nine days ahead is never urgent.
       expect(formatDeadline(laterDeadline, at).urgent).toBe(false);
       expect(html).not.toContain('class="note"');

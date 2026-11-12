@@ -232,6 +232,8 @@ describe("PR-10 pages", () => {
       expect(new URL(offer.sourceUrl).hostname).toMatch(/\.invalid$/);
       const email = offer.contact?.email;
       if (email !== undefined) expect(email).toMatch(/@[a-z.]+\.invalid$/);
+      // Real cards never carry a person's name (D-022): neither does the sample.
+      expect(offer.contact?.name).toBeUndefined();
     }
     const view = exampleView(now);
     expect(view.items.map((card) => card.title)).toEqual([
@@ -276,6 +278,9 @@ describe("PR-10 pages", () => {
       "<li>kod CPV spoza naszej listy kategorii — kategorii nie da się sprawdzić</li>",
       // the button
       '<a class="button" href="https://bzp.przyklad.invalid/ogloszenie/1" rel="noopener noreferrer">Otwórz ogłoszenie</a>',
+      // a contact as the sources give it: e-mail and phone, folded with the publication date
+      "<summary>Więcej szczegółów (data publikacji, kontakt, szczegóły dopasowania)</summary>",
+      "<dt>Kontakt:</dt><dd>zamowienia@fundacja.przyklad.invalid, 000 000 000</dd>",
     ]) {
       expect(html).toContain(state);
     }

@@ -292,25 +292,48 @@ node dist/main.js deliveries:pending | jq .
 2. E-mail doszedł — wiersze stają się `sent` (`sent_at` teraz, `attempts + 1`):
 
    ```sh
-   node dist/main.js deliveries:resolve <profileId> --sent --date <digestDate>
+   node dist/main.js deliveries:resolve <profileId> --sent --date <digestDate> --transport <transport>
    ```
 
-3. Nie doszedł — wiersze są usuwane, kolejny `digest` wyśle te oferty jak nowe (jeśli nadal
-   się kwalifikują):
+3. Nie doszedł — wiersze są usuwane:
 
    ```sh
-   node dist/main.js deliveries:resolve <profileId> --failed --date <digestDate>
+   node dist/main.js deliveries:resolve <profileId> --failed --date <digestDate> --transport <transport>
    ```
 
-Bez `--date` komenda obejmuje wszystkie wiersze `pending` profilu. Zmienia tylko wiersze
-`pending` tego profilu, w jednej transakcji, i wypisuje `{"status":"ok",…,"changed":N}`.
+   Oferta wraca dopiero w kolejnym `digest` tym samym transportem i tylko wtedy, gdy w chwili
+   tego przebiegu nadal spełnia warunki kandydata digestu:
+   - status inny niż `closed`/`cancelled` i termin składania ofert nieminiony (`deadline` ≥
+     chwila przebiegu; oferta bez terminu przechodzi);
+   - pierwszy zapis (`first_seen_at`) najwyżej 7 dni (`DIGEST_NEW_DAYS`) przed chwilą
+     przebiegu — starsza oferta nie jest już „nowa” i nie wróci, choć wiersz usunięto;
+   - profil jest aktywny, a oferta pasuje do niego w obecnym kształcie (wynik ≥ 50, żadne
+     słowo wykluczające, region nie jest niezgodny);
+   - mieści się w 50 ofertach na e-mail (`DIGEST_MAX_ITEMS`; najbliższy termin pierwszy,
+     nadmiar w kolejnych dniach, póki spełnia te warunki) i wśród 10 000 kandydatów przebiegu
+     (`DIGEST_CANDIDATE_LIMIT`).
+
+   Najwyżej jeden e-mail dziennie na profil i transport: gdy profil ma już tego dnia (w
+   Polsce) wiersz `sent` albo `pending` w tym transporcie, oferta czeka do następnego dnia.
+   W praktyce oferta wraca w najbliższym przebiegu `digest` z crona o 7:30 (jutro, gdy
+   rozstrzygasz po dzisiejszym przebiegu); wcześniej — tylko po ręcznym `digest` i tylko
+   wtedy, gdy profil nie ma już dziś żadnego innego wiersza `sent` ani `pending` w tym
+   transporcie.
+
+Bez `--date` komenda obejmuje wszystkie wiersze `pending` profilu w danym transporcie.
+Zmienia tylko wiersze `pending` tego profilu i transportu, w jednej transakcji, i wypisuje
+`{"status":"ok",…,"transport":…,"changed":N}`. Transport: `--transport test|smtp` (pole
+`transport` z `deliveries:pending`); bez niego — transport bieżącego `EMAIL_MODE`, jak w
+`digest` (czytane jest samo `EMAIL_MODE`, bez `EMAIL_FROM` i `SMTP_URL`; błędne
+`EMAIL_MODE` → kod `1`, baza nie jest otwierana).
 Odmawia (kod `1`, nic nie zmienia), gdy właśnie trwa `digest` albo inne `deliveries:resolve`
 (ta sama blokada; „a digest run or another deliveries:resolve holds the lock”) — spróbuj
 ponownie po ich końcu — albo gdy profil nie ma pasujących wierszy `pending`. Nie uruchamiaj
 `deliveries:resolve` o minucie crona `digest` (7:30): przy zajętej blokadzie odmawia, a gdy
 sam ją weźmie pierwszy, poranny `digest` jest pominięty (`skipped`) i trzeba go uruchomić
-ręcznie (`node dist/main.js digest`). Brak lub oba przełączniki `--sent`/`--failed` albo zła
-data → kod `2` z opisem użycia, baza nie jest otwierana.
+ręcznie (`node dist/main.js digest`). Brak lub oba przełączniki `--sent`/`--failed`, zła
+data albo `--transport` podany dwa razy, bez wartości lub inny niż `test`/`smtp` → kod `2` z
+opisem użycia, baza nie jest otwierana.
 
 Wysyłki `failed` z wyczerpanymi próbami (`attempts` = 3) nie są już ponawiane. Po usunięciu
 przyczyny (np. poprawiony adres profilu) można je wysłać ponownie, usuwając te wiersze:
@@ -395,7 +418,7 @@ Przy wdrażaniu firmy w pilotaż poleć ocenianie hurtem na `/dopasowania` (jedn
 zamówienie, cała lista na jednej stronie) zamiast pojedynczych linków z e-maili — więcej ocen
 w krótszym czasie.
 
-Klient może też pobrać swoją listę dopasowań jako CSV („Pobierz listę jako plik CSV” na
+Klient może też pobrać swoją listę dopasowań jako CSV („Pobierz listę jako CSV” na
 `/dopasowania`: te same zamówienia i limit co strona, separator `;`, UTF-8 z BOM — otwiera się
 w Excelu i Arkuszach Google).
 

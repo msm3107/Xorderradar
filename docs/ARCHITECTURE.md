@@ -535,8 +535,10 @@ tokenów tekstu, którego nie ma inne liczone słowo; przydział w D-023), `more
 - **Tekst** (`text.ts`): obie strony przez `comparableText` (także bez znaków `\p{Cf}`, np.
   miękkiego łącznika), tokeny = ciągi liter/cyfr; fraza pasuje do kolejnych tokenów; prosta
   odmiana: token słowa ≥ 4 znaki pasuje do tokenu tekstu zaczynającego się od niego bez jednej
-  końcowej samogłoski, krótsze i bez litery (liczby) — tylko dokładnie; ta sama reguła dla
-  wykluczeń. Słowo ≤ 10 tokenów (schemat). Znane ograniczenia i koszt w D-023.
+  końcowej samogłoski, a token ≥ 6 znaków na „nie”/„cie” także do tokenu równego mu bez
+  „ie” (dopełniacz l. mn.: „szkoleń”, „zajęć”; tylko równość, nie prefiks); krótsze i bez
+  litery (liczby) — tylko dokładnie; ta sama reguła dla wykluczeń. Słowo ≤ 10 tokenów
+  (schemat). Znane ograniczenia i koszt w D-023.
 - **Region:** znane województwo oferty spoza województw profilu → niezgodny, niezależnie od
   powiatu (powiaty nigdy nie poszerzają profilu z województwami). W obrębie województwa z
   listy decyduje województwo; zawężania powiatem nie ma (żadne źródło nie podaje jeszcze
@@ -569,8 +571,12 @@ Szczegóły i uzasadnienie: D-010 (SMTP, biblioteka) i D-024 (wybór ofert, idem
   termin, PR-11). HTML ma style inline (e-mail nie dostaje `/styl.css`) bez stałych szarości
   na tekście, żeby ciemny motyw programu pocztowego zostawał czytelny.
 - Karta oferty (PR-11, `card.ts`, czyste, bez I/O): `offerCard({ offer, reasons }, now)` →
-  `{ title, rows, fullDescription, url, matchDetails }` — jedno źródło treści dla tekstu
-  i HTML e-maila, `/dopasowania` i `/przyklad` (każdy tylko inaczej ją układa). Wartość
+  `{ title, lead, url, body, fullDescription, more, matchDetails }` — jedno źródło treści
+  i kolejności dla tekstu i HTML e-maila, `/dopasowania` i `/przyklad` (każdy tylko inaczej
+  ją składa): `lead` (wartość, termin, „Dlaczego pasuje”; bez linku `http(s)` jeszcze „Link:
+  nie podano”), przycisk/linia „Otwórz ogłoszenie” (`url`), `body` (zamawiający,
+  lokalizacja, wyciąg opisu, atrybucja BK — zawsze widoczna), `more` (data publikacji,
+  kontakt) i `matchDetails` na końcu (D-030). Wartość
   z zapisanego tekstu `numeric` (`formatAmount`, nigdy przez float), termin w czasie polskim
   z dniem tygodnia ze stałej tabeli i odległością w dniach kalendarzowych
   (`formatDeadline`; „PILNE” dla 0–2 dni), „Dlaczego pasuje” jednym zdaniem
@@ -695,9 +701,11 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
 - Strona dopasowań (`/dopasowania`): `readDigestCandidates` + `matchingItems` (jak digest),
   kolejność `digestOrder` (najbliższy termin), najwyżej 50 (`MATCHES_SHOWN`) + „I N
   kolejnych…”, ta sama karta co e-mail (`offerCard`, §4.5), przycisk „Otwórz ogłoszenie”
-  tylko dla `http(s)` z `rel="noopener noreferrer"`. Wiersze w `<dl>` (siatka dwóch kolumn,
-  przy wąskim ekranie jedna); pełny opis w `<details>` „Pełny opis” tylko, gdy wyciąg jest
-  ucięty, CPV i powody techniczne w `<details>` „Szczegóły dopasowania” (bez JS). Pusty
+  tylko dla `http(s)` z `rel="noopener noreferrer"`, zaraz po `lead`. Grupy wierszy w `<dl>`
+  (siatka dwóch kolumn, przy wąskim ekranie jedna); pełny opis w `<details>` „Pełny opis”
+  tylko, gdy wyciąg jest ucięty; data publikacji, kontakt, CPV i powody techniczne w jednym
+  `<details>` „Więcej szczegółów (…)” — podsumowanie wymienia, co jest w środku (bez JS,
+  bez zagnieżdżania). Pusty
   stan objaśnia okno 7 dni; profil nieaktywny dostaje notkę; wiersz profilu odrzucany przez
   schemat → prośba o poprawkę w ustawieniach. Koszt: liczone na żądanie w procesie `serve`;
   `matchingItems` oddaje pętlę zdarzeń po ok. 20 ms pracy (`MATCH_YIELD_AFTER_MS`), a serwer liczy
@@ -710,8 +718,8 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   `matchesTooManyPage` z `Retry-After: 5`, bez kolejki (PR-07A, D-028).
 - Oceny i eksport (PR-12, D-032): `/dopasowania` czyta oceny profilu dla całej listy jednym
   zapytaniem (`feedbackVerdicts`, `= ANY(uuid[])`), przesuwa „nietrafne” na koniec (kolejność
-  digestu w obu częściach) przed obcięciem do `MATCHES_SHOWN` i pod każdą kartą pokazuje
-  formularz `POST /dopasowania/ocena` (sesja + CSRF; karta „nietrafne” wyszarzona, kotwica
+  digestu w obu częściach) przed obcięciem do `MATCHES_SHOWN` i na końcu każdej karty (po
+  `<details>` „Więcej szczegółów”) pokazuje formularz `POST /dopasowania/ocena` (sesja + CSRF; karta „nietrafne” wyszarzona, kotwica
   `#oferta-<id>`; przycisk bieżącej oceny `aria-pressed="true"`; ukryte `nastepna` — id
   następnej karty, kotwica powrotu po „Nietrafne”, sprawdzane wzorcem uuid, nigdy nie wybiera
   ocenianej oferty). Ocenić z listy można ofertę wysłaną profilowi (`wasDelivered`) albo
@@ -1114,18 +1122,20 @@ release failed`. `ingest` i `digest` nie blokują się wzajemnie.
   `{"status":"ok","tokens":…,"sessions":…}`. Kontrola schematu jak w `access:link`, bez
   `PUBLIC_BASE_URL`; nieznany profil → kod 1.
 - `digest` przy ustawionym `PUBLIC_BASE_URL` dodaje do e-maili linki (§4.5), od PR-12 także
-  „Trafne”/„Nietrafne” pod każdą kartą (jeden token `feedback` na e-mail, 60 dni).
+  „Trafne”/„Nietrafne” na końcu każdej karty, po szczegółach dopasowania (jeden token
+  `feedback` na e-mail, 60 dni).
 - `feedback:report [--since YYYY-MM-DD]` (PR-12, D-032) — `countFeedback` (dwa `GROUP BY`
   w jednej migawce `REPEATABLE READ`: na profil i na zestaw kodów CPV oferty; `--since` to
   północ czasu polskiego, porównywana z `updated_at`) → `buildFeedbackReport` (kategorie MVP
   z CPV, precyzja `null` przy zerze ocen). Jedna linia JSON z id, kategoriami i liczbami.
   Zły argument → kod 2; nieaktualny schemat albo baza niedostępna → kod 1.
-- `deliveries:pending` i `deliveries:resolve <profileId> --sent|--failed [--date]` (PR-09,
-  D-024) — decyzja operatora o wierszach `pending` (`deliveries-repository.ts`):
+- `deliveries:pending` i `deliveries:resolve <profileId> --sent|--failed [--date] [--transport]`
+  (PR-09, D-024) — decyzja operatora o wierszach `pending` (`deliveries-repository.ts`):
   `listPendingDeliveries` (grupy profil × transport × dzień digestu, tylko id, daty i liczby,
   najwyżej 1000) i `resolvePendingDeliveries` (jedna transakcja: najpierw
   `pg_try_advisory_xact_lock(DIGEST_LOCK_KEY)` bez czekania — zajęty → odmowa, kod 1; potem
-  `UPDATE … sent` albo `DELETE` tylko wierszy `pending` profilu i dnia; 0 zmienionych → kod 1).
+  `UPDATE … sent` albo `DELETE` tylko wierszy `pending` profilu, transportu i dnia; transport
+  domyślnie z samego `EMAIL_MODE`, `loadEmailMode`; 0 zmienionych → kod 1).
 - `status [--notify]` (PR-07A, D-028) — raport operatora, jedna linia JSON na stdout; tylko
   odczyt, bez blokady. Kolejność kontroli: argumenty (kod 2) → konfiguracja (z `--notify`:
   `OPERATOR_EMAIL` i zmienne e-mail jak w `digest`, kod 1) → baza. Oczekujące migracje →

@@ -3,7 +3,7 @@ import type { CompanyProfile } from "../src/domain/company-profile.js";
 import type { Opportunity } from "../src/domain/opportunity.js";
 import { MVP_CATEGORIES, VOIVODESHIPS } from "../src/domain/vocabulary.js";
 import { matchOpportunity } from "../src/matching/match.js";
-import { offerCard } from "../src/notifications/card.js";
+import { MORE_LABEL, offerCard } from "../src/notifications/card.js";
 import {
   errorPage,
   feedbackConfirmPage,
@@ -244,13 +244,13 @@ describe("matchesPage", () => {
     expect(html).toContain('<a href="/profil">Twój profil</a>');
   });
 
-  it("shows the card's rows in the digest's order, the button, then the match details", () => {
+  it("shows value, deadline and why, the button, the rest, then one disclosure with the details", () => {
     const full: Opportunity = {
       ...offer,
       estimatedValue: "120000.00",
       currency: "PLN",
       description: "Wymiana opraw <LED> & słupów",
-      contact: { name: "Anna Nowak", email: "zamowienia@example.invalid" },
+      contact: { email: "zamowienia@example.invalid", phone: "000 000 000" },
     };
     const { html } = matchesPage(view({ items: [cardOf(full)] }));
     expect(html).not.toMatch(NO_SCRIPT);
@@ -259,15 +259,26 @@ describe("matchesPage", () => {
       "<h2>Modernizacja oświetlenia</h2><dl>" +
         "<dt>Wartość szacunkowa:</dt><dd>120\u00a0000,00 PLN (źródło nie podaje, netto czy brutto)</dd>" +
         "<dt>Termin składania ofert:</dt><dd>05.11.2026 (czw) 12:00 — za 4 dni</dd>" +
+        "<dt>Dlaczego pasuje:</dt><dd>Elektryka · słowo „oświetlenie” w tytule · mazowieckie</dd></dl>" +
+        '<p><a class="button" href="https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/id/1" ' +
+        'rel="noopener noreferrer">Otwórz ogłoszenie</a></p><dl>' +
         "<dt>Zamawiający:</dt><dd>Gmina Przykładowa</dd>" +
         "<dt>Lokalizacja:</dt><dd>Przykładowo, woj. mazowieckie</dd>" +
-        "<dt>Data publikacji:</dt><dd>30.10.2026</dd>" +
-        "<dt>Kontakt:</dt><dd>Anna Nowak, zamowienia@example.invalid</dd>" +
-        "<dt>Dlaczego pasuje:</dt><dd>Elektryka · słowo „oświetlenie” w tytule · mazowieckie</dd>" +
         "<dt>Opis:</dt><dd>Wymiana opraw &lt;LED&gt; &amp; słupów</dd></dl>" +
-        '<p><a class="button" href="https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/id/1" ' +
-        'rel="noopener noreferrer">Otwórz ogłoszenie</a></p>' +
-        "<details><summary>Szczegóły dopasowania</summary><ul><li>CPV: 45310000-3</li></ul></details>",
+        "<details><summary>Więcej szczegółów (data publikacji, kontakt, szczegóły dopasowania)</summary><dl>" +
+        "<dt>Data publikacji:</dt><dd>30.10.2026</dd>" +
+        "<dt>Kontakt:</dt><dd>zamowienia@example.invalid, 000 000 000</dd>" +
+        "<dt>Szczegóły dopasowania:</dt><dd><ul><li>CPV: 45310000-3</li></ul></dd></dl></details>",
+    );
+    // One disclosure for the details, never one inside another.
+    expect(card.match(/<details>/g)).toHaveLength(1);
+  });
+
+  it("names only what the disclosure holds in its summary", () => {
+    const { html } = matchesPage(view());
+    expect(html).toContain(
+      "<details><summary>Więcej szczegółów (data publikacji, szczegóły dopasowania)</summary><dl>" +
+        "<dt>Data publikacji:</dt><dd>30.10.2026</dd>",
     );
   });
 
@@ -309,12 +320,12 @@ describe("matchesPage", () => {
       "<dt>Dlaczego pasuje:</dt><dd>Elektryka · słowo „oświetlenie” w tytule</dd>",
     );
     expect(html).toContain(
-      "<details><summary>Szczegóły dopasowania</summary><ul><li>CPV: 45310000-3</li>" +
-        "<li>region: nieznany — źródło nie podaje województwa</li></ul></details>",
+      "<dt>Szczegóły dopasowania:</dt><dd><ul><li>CPV: 45310000-3</li>" +
+        "<li>region: nieznany — źródło nie podaje województwa</li></ul></dd></dl></details>",
     );
   });
 
-  it("shows a Baza Konkurencyjności offer's attribution in the visible part, before the link", () => {
+  it("shows a Baza Konkurencyjności offer's attribution in the visible part, after the link", () => {
     const bk: Opportunity = {
       ...offer,
       sourceId: "bk",
@@ -324,10 +335,12 @@ describe("matchesPage", () => {
     const { html } = matchesPage(view({ items: [cardOf(bk)] }));
     const [visible = "", folded = ""] = html.split("<details>");
     expect(visible).toContain(
-      "<dt>Źródło:</dt><dd>Baza Konkurencyjności, Ministerstwo Funduszy i Polityki Regionalnej; " +
-        "pobrano 2026-10-30; dane przetworzone: skrócone i ujednolicone</dd></dl>" +
-        '<p><a class="button" href="https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl/ogloszenia/296920" ' +
-        'rel="noopener noreferrer">Otwórz ogłoszenie</a></p>',
+      '<p><a class="button" href="https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl/ogloszenia/296920" ' +
+        'rel="noopener noreferrer">Otwórz ogłoszenie</a></p><dl>' +
+        "<dt>Zamawiający:</dt><dd>Gmina Przykładowa</dd>" +
+        "<dt>Lokalizacja:</dt><dd>Przykładowo, woj. mazowieckie</dd>" +
+        "<dt>Źródło:</dt><dd>Baza Konkurencyjności, Ministerstwo Funduszy i Polityki Regionalnej; " +
+        "pobrano 2026-10-30; dane przetworzone: skrócone i ujednolicone</dd></dl>",
     );
     expect(folded).not.toContain("Źródło");
     // A BZP card has none.
@@ -366,6 +379,8 @@ describe("matchesPage", () => {
     );
     expect(html).toContain("<dd>&lt;b&gt;Gmina&lt;/b&gt;</dd>");
     expect(html).toContain("<dt>Link:</dt><dd>nie podano</dd></dl>");
+    // Where the button would be: right after "Dlaczego pasuje", before the buyer.
+    expect(html).toContain("</dd><dt>Link:</dt><dd>nie podano</dd></dl><dl><dt>Zamawiający:</dt>");
     expect(html).not.toContain('class="button"');
 
     const quoted = { ...offer, sourceUrl: 'https://example.invalid/a?b="><script>' };
@@ -418,7 +433,7 @@ describe("matchesPage", () => {
 
   it("says the list includes offers already sent by e-mail", () => {
     expect(matchesPage(view()).html).toContain(
-      "<p>Lista obejmuje także zamówienia, które już wysłaliśmy e-mailem.</p>",
+      " (czas polski). Lista obejmuje także zamówienia, które już wysłaliśmy e-mailem.</p>",
     );
   });
 
@@ -485,6 +500,30 @@ describe("matchesPage", () => {
       );
     });
 
+    it("ends the card with the form, after „Więcej szczegółów” (D-030 order)", () => {
+      // Also with a cut description, whose „Pełny opis” <details> comes first.
+      const cut = { ...offer, description: "Wymiana opraw. ".repeat(40) };
+      expect(cardOf(cut).fullDescription).not.toBeNull();
+      for (const value of [offer, cut]) {
+        const { html } = matchesPage(view({ items: [rated(value, null)] }));
+        // The one card: from its anchor to the end of its article.
+        const start = html.indexOf(`<li id="oferta-${value.id}">`);
+        const card = html.slice(start, html.indexOf("</article>", start) + "</article>".length);
+        const at = [
+          card.indexOf('class="button"'),
+          card.indexOf(`<summary>${MORE_LABEL}`),
+          // The last </details>: the „Więcej szczegółów” one, not „Pełny opis”.
+          card.lastIndexOf("</details>"),
+          card.indexOf('<form method="post" action="/dopasowania/ocena"'),
+          card.indexOf("</article>"),
+        ];
+        expect(start).toBeGreaterThanOrEqual(0);
+        expect(at.every((index) => index >= 0)).toBe(true);
+        expect(at).toEqual([...at].sort((a, b) => a - b));
+        expect(at[4]).toBe(card.length - "</article>".length);
+      }
+    });
+
     it("shows the current rating and greys a „Nietrafne” card", () => {
       const relevant = matchesPage(view({ items: [rated(offer, "relevant")] })).html;
       expect(relevant).toContain("<p>Twoja ocena: <strong>trafne</strong>. Możesz ją zmienić.</p>");
@@ -537,12 +576,14 @@ describe("matchesPage", () => {
 
     it("explains the rating and links the CSV export", () => {
       const { html } = matchesPage(view({ items: [rated(offer, null)] }));
-      expect(html).toContain(
+      const rating =
         "<p>Oceń zamówienia przyciskami „Trafne” i „Nietrafne” — pomagasz nam lepiej je " +
-          "dobierać. Ocenione jako nietrafne są wyszarzone i na końcu listy.</p>",
-      );
+        "dobierać. Ocenione jako nietrafne są wyszarzone i na końcu listy.</p>";
+      expect(html).toContain(rating);
+      // Under the list, so the first card stays on a phone's first screen (the CSV link above it).
+      expect(html.indexOf(rating)).toBeGreaterThan(html.indexOf("</ol>"));
       expect(html).toContain(
-        '<p><a href="/dopasowania.csv">Pobierz listę jako plik CSV</a> (Excel, Arkusze Google).</p>',
+        '<p><a href="/dopasowania.csv">Pobierz listę jako CSV</a> (Excel, Arkusze Google).</p>',
       );
     });
 
@@ -550,8 +591,8 @@ describe("matchesPage", () => {
       const items = Array.from({ length: 50 }, () => rated(offer, null));
       const { html } = matchesPage(view({ items, more: 7 }));
       expect(html).toContain(
-        '<p><a href="/dopasowania.csv">Pobierz listę jako plik CSV</a> (Excel, Arkusze Google)' +
-          " (pierwsze 50 z 57 — zawęź profil, aby mieć wszystkie).</p>",
+        '<p><a href="/dopasowania.csv">Pobierz listę jako CSV</a> (Excel, Arkusze Google' +
+          "; pierwsze 50 z 57 — zawęź profil, aby mieć wszystkie).</p>",
       );
     });
   });

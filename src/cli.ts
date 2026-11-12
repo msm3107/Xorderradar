@@ -10,6 +10,7 @@ import {
   loadConfig,
   loadContactEmail,
   loadEmailConfig,
+  loadEmailMode,
   loadOperatorEmail,
   loadPublicBaseUrl,
   loadStatusConfig,
@@ -34,7 +35,7 @@ import {
   pingDatabase,
 } from "./infrastructure/db/database.js";
 import { describeDatabaseFailure, formatDatabaseFailure } from "./infrastructure/db/errors.js";
-import type { Database } from "./infrastructure/db/schema.js";
+import type { Database, DeliveryTransport } from "./infrastructure/db/schema.js";
 import { HttpClientError } from "./infrastructure/http/errors.js";
 import {
   SafeHttpClient,
@@ -488,16 +489,19 @@ Commands:
             profile, transport and digest day: profileId, transport, digestDate, offers and
             the oldest claim time (oldestCreatedAt). Ids and counts only. Requires an
             up-to-date schema (migrate).
-  deliveries:resolve <profileId> --sent|--failed [--date YYYY-MM-DD]
-            Record the operator's decision on the profile's pending deliveries (all of them,
-            or those of one digest day), in one transaction; other rows never change.
-            --sent    the e-mail arrived: the rows become sent (sent_at now, attempts + 1)
-            --failed  it did not: the rows are deleted, so the next digest sends those offers
-                      as new (if they still qualify)
-            --date    only the pending rows of this digest day
-            Prints the number of rows changed as JSON. Refused (exit 1, nothing changed)
-            while a digest or another deliveries:resolve runs (the digest lock) or when
-            there is no pending row to change.
+  deliveries:resolve <profileId> --sent|--failed [--date YYYY-MM-DD] [--transport test|smtp]
+            Record the operator's decision on the profile's pending deliveries of one
+            transport (all of them, or those of one digest day), in one transaction; other
+            rows never change.
+            --sent       the e-mail arrived: the rows become sent (sent_at now, attempts + 1)
+            --failed     it did not: the rows are deleted, so the next digest sends those
+                         offers as new (if they still qualify)
+            --date       only the pending rows of this digest day
+            --transport  only the rows of this transport (default: EMAIL_MODE's, like digest;
+                         EMAIL_FROM and SMTP_URL are not needed)
+            Prints the transport and the number of rows changed as JSON. Refused (exit 1,
+            nothing changed) while a digest or another deliveries:resolve runs (the digest
+            lock) or when there is no pending row to change.
             Exactly one of --sent and --failed (exit 2 otherwise).
   serve     Run the web server (profile access through e-mail links, one-click
             unsubscribe) until SIGINT/SIGTERM. Listens on WEB_HOST:WEB_PORT (default
@@ -621,8 +625,10 @@ interface MatchPreviewArgs {
 interface ResolveArgs {
   readonly profileId: string;
   readonly outcome: "sent" | "failed";
-  /** null: every pending row of the profile. */
+  /** null: every pending row of the profile and transport. */
   readonly digestDate: string | null;
+  /** null: not given — the transport of EMAIL_MODE, read with the configuration. */
+  readonly transport: DeliveryTransport | null;
 }
 
 interface DigestArgs {
@@ -815,8 +821,8 @@ function parseDigestArgs(args: readonly string[]): DigestArgs | string {
 }
 
 /**
- * `deliveries:resolve <profileId> --sent|--failed [--date YYYY-MM-DD]`;
- * returns the parsed arguments or a usage error message.
+ * `deliveries:resolve <profileId> --sent|--failed [--date YYYY-MM-DD]
+ * [--transport test|smtp]`; returns the parsed arguments or a usage error message.
  */
 function parseResolveArgs(args: readonly string[]): ResolveArgs | string {
   const [id, ...options] = args;
@@ -824,6 +830,7 @@ function parseResolveArgs(args: readonly string[]): ResolveArgs | string {
   if (profileId === null) return 'Command "deliveries:resolve" needs a profile id (uuid).';
   let outcome: "sent" | "failed" | null = null;
   let digestDate: string | null = null;
+  let transport: DeliveryTransport | null = null;
   for (let index = 0; index < options.length; index++) {
     const arg = options[index] ?? "";
     if (arg === "--sent" || arg === "--failed") {
@@ -836,12 +843,19 @@ function parseResolveArgs(args: readonly string[]): ResolveArgs | string {
       if (!isCalendarDate(value)) return "--date must be a calendar date YYYY-MM-DD.";
       digestDate = value;
       index++;
+    } else if (arg === "--transport") {
+      if (transport !== null) return "Option --transport given twice.";
+      const value = options[index + 1];
+      if (value === undefined) return "Option --transport needs a value.";
+      if (value !== "test" && value !== "smtp") return "--transport must be test or smtp.";
+      transport = value;
+      index++;
     } else {
       return `Unexpected argument: ${JSON.stringify(arg)}`;
     }
   }
   if (outcome === null) return "Give exactly one of --sent and --failed.";
-  return { profileId, outcome, digestDate };
+  return { profileId, outcome, digestDate, transport };
 }
 
 /**
@@ -992,9 +1006,10 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
   }
 
   let config: AppConfig;
-  // Only `digest` and `serve` (the access e-mails, D-031) read the e-mail
-  // variables, only `serve` the listener and CONTACT_EMAIL and only the link
-  // builders PUBLIC_BASE_URL; checked before the database is opened.
+  // Only `digest`, `serve` (the access e-mails, D-031) and `status --notify` read
+  // the e-mail variables (with the SMTP secrets; `deliveries:resolve` reads
+  // EMAIL_MODE alone, below), only `serve` the listener and CONTACT_EMAIL and only
+  // the link builders PUBLIC_BASE_URL; checked before the database is opened.
   let emailConfig: EmailConfig | null = null;
   let webConfig: WebConfig | null = null;
   let contactEmail: string | null = null;
@@ -1003,11 +1018,16 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
   // only `status` BACKUP_DIR and HEARTBEAT_URL.
   let operatorEmail: string | null = null;
   let statusConfig: StatusConfig | null = null;
+  // `deliveries:resolve` without --transport reads EMAIL_MODE alone (no SMTP secrets).
+  let resolveTransport: DeliveryTransport | null = null;
   const notify = invocation.command === "status" && invocation.notify;
   try {
     config = loadConfig(io.env);
     if (invocation.command === "digest" || invocation.command === "serve" || notify) {
       emailConfig = loadEmailConfig(io.env);
+    }
+    if (invocation.command === "deliveries:resolve") {
+      resolveTransport = invocation.resolve.transport ?? loadEmailMode(io.env);
     }
     if (notify) operatorEmail = loadOperatorEmail(io.env);
     if (invocation.command === "status") statusConfig = loadStatusConfig(io.env);
@@ -1074,7 +1094,8 @@ async function runCommand(args: readonly string[], io: CliIo, deps: CliDeps): Pr
       case "feedback:report":
         return await runFeedbackReport(invocation.since, database, io);
       case "deliveries:resolve":
-        return await runDeliveriesResolve(invocation.resolve, database, io);
+        if (resolveTransport === null) throw new Error("the transport was not determined");
+        return await runDeliveriesResolve(invocation.resolve, resolveTransport, database, io);
       case "serve":
         if (webConfig === null || emailConfig === null) {
           throw new Error("web configuration was not loaded");
@@ -1699,12 +1720,14 @@ async function runFeedbackReport(
 
 /**
  * `deliveries:resolve`: the operator's decision on the profile's pending
- * deliveries (README „Wynik niepewny”, D-024), in one transaction under the
- * digest lock. Exit 1, nothing changed, while a digest or another
- * deliveries:resolve runs or when no pending row matches. Prints the number of rows changed as one JSON line.
+ * deliveries of one transport (README „Wynik niepewny”, D-024), in one
+ * transaction under the digest lock. Exit 1, nothing changed, while a digest
+ * or another deliveries:resolve runs or when no pending row matches. Prints
+ * the transport and the number of rows changed as one JSON line.
  */
 async function runDeliveriesResolve(
   args: ResolveArgs,
+  transport: DeliveryTransport,
   database: CliDatabase,
   io: CliIo,
 ): Promise<ExitCode> {
@@ -1718,7 +1741,12 @@ async function runDeliveriesResolve(
       io.stderr(`Deliveries not resolved: ${notReady}.\n`);
       return ExitCode.Failure;
     }
-    result = await database.resolvePendingDeliveries(args);
+    result = await database.resolvePendingDeliveries({
+      profileId: args.profileId,
+      transport,
+      digestDate: args.digestDate,
+      outcome: args.outcome,
+    });
   } catch (error: unknown) {
     const failure = describeDatabaseFailure(error);
     if (failure.reason === "unknown") throw error;
@@ -1734,11 +1762,14 @@ async function runDeliveriesResolve(
     return ExitCode.Failure;
   }
   if (result.changed === 0) {
+    // Names the transport: rows of the other one may still be pending (e.g.
+    // after EMAIL_MODE changed), and "no pending deliveries" alone would be false.
     io.stderr(
       args.digestDate === null
-        ? "Deliveries not resolved: the profile has no pending deliveries; nothing was changed.\n"
-        : "Deliveries not resolved: the profile has no pending deliveries of that day; " +
-            "nothing was changed.\n",
+        ? `Deliveries not resolved: the profile has no pending deliveries over transport ` +
+            `"${transport}"; nothing was changed.\n`
+        : `Deliveries not resolved: the profile has no pending deliveries of that day over ` +
+            `transport "${transport}"; nothing was changed.\n`,
     );
     return ExitCode.Failure;
   }
@@ -1746,6 +1777,7 @@ async function runDeliveriesResolve(
     `${JSON.stringify({
       status: "ok",
       outcome: args.outcome,
+      transport,
       digestDate: args.digestDate,
       changed: result.changed,
     })}\n`,
