@@ -2186,3 +2186,101 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     `TimeoutStopSec` (serwer HTTP, transport SMTP i pula połączeń z bazą są już zamknięte);
   - teoretyczny cykl blokad z godzinnym sprzątaniem: zapis i potwierdzenie ponawiają raz,
     „Wyślij mi link” nie (błąd → log `failed`, klient prosi znowu).
+
+## D-032 — Ocena trafności („Trafne”/„Nietrafne”) i eksport CSV
+
+- **Status:** Accepted (PR-12; etap 4 LAUNCH_ROADMAP)
+- **Kontekst:** pilotaż ma pokazać, czy dopasowania są trafne. Bez informacji zwrotnej od
+  klientów operator zna tylko liczbę wysłanych zamówień, nie ich jakość. Klienci chcą też
+  przenieść listę dopasowań do arkusza.
+- **Decyzja:**
+  - **Tabela `match_feedback`** (migracja `0009_match_feedback`): klucz główny
+    `(profile_id, opportunity_id)`, `verdict` ∈ {`relevant`, `not_relevant`}, `created_at`,
+    `updated_at` (`updated_at >= created_at`); obie FK `ON DELETE CASCADE`. Tylko id, werdykt
+    i czasy — bez tytułu, adresu czy treści. Zapis to jedno atomowe
+    `INSERT … ON CONFLICT (profile_id, opportunity_id) DO UPDATE`: powtórzony lub równoległy
+    POST zostawia jeden wiersz z ostatnim werdyktem; `updated_at` zmienia się tylko przy
+    zmianie werdyktu.
+  - **Linki w e-mailu:** na końcu każdej karty digestu — po „Szczegółach dopasowania”, które
+    w kolejności karty z D-030 („Kolejność karty oferty”) są jej ostatnią linią — dwa zwykłe
+    linki (bez formularza — klienci poczty je blokują) „Trafne”/„Nietrafne” z `aria-label`
+    „Trafne: <tytuł>”, a w części tekstowej linie „Oceń jako trafne/nietrafne: <URL>”. Adres
+    `/ocena/<token>/<id oferty>/<trafne|nietrafne>`. Token: cel `feedback`, jeden na e-mail
+    (wydawany w `issueDigestTokens` razem z linkiem logowania i wypisu), wielokrotnego użytku,
+    ważny 60 dni (gałąź `ELSE` istniejącego `access_tokens_expiry_check`), w bazie tylko
+    SHA-256, nigdy w logach. Usuwany przez `access:revoke`, zmianę adresu i usunięcie
+    profilu (jak każdy token profilu).
+  - **GET/HEAD** linku tylko czyta (skaner poczty niczego nie zapisuje) i pokazuje stronę z
+    tytułem zamówienia, obecną oceną i przyciskiem (gdy zapisana ocena jest już ta z linku:
+    „To zamówienie ma już ocenę: …” i tylko przycisk przeciwnej oceny — tylko dla ważnego
+    linku, więc 404 się nie zmienia); **POST** (login-CSRF jak `/dostep`:
+    `Origin` = `PUBLIC_BASE_URL`, puste ciało) zapisuje w jednym zapytaniu
+    `INSERT … SELECT`, które sprawdza token (cel, ważność) i dostawę.
+  - **Zakres tokenu:** wyłącznie zamówienia z `deliveries` tego profilu o statusie `pending`
+    albo `sent` (`failed` nie dotarło). Nieznany, wygasły lub o innym celu token, cudza lub
+    nieistniejąca oferta, niepoprawny werdykt, id spoza wzorca uuid (małe litery) i ścieżka o
+    innej liczbie segmentów dają tę samą stronę 404 „Ten link nie działa” (ta sama treść i
+    nagłówki — bez wyroczni). Parametry ścieżki są sprawdzane przed bazą (lista dozwolonych
+    werdyktów, wzorzec uuid, kształt tokenu). Strona 404 na trasie `/ocena/…` ma jedno
+    dodatkowe zdanie („Zamówienia ocenisz też na stronie „Pasujące zamówienia” po
+    zalogowaniu.”) — zależne tylko od trasy, identyczne dla każdej odmowy.
+  - **`/dopasowania`:** na końcu każdej karty, po `<details>` „Więcej szczegółów (…)” z
+    D-030, formularz POST `/dopasowania/ocena` (sesja + CSRF,
+    pola `csrf`, `oferta`, `werdykt` i opcjonalne `nastepna`) z dwoma przyciskami o etykietach
+    dostępnych; po ocenie przycisk bieżącej oceny ma `aria-pressed="true"` i pogrubienie. Kolejność
+    sprawdzeń: brak sesji 401 → zły CSRF 403 → zły formularz, werdykt lub id 400 → oferta
+    niewysłana profilowi i niepasująca do niego teraz 404 (także oferta innego profilu) →
+    zapis i 303 na `/dopasowania#oferta-<id>`; po „Nietrafne” (karta idzie na koniec) na
+    kotwicę karty, która była następna (`nastepna`, tylko gdy ma kształt uuid małymi literami;
+    inaczej jak wyżej). `nastepna` wybiera wyłącznie kotwicę, nigdy ocenianą ofertę.
+    **„Pasuje teraz”** znaczy: oferta przechodzi dziś reguły dopasowania profilu
+    (`matchOpportunity` — kategorie, słowa, regiony, próg), **niezależnie od wieku** — także
+    starsza niż okno 7 dni listy, której klient nigdy nie widział (id trzeba by zgadnąć albo
+    znać spoza listy). Skutek ograniczony do własnych ocen klienta: może ocenić tylko oferty
+    zgodne ze swoim profilem, zapisuje się wyłącznie jego wiersz, a w `feedback:report`
+    dodaje szum tylko do własnego wiersza (i do sum, w które ten wiersz wchodzi). Oceny wczytywane jednym zapytaniem
+    (`= ANY(uuid[])`) dla całej listy. Oceny „nietrafne” są wyszarzone i przesunięte na
+    koniec (kolejność digestu zachowana w obu częściach) przed obcięciem do
+    `MATCHES_SHOWN`.
+  - **`GET /dopasowania.csv`** (sesja, ten sam slot dopasowań co strona): te same wiersze,
+    kolejność i limit co `/dopasowania`; UTF-8 z BOM, separator `;`, wiersze CRLF, cudzysłowy
+    RFC 4180; komórka zaczynająca się od `= + - @`, tabulatora albo CR dostaje wiodący `'`
+    (neutralizacja formuł, OWASP CSV injection). Brakujące wartości to puste komórki (nigdy
+    0). Kwota z przecinkiem dziesiętnym bez zaokrąglania; w kolumnie „Źródło” atrybucja BK
+    (D-030) albo „Biuletyn Zamówień Publicznych”; kolumna „Ocena”. `Content-Disposition: attachment;
+filename="dopasowania-YYYY-MM-DD.csv"`, `Cache-Control: no-store`.
+  - **`feedback:report [--since YYYY-MM-DD]`:** jedna linia JSON: liczby ocen łącznie, na
+    profil (id) i na kategorię MVP ofert (z kodów CPV, D-022; oferta w dwóch kategoriach
+    liczy się w obu, oferta bez kategorii pod `null`) oraz precyzja = trafne / wszystkie,
+    zaokrąglona do 3 miejsc, **`null` przy zerze ocen** (nigdy 0). `--since` to dzień w
+    Polsce (oceny z `updated_at` od północy czasu polskiego). Oba odczyty w jednej migawce
+    (`REPEATABLE READ`). Bez adresów i tytułów. Kody wyjścia jak inne komendy (0/1/2).
+  - **Pokrycie w `feedback:report` (decyzja właściciela po review, 2026-11-12):** `total` i
+    każdy profil mają `delivered` (różne zamówienia z dostawą `sent`; od `--since` wg
+    `sent_at`), `ratedDelivered` (z nich ocenione, dowolnym werdyktem i kiedykolwiek) i
+    `coverage` = ocenione / wysłane (3 miejsca, `null` przy zerze wysłanych); profile bez ocen,
+    ale z wysłanymi ofertami, są na liście. `total.delivered`/`total.ratedDelivered` to sumy
+    po profilach, więc liczą pary (profil, oferta). Liczą się też dostawy transportu `test`,
+    więc pokrycie ma sens tylko dla e-maili z `EMAIL_MODE=smtp` (`--since` od dnia po
+    przełączeniu). Oceniają nieliczni i częściej te nietrafione, więc sama precyzja bez
+    pokrycia myli przy go/no-go; decyzja go/no-go opiera się na raporcie z całego pilotażu,
+    a z profilu z mniej niż ok. 20 ocenami w nim nie wyciąga się wniosków (reguła czytania w
+    RUNBOOK, bez flagi w raporcie).
+  - **Logi i Caddy:** log żądania zawiera tylko trasę `feedback`, status i czas; Caddy
+    pomija i redaguje `/ocena/…` jak `/dostep/…`. Strony z tokenem mają `no-store` i
+    `Referrer-Policy: strict-origin`.
+- **Odrzucone alternatywy:**
+  - zapis na GET (skanery poczty klikałyby oceny);
+  - token na każdą ofertę albo podpis HMAC w URL (więcej tokenów albo nowy sekret; jeden token
+    na e-mail ograniczony do dostaw profilu wystarcza);
+  - formularz w e-mailu (klienci poczty blokują formularze);
+  - XLSX (nowa zależność; CSV otwiera Excel i Arkusze Google);
+  - uczenie punktacji z ocen i oceny w `match:preview` (poza zakresem PR-12).
+- **Konsekwencje i znane ograniczenia:**
+  - kto ma przekazany e-mail, może przez 60 dni ocenić zamówienia z tego e-maila (tylko ocena,
+    bez dostępu do profilu); `access:revoke` kończy to od razu;
+  - z `/dopasowania` można ocenić ofertę, która pasuje teraz albo była wysłana; ocena
+    zostaje, gdy oferta przestanie pasować;
+  - raport liczy oceny wg ostatniej zmiany (`updated_at`), nie pierwszej oceny;
+  - oceny nie zmieniają jeszcze dopasowania ani kolejności digestu (tylko listy
+    `/dopasowania`).

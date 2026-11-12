@@ -35,6 +35,7 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
       "0006_access",
       "0007_bk_source",
       "0008_self_service_access",
+      "0009_match_feedback",
     ]);
     expect(await tablesInSchema()).toEqual([
       "access_emails",
@@ -44,6 +45,7 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
       "ingestion_runs",
       "kysely_migration",
       "kysely_migration_lock",
+      "match_feedback",
       "opportunities",
       "sessions",
       "sources",
@@ -65,6 +67,7 @@ describe.skipIf(skipWithoutDatabase)("migrations (PostgreSQL)", () => {
       "0006_access",
       "0007_bk_source",
       "0008_self_service_access",
+      "0009_match_feedback",
     ]);
   });
 
@@ -132,6 +135,7 @@ describe.skipIf(skipWithoutDatabase)("migrations: concurrent runs (PostgreSQL)",
       "0006_access",
       "0007_bk_source",
       "0008_self_service_access",
+      "0009_match_feedback",
     ]);
   });
 });

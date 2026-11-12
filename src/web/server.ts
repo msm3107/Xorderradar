@@ -27,19 +27,31 @@ import {
 } from "../infrastructure/db/company-profiles-repository.js";
 import { pingDatabase } from "../infrastructure/db/database.js";
 import { describeDatabaseFailure } from "../infrastructure/db/errors.js";
-import type { Database } from "../infrastructure/db/schema.js";
+import {
+  feedbackLinkOffer,
+  feedbackVerdicts,
+  isOpportunityId,
+  rateOffer,
+  rateWithFeedbackLink,
+  wasDelivered,
+} from "../infrastructure/db/feedback-repository.js";
+import { getOpportunity } from "../infrastructure/db/opportunities-repository.js";
+import type { Database, FeedbackVerdict } from "../infrastructure/db/schema.js";
 import type { Logger } from "../infrastructure/logger.js";
 import {
   DIGEST_NEW_DAYS,
   matchingItems,
   readDigestCandidates,
 } from "../notifications/candidates.js";
+import { matchOpportunity } from "../matching/match.js";
 import { offerCard } from "../notifications/card.js";
-import { digestOrder } from "../notifications/digest.js";
+import { digestOrder, type DigestItem } from "../notifications/digest.js";
 import type { EmailSender } from "../notifications/sender.js";
-import { formatWarsawMinute } from "../sources/normalize/warsaw-time.js";
+import { formatWarsawMinute, warsawDay } from "../sources/normalize/warsaw-time.js";
 import { createAccessMailer, type AccessMailer } from "./access-mail.js";
+import { matchesCsv } from "./csv.js";
 import { exampleView } from "./example.js";
+import { parseVerdictWord, verdictWord } from "./links.js";
 import { createMatchesSlot, type MatchesSlot } from "./matches-slot.js";
 import { multipartBoundary, multipartFieldValues } from "./multipart.js";
 import {
@@ -48,6 +60,8 @@ import {
   emailTakenPage,
   errorPage,
   examplePage,
+  feedbackConfirmPage,
+  feedbackSavedPage,
   homePage,
   invalidLinkPage,
   linkRequestedPage,
@@ -118,6 +132,13 @@ export const LINK_REQUESTS_PER_IP = 10;
 const LINK_REQUEST_WINDOW_MS = 60 * 60 * 1000;
 /** Keys (IPv4 addresses, IPv6 /64s) the per-IP limit remembers at most; the oldest go first. */
 export const LINK_REQUEST_MAX_IPS = 10_000;
+/** Fields of the rating form of /dopasowania (csrf, oferta, werdykt). */
+const RATING_FORM_FIELDS = ["csrf", "oferta", "werdykt"] as const;
+/**
+ * The same with the optional `nastepna` (the card after the rated one, the
+ * anchor to return to after „Nietrafne”, which moves the rated card last).
+ */
+const RATING_FORM_FIELDS_WITH_NEXT = [...RATING_FORM_FIELDS, "nastepna"] as const;
 /** Most `name=value` pairs in the profile form: 6 fields, 10 categories, 16 voivodeships. */
 export const PROFILE_FORM_MAX_FIELDS = 64;
 /** Matching offers shown on /dopasowania; the rest are counted (as in the digest). */
@@ -166,14 +187,20 @@ type RouteName =
   | "profile_resubscribe"
   | "profile_cancel_email"
   | "matches"
+  | "matches_csv"
+  | "matches_feedback"
   | "logout"
   | "unsubscribe"
-  | "email_confirm";
+  | "email_confirm"
+  | "feedback";
 
 interface RouteMatch {
   readonly name: RouteName;
   readonly allow: readonly Method[];
-  /** The path segment after /dostep/, /wypis/ or /potwierdz-email/ (validated by the repository). */
+  /**
+   * The path segment after /dostep/, /wypis/ or /potwierdz-email/ (validated
+   * by the repository); after /ocena/, the whole rest (parseFeedbackPath).
+   */
   readonly token?: string;
 }
 
@@ -207,15 +234,47 @@ function matchRoute(path: string): RouteMatch | null {
       return { name: "profile_cancel_email", allow: FORM };
     case "/dopasowania":
       return { name: "matches", allow: PAGE };
+    case "/dopasowania.csv":
+      return { name: "matches_csv", allow: PAGE };
+    case "/dopasowania/ocena":
+      return { name: "matches_feedback", allow: FORM };
     case "/wyloguj":
       return { name: "logout", allow: FORM };
   }
+  // Any path under /ocena/: a malformed one gets the same 404 as an unknown token (PR-12).
+  const rating = /^\/ocena\/(.+)$/.exec(path)?.[1];
+  if (rating !== undefined) return { name: "feedback", allow: [...PAGE, "POST"], token: rating };
   const link = /^\/(dostep|wypis|potwierdz-email)\/([^/]+)$/.exec(path);
   const [, prefix, token] = link ?? [];
   if (token === undefined) return null;
   if (prefix === "dostep") return { name: "login_link", allow: PAGE, token };
   if (prefix === "wypis") return { name: "unsubscribe", allow: [...PAGE, "POST"], token };
   return { name: "email_confirm", allow: [...PAGE, "POST"], token };
+}
+
+/** A rating link's path after /ocena/ (PR-12, D-032), checked before any lookup. */
+interface FeedbackPath {
+  readonly token: string;
+  readonly opportunityId: string;
+  readonly verdict: FeedbackVerdict;
+}
+
+/**
+ * `<token>/<offer id>/<trafne|nietrafne>`: the verdict from its allowlist,
+ * the id a lowercase uuid; the token's shape is checked by the repository.
+ * null for anything else.
+ */
+function parseFeedbackPath(rest: string): FeedbackPath | null {
+  const parts = rest.split("/");
+  if (parts.length !== 3) return null;
+  const [token = "", opportunityId = "", word = ""] = parts;
+  const verdict = parseVerdictWord(word);
+  if (verdict === null || !isOpportunityId(opportunityId)) return null;
+  return { token, opportunityId, verdict };
+}
+
+function feedbackPath(link: FeedbackPath): string {
+  return `/ocena/${link.token}/${link.opportunityId}/${verdictWord(link.verdict)}`;
 }
 
 /** Methods named in the log; anything else is logged as OTHER. */
@@ -603,6 +662,27 @@ async function handle(
           usable ? emailConfirmPage(token) : invalidLinkPage({ emailChangeLink: true }),
         );
       }
+      case "feedback": {
+        // Read-only (a mail scanner may open it): only the POST of the page's button rates.
+        // Unknown, expired or other-purpose token, an offer not sent to the token's
+        // profile, a bad id or verdict: one and the same 404.
+        const link = parseFeedbackPath(route.token ?? "");
+        const offer =
+          link === null ? null : await feedbackLinkOffer(db, link.token, link.opportunityId);
+        if (link === null || offer === null) {
+          return pageReply(invalidLinkPage({ feedbackLink: true }));
+        }
+        const opposite: FeedbackVerdict = link.verdict === "relevant" ? "not_relevant" : "relevant";
+        return pageReply(
+          feedbackConfirmPage({
+            title: offer.title,
+            verdict: link.verdict,
+            current: offer.verdict,
+            path: feedbackPath(link),
+            oppositePath: feedbackPath({ ...link, verdict: opposite }),
+          }),
+        );
+      }
       case "profile": {
         const session = await currentSession(req, db);
         if (session === null) return unauthenticated(req);
@@ -630,46 +710,26 @@ async function handle(
           ),
         );
       }
-      case "matches": {
+      case "matches":
+      case "matches_csv": {
         const session = await currentSession(req, db);
         if (session === null) return unauthenticated(req);
-        const counts = state.matchesPerSession;
-        const inProgress = counts.get(session.sessionId) ?? 0;
-        if (inProgress >= MATCHES_MAX_PER_SESSION) {
-          return pageReply(matchesTooManyPage(), {
-            "Retry-After": String(MATCHES_RETRY_AFTER_SECONDS),
-          });
-        }
-        counts.set(session.sessionId, inProgress + 1);
-        try {
-          const slot = await state.matches.acquire(res);
-          // A client already gone or gone while waiting: nothing computed, nothing to release.
-          if (slot === "gone") throw new RequestAbortedError();
-          if (slot !== "acquired") {
-            return pageReply(matchesBusyPage(), {
-              "Retry-After": String(MATCHES_RETRY_AFTER_SECONDS),
-            });
-          }
-          try {
-            return await matchesReply(db, session.profileId, clock(options), () =>
-              unauthenticated(req),
-            );
-          } finally {
-            // Also after an error; a client gone meanwhile does not stop the work.
-            state.matches.release();
-          }
-        } finally {
-          // On every path: refused, timed out, gone, failed or answered.
-          const left = (counts.get(session.sessionId) ?? 1) - 1;
-          if (left <= 0) counts.delete(session.sessionId);
-          else counts.set(session.sessionId, left);
-        }
+        return withMatchesSlot(res, state, session.sessionId, async () => {
+          const now = clock(options);
+          const list = await matchesList(db, session.profileId, now);
+          if (list === "invalid") return pageReply(matchesUnavailablePage());
+          if (list === null) return unauthenticated(req);
+          return route.name === "matches"
+            ? matchesReply(list, now, csrfTokenFor(session.token))
+            : matchesCsvReply(list, now);
+        });
       }
       case "link_request":
       case "login":
       case "profile_unsubscribe":
       case "profile_resubscribe":
       case "profile_cancel_email":
+      case "matches_feedback":
       case "logout":
         // Unreachable: these routes allow POST only (checked by the caller).
         return pageReply(errorPage(405));
@@ -677,9 +737,13 @@ async function handle(
   }
 
   // The forms without a session (no CSRF token): the login, „Wyślij mi
-  // link” and the address confirmation must provably come from our own pages.
+  // link”, the address confirmation and the rating link must provably come
+  // from our own pages.
   const sessionless =
-    route.name === "login" || route.name === "link_request" || route.name === "email_confirm";
+    route.name === "login" ||
+    route.name === "link_request" ||
+    route.name === "email_confirm" ||
+    route.name === "feedback";
   // RFC 8058: a mail provider POSTs the one-click body from its own servers,
   // with no cookie and possibly a foreign Origin; the unguessable token in the
   // path is the authorization. Every other form must come from our own pages.
@@ -760,6 +824,21 @@ async function handle(
       // 200 with a page, never a redirect: RFC 8058 §3.2 forbids one here.
       return pageReply(done ? unsubscribedPage() : invalidLinkPage());
     }
+    case "feedback": {
+      if (parseForm(body, []) === null) return pageReply(errorPage(400));
+      const link = parseFeedbackPath(route.token ?? "");
+      // One statement checks the token and the delivery and upserts (AC: a repeat leaves one row).
+      const rated =
+        link !== null &&
+        (await rateWithFeedbackLink(db, link.token, link.opportunityId, link.verdict));
+      return pageReply(
+        link !== null && rated
+          ? feedbackSavedPage(link.verdict)
+          : invalidLinkPage({ feedbackLink: true }),
+      );
+    }
+    case "matches_feedback":
+      return rateFromList(req, body, db);
     case "profile_settings":
       return saveProfileSettings(req, body, db, state.mail);
     case "profile_unsubscribe":
@@ -797,6 +876,7 @@ async function handle(
     case "login_link":
     case "profile":
     case "matches":
+    case "matches_csv":
       // Unreachable: these routes do not allow POST (checked by the caller).
       return pageReply(errorPage(405));
   }
@@ -924,35 +1004,191 @@ async function saveProfileSettings(
   return redirectToProfile("wyslano_potwierdzenie");
 }
 
-/** GET /dopasowania: the digest's candidates and rules for this one profile (D-027). */
-async function matchesReply(
+/**
+ * Runs `compute` in the one /dopasowania slot (D-027): 429 when this session
+ * already has MATCHES_MAX_PER_SESSION requests in progress, 503 when the wait
+ * is refused or runs out. Shared by the page and its CSV (PR-12).
+ */
+async function withMatchesSlot(
+  res: ServerResponse,
+  state: ServerState,
+  sessionId: string,
+  compute: () => Promise<Reply>,
+): Promise<Reply> {
+  const counts = state.matchesPerSession;
+  const inProgress = counts.get(sessionId) ?? 0;
+  if (inProgress >= MATCHES_MAX_PER_SESSION) {
+    return pageReply(matchesTooManyPage(), {
+      "Retry-After": String(MATCHES_RETRY_AFTER_SECONDS),
+    });
+  }
+  counts.set(sessionId, inProgress + 1);
+  try {
+    const slot = await state.matches.acquire(res);
+    // A client already gone or gone while waiting: nothing computed, nothing to release.
+    if (slot === "gone") throw new RequestAbortedError();
+    if (slot !== "acquired") {
+      return pageReply(matchesBusyPage(), {
+        "Retry-After": String(MATCHES_RETRY_AFTER_SECONDS),
+      });
+    }
+    try {
+      return await compute();
+    } finally {
+      // Also after an error; a client gone meanwhile does not stop the work.
+      state.matches.release();
+    }
+  } finally {
+    // On every path: refused, timed out, gone, failed or answered.
+    const left = (counts.get(sessionId) ?? 1) - 1;
+    if (left <= 0) counts.delete(sessionId);
+    else counts.set(sessionId, left);
+  }
+}
+
+/** A matched offer of the list and the profile's rating of it (null: not rated). */
+interface RatedItem {
+  readonly item: DigestItem;
+  readonly verdict: FeedbackVerdict | null;
+}
+
+interface MatchesList {
+  readonly active: boolean;
+  readonly hasVoivodeships: boolean;
+  readonly hasCounties: boolean;
+  /** At most MATCHES_SHOWN: the digest's order, offers rated „Nietrafne” last. */
+  readonly shown: readonly RatedItem[];
+  /** Matching offers beyond the shown ones. */
+  readonly more: number;
+  readonly truncated: boolean;
+}
+
+/**
+ * The digest's candidates and rules for this one profile (D-027), with its
+ * ratings read in one query (PR-12); "invalid": a stored profile the schema
+ * refuses (the form can correct it); null: no such profile.
+ */
+async function matchesList(
   db: Kysely<Database>,
   profileId: string,
   now: Date,
-  missing: () => Reply,
-): Promise<Reply> {
-  // A stored row the schema refuses cannot be matched; the form can correct it.
+): Promise<MatchesList | "invalid" | null> {
   const profile = await getCompanyProfile(db, profileId).catch((error: unknown) => {
     if (error instanceof DomainError && error.code === "invalid_stored_row")
       return "invalid" as const;
     throw error;
   });
-  if (profile === "invalid") return pageReply(matchesUnavailablePage());
-  if (profile === null) return missing();
+  if (profile === "invalid" || profile === null) return profile;
   const candidates = await readDigestCandidates(db, now);
   const items = (await matchingItems(profile, candidates.offers)).sort(digestOrder);
+  const verdicts = await feedbackVerdicts(
+    db,
+    profileId,
+    items.map((item) => item.offer.id),
+  );
+  const rated = items.map((item) => ({ item, verdict: verdicts.get(item.offer.id) ?? null }));
+  // The digest's order kept within each part; „Nietrafne” go last, before the cut.
+  const ordered = [
+    ...rated.filter((entry) => entry.verdict !== "not_relevant"),
+    ...rated.filter((entry) => entry.verdict === "not_relevant"),
+  ];
+  return {
+    active: profile.active,
+    hasVoivodeships: profile.voivodeships.length > 0,
+    hasCounties: profile.counties.length > 0,
+    shown: ordered.slice(0, MATCHES_SHOWN),
+    more: Math.max(0, ordered.length - MATCHES_SHOWN),
+    truncated: candidates.truncated,
+  };
+}
+
+/** GET /dopasowania: the list as cards, each with its rating form. */
+function matchesReply(list: MatchesList, now: Date, csrf: string): Reply {
   return pageReply(
     matchesPage({
-      active: profile.active,
-      hasVoivodeships: profile.voivodeships.length > 0,
-      hasCounties: profile.counties.length > 0,
+      active: list.active,
+      hasVoivodeships: list.hasVoivodeships,
+      hasCounties: list.hasCounties,
       stateAt: formatWarsawMinute(now),
       windowDays: DIGEST_NEW_DAYS,
-      items: items.slice(0, MATCHES_SHOWN).map((item) => offerCard(item, now)),
-      more: Math.max(0, items.length - MATCHES_SHOWN),
-      truncated: candidates.truncated,
+      items: list.shown.map(({ item, verdict }, index) => ({
+        ...offerCard(item, now),
+        feedback: {
+          opportunityId: item.offer.id,
+          verdict,
+          csrf,
+          next: list.shown[index + 1]?.item.offer.id ?? null,
+        },
+      })),
+      more: list.more,
+      truncated: list.truncated,
     }),
   );
+}
+
+/** GET /dopasowania.csv (PR-12, D-032): the same rows, order and limit as the page. */
+function matchesCsvReply(list: MatchesList, now: Date): Reply {
+  return {
+    status: 200,
+    body: matchesCsv(list.shown.map(({ item, verdict }) => ({ offer: item.offer, verdict }))),
+    contentType: "text/csv; charset=utf-8",
+    headers: {
+      "Content-Disposition": `attachment; filename="dopasowania-${warsawDay(now)}.csv"`,
+    },
+  };
+}
+
+/**
+ * POST /dopasowania/ocena (PR-12, D-032): CSRF first (403), then the form
+ * (400). Only an offer sent to the profile or matching it now may be rated
+ * — anything else is a 404, as is an offer of another profile. 303 back to
+ * the card; after „Nietrafne” (the card moves last) to the card that
+ * followed it (`nastepna`), when that is a well-formed id. `nastepna` only
+ * picks the anchor: never what is rated, never checked against the list.
+ */
+async function rateFromList(
+  req: IncomingMessage,
+  body: Buffer,
+  db: Kysely<Database>,
+): Promise<Reply> {
+  const form = parseForm(body, RATING_FORM_FIELDS_WITH_NEXT) ?? parseForm(body, RATING_FORM_FIELDS);
+  const session = await currentSession(req, db);
+  if (session === null) return unauthenticated(req);
+  const submitted =
+    form?.csrf ?? singleFieldValue(body, "csrf", RATING_FORM_FIELDS_WITH_NEXT.length);
+  if (!csrfMatches(session.token, submitted)) return pageReply(errorPage(403));
+  if (form === null) return pageReply(errorPage(400));
+  const opportunityId = form.oferta ?? "";
+  const verdict = parseVerdictWord(form.werdykt ?? "");
+  if (verdict === null || !isOpportunityId(opportunityId)) return pageReply(errorPage(400));
+  if (!(await mayRate(db, session.profileId, opportunityId))) return pageReply(errorPage(404));
+  await rateOffer(db, session.profileId, opportunityId, verdict);
+  const next = form.nastepna;
+  const anchor =
+    verdict === "not_relevant" && next !== undefined && isOpportunityId(next)
+      ? next
+      : opportunityId;
+  return { status: 303, body: "", headers: { Location: `/dopasowania#oferta-${anchor}` } };
+}
+
+/**
+ * May the profile rate the offer from /dopasowania? When it was sent to the
+ * profile (as a rating link requires) or matches the profile now (the list
+ * shows offers not e-mailed). A stored row the schema refuses: no.
+ */
+async function mayRate(
+  db: Kysely<Database>,
+  profileId: string,
+  opportunityId: string,
+): Promise<boolean> {
+  if (await wasDelivered(db, profileId, opportunityId)) return true;
+  const refused = (error: unknown): null => {
+    if (error instanceof DomainError && error.code === "invalid_stored_row") return null;
+    throw error;
+  };
+  const profile = await getCompanyProfile(db, profileId).catch(refused);
+  const offer = await getOpportunity(db, opportunityId).catch(refused);
+  return profile !== null && offer !== null && matchOpportunity(offer, profile).matched;
 }
 
 interface Session {

@@ -345,8 +345,8 @@ systemctl reload caddy
 ```
 
 Caddy sam pobiera certyfikat (potrzebne porty 80 i 443 i rekord DNS) i przekierowuje HTTP na HTTPS.
-Log dostępu (`/var/log/caddy/radar-access.log`) **pomija** ścieżki `/dostep/…`, `/wypis/…` i
-`/potwierdz-email/…` (tokeny), a wszystkie logi Caddy — także log błędów w journalu (np. 502, gdy
+Log dostępu (`/var/log/caddy/radar-access.log`) **pomija** ścieżki `/dostep/…`, `/wypis/…`,
+`/potwierdz-email/…` i `/ocena/…` (tokeny), a wszystkie logi Caddy — także log błędów w journalu (np. 502, gdy
 `serve` się restartuje) — zamieniają token w ścieżce i w nagłówku `Referer` na `REDACTED`. Nagłówki
 `Cookie`/`Authorization` Caddy domyślnie maskuje. HSTS ustawia aplikacja — nie dodawaj go w Caddy.
 Caddy ustawia `X-Forwarded-For` na adres klienta i ignoruje nagłówek wysłany przez klienta; z niego
@@ -363,11 +363,13 @@ systemctl stop radar-serve                # wymusza 502 → wpis w logu błędó
 curl -s -o /dev/null https://radar.example.invalid/dostep/test-redaction
 curl -s -o /dev/null http://radar.example.invalid/dostep/test-redaction
 curl -s -o /dev/null https://radar.example.invalid/potwierdz-email/test-redaction
+curl -s -o /dev/null https://radar.example.invalid/ocena/test-redaction/x/trafne
 systemctl start radar-serve
 journalctl -u caddy --since -5min | grep -c test-redaction           # musi być 0
 grep -c test-redaction /var/log/caddy/radar-access.log               # musi być 0
 journalctl -u caddy --since -5min | grep -c 'dostep/REDACTED'         # >= 1 (filtr działa; 0 — niżej)
 journalctl -u caddy --since -5min | grep -c 'potwierdz-email/REDACTED' # >= 1
+journalctl -u caddy --since -5min | grep -c 'ocena/REDACTED'          # >= 1
 ```
 
 Pierwsze `curl -sI` musi odpowiedzieć `HTTP/2 200` — wtedy certyfikat jest wydany, a
@@ -377,7 +379,7 @@ dopiero po minucie; `journalctl -u caddy -n 50`) poczekaj i powtórz, zanim prze
 Wynik inny niż `0` w którejś z dwóch kontroli `test-redaction`: **przerwij wdrożenie** (nie
 udostępniaj serwisu klientom) i zgłoś to — tokeny z linków trafiałyby do logów. (Brak pliku
 `radar-access.log` też jest w porządku: `grep` wypisze błąd, a log dostępu i tak pomija te ścieżki.)
-Licznik `dostep/REDACTED` albo `potwierdz-email/REDACTED` równy `0` znaczy, że żądanie testowe nie
+Licznik `dostep/REDACTED`, `potwierdz-email/REDACTED` albo `ocena/REDACTED` równy `0` znaczy, że żądanie testowe nie
 zostawiło wpisu w logu błędów — wtedy dwa zera niczego nie dowodzą: powtórz całą kontrolę; znowu `0`
 — przerwij i zgłoś jak wyżej.
 
@@ -434,7 +436,7 @@ bazy: odpowiada nawet wtedy, gdy `serve` w swoim sandboksie systemd nie łączy 
 z PostgreSQL. `/zdrowie` wykonuje `select 1` przez pulę `serve` i bez odpowiedzi bazy w 2 s
 zwraca `503` (`docs/RUNBOOK.md`, „Heartbeat”). Nie zwraca danych ani treści błędów, nie
 wymaga sesji. Caddy loguje `/zdrowie` jak zwykłą ścieżkę: `log_skip` i redakcja z punktu 8 dotyczą
-tylko `/dostep/…`, `/wypis/…` i `/potwierdz-email/…`. Monitoruj tylko `/zdrowie` — nigdy ścieżek z
+tylko `/dostep/…`, `/wypis/…`, `/potwierdz-email/…` i `/ocena/…`. Monitoruj tylko `/zdrowie` — nigdy ścieżek z
 tokenami.
 
 ## 11. Kopia poza hostem (zaszyfrowana `age`)

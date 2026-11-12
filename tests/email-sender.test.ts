@@ -554,6 +554,19 @@ describe("redactTokenLinks", () => {
       `/potwierdz-email/${token.slice(1)}`,
     );
   });
+
+  it("replaces the token of a rating link and keeps the offer id and verdict (D-032)", () => {
+    const oppId = "0b6f3c1e-1d2a-4c5b-9e8f-7a6b5c4d3e2f";
+    expect(redactTokenLinks(`https://x.invalid/ocena/${token}/${oppId}/trafne\n`)).toBe(
+      `https://x.invalid/ocena/[token]/${oppId}/trafne\n`,
+    );
+    expect(redactTokenLinks(`<a href="/ocena/${token}/${oppId}/nietrafne">`)).toBe(
+      `<a href="/ocena/[token]/${oppId}/nietrafne">`,
+    );
+    expect(redactTokenLinks(`/ocena/${token.slice(1)}/${oppId}/trafne`)).toBe(
+      `/ocena/${token.slice(1)}/${oppId}/trafne`,
+    );
+  });
 });
 
 describe("an operator e-mail (status --notify, PR-07A)", () => {

@@ -924,7 +924,9 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       const { cookie } = await login();
       const html = await (await fetch(`${url}/dopasowania`, { headers: { cookie } })).text();
       expect(html.match(/<article>/g)).toHaveLength(MATCHES_SHOWN);
-      expect(html).toContain("I 3 kolejne pasujące zamówienia z dalszym terminem.");
+      expect(html).toContain(
+        "I 3 kolejne pasujące zamówienia z dalszym terminem lub ocenione jako nietrafne.",
+      );
     });
 
     it("explains an empty list and notes an inactive profile", async () => {

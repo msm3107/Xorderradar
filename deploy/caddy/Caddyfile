@@ -10,8 +10,9 @@
 # Tokens in logs (docs/SECURITY.md §11): log_skip below only drops access-log
 # entries. Caddy's other logs (errors such as a 502 from reverse_proxy while
 # serve restarts, the HTTP -> HTTPS redirect server) may carry the request
-# too, so every log also rewrites /dostep/<token>, /wypis/<token> and
-# /potwierdz-email/<token> (PR-10) to /dostep/REDACTED etc. — in the URI and
+# too, so every log also rewrites /dostep/<token>, /wypis/<token>,
+# /potwierdz-email/<token> (PR-10) and /ocena/<token>/… (the rating links,
+# PR-12) to /dostep/REDACTED etc. — in the URI and
 # in the Referer (the application sends Referrer-Policy: strict-origin, so
 # browsers send no path; other clients may). Verify after every change:
 # docs/DEPLOY.md, point 8.
@@ -21,8 +22,8 @@
 	log default {
 		output stderr
 		format filter {
-			request>uri regexp "(?i)/(dostep|wypis|potwierdz-email)/[^?#]*" "/${1}/REDACTED"
-			request>headers>Referer regexp "(?i)/(dostep|wypis|potwierdz-email)/[^?#]*" "/${1}/REDACTED"
+			request>uri regexp "(?i)/(dostep|wypis|potwierdz-email|ocena)/[^?#]*" "/${1}/REDACTED"
+			request>headers>Referer regexp "(?i)/(dostep|wypis|potwierdz-email|ocena)/[^?#]*" "/${1}/REDACTED"
 			wrap json
 		}
 	}
@@ -40,11 +41,11 @@
 }
 
 radar.example.invalid {
-	# The login, unsubscribe and address confirmation links carry a token in
+	# The login, unsubscribe, address confirmation and rating links carry a token in
 	# the path: those requests are never written to the access log
 	# (docs/RUNBOOK.md, "Reverse proxy: logi"). Cookie and Authorization
 	# headers are redacted by Caddy's default (log_credentials off).
-	@token path /dostep/* /wypis/* /potwierdz-email/*
+	@token path /dostep/* /wypis/* /potwierdz-email/* /ocena/*
 	log_skip @token
 
 	log {
@@ -56,8 +57,8 @@ radar.example.invalid {
 		# Second line of defence if a token path ever gets past log_skip
 		# (e.g. a changed matcher): the same rewrite as the default logger.
 		format filter {
-			request>uri regexp "(?i)/(dostep|wypis|potwierdz-email)/[^?#]*" "/${1}/REDACTED"
-			request>headers>Referer regexp "(?i)/(dostep|wypis|potwierdz-email)/[^?#]*" "/${1}/REDACTED"
+			request>uri regexp "(?i)/(dostep|wypis|potwierdz-email|ocena)/[^?#]*" "/${1}/REDACTED"
+			request>headers>Referer regexp "(?i)/(dostep|wypis|potwierdz-email|ocena)/[^?#]*" "/${1}/REDACTED"
 			wrap json
 		}
 	}
