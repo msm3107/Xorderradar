@@ -10,8 +10,11 @@ order for the phone — D-030 „Kolejność karty oferty”; a name-free `/przy
 **READY locally for review** (branch `pr-12-local`; Code & Safety Review PASS round 2, Quality
 Review ACCEPT); the base branch with PR #17 merged in 2026-11-12 (the rating links/buttons end
 the D-030 card): C&S PASS (merge) and re-check PASS after M1; Quality Review ACCEPT (merge) and re-check
-ACCEPT with its M1 implemented (a shorter `/dopasowania` intro); `pnpm check` green (2268 tests); to be
-opened as a PR for owner review. Owner steps on the
+ACCEPT with its M1 implemented (a shorter `/dopasowania` intro); opened as PR #18. Owner review
+of PR #18 (2026-11-12): PASS; the owner-review round (delivery coverage in `feedback:report`,
+decision 1) is implemented: Code & Safety Review PASS (its L1/L2 doc notes done), Quality
+Review ACCEPT (its M1–M3 and O2 doc notes done, O1 left to the owner), `pnpm check` green
+(2274 tests); pushed to PR #18. Owner steps on the
 VPS for PR-08 (AC1, `bk` backfill, DEPLOY §6) remain in Blockers.
 
 ## Completed
@@ -690,8 +693,8 @@ Round-1 fixes:
 ## In progress
 
 **PR-12 — Ocena trafności i eksport** (`docs/PR_PLAN.md` → PR-12) — implemented locally on top
-of PR-11 (`pr-12-local`), `pnpm check` green (2268 tests in 65 files after the base merge of
-2026-11-12; 2224 before). Code & Safety Review
+of PR-11 (`pr-12-local`), `pnpm check` green (2274 tests in 65 files after the owner-review
+round; 2268 after the base merge of 2026-11-12; 2224 before). Code & Safety Review
 PASS (round 2, after the minors and nits fix below), Quality Review ACCEPT. Follow-up (C&S
 round 2, optional): pin the `nastepna` CR/LF rejection with an integration test (the uuid
 check already rejects it). D-032 new; RUNBOOK, README, ARCHITECTURE, SECURITY, DEPLOY, `docs/LAUNCH_ROADMAP.md`
@@ -780,16 +783,29 @@ check already rejects it). D-032 new; RUNBOOK, README, ARCHITECTURE, SECURITY, D
   tracked assertions (requested wording/position, exact replacements): the „already sent”
   sentence now in the first paragraph (`tests/web-pages.test.ts`, from PR-10) and the two CSV
   link strings (PR-12 tests); one assertion added: the rating paragraph is after `</ol>`.
-- Do decyzji właściciela (PR-12, notes only, no code):
-  1. Coverage in `feedback:report`: it counts ratings, not delivered offers; a follow-up could
-     add `delivered` per profile (how much of what was sent got rated).
-  2. `total.precision` pools every rating (a heavy rater dominates); for go/no-go also read the
-     per-profile values or their median (sentence added to RUNBOOK „Oceny trafności” and
-     LAUNCH_ROADMAP stage 4).
-  3. The CSV leaves out Kontakt, Opis and „Dlaczego pasuje” — a product choice to confirm.
-  4. The leading `'` of a neutralised cell is visible in Excel — the standard OWASP trade-off.
-  5. Pilot onboarding: recommend rating in bulk on `/dopasowania` (one click per offer);
-     sentence added to RUNBOOK and LAUNCH_ROADMAP stage 4.
+- Owner review round (2026-11-12, PR #18): PASS. Decision 1 implemented: `feedback:report`
+  reports delivery coverage — in `total` and per profile `delivered` (distinct offers with a
+  `sent` delivery; `pending`/`failed` do not count; with `--since` by `sent_at` from the Warsaw
+  day start), `ratedDelivered` (of those, rated by the same profile, any verdict, any date) and
+  `coverage` = ratedDelivered / delivered (3 decimals, `null` with nothing sent, never 0).
+  `countFeedback` gains one grouped query in the same `REPEATABLE READ` snapshot (`deliveries`
+  `LEFT JOIN match_feedback` on profile and offer, `count(DISTINCT …)`); `profiles[]` now also
+  lists profiles with offers sent and no rating, and profiles that rated only on `/dopasowania`
+  get `delivered: 0`, `coverage: null`. Categories unchanged. The „fewer than ~20 ratings — no
+  conclusions” rule is a reading rule (RUNBOOK „Oceny trafności”, LAUNCH_ROADMAP stage 4), no
+  flag in the report. D-032, README, ARCHITECTURE, SECURITY and the CLI usage text updated.
+  Decisions 2–4 accepted as described: 2 — decide on the per-profile values; 3 — the CSV stays
+  without Kontakt/Opis/„Dlaczego pasuje” for the pilot (Kontakt is personal data); 4 — the
+  leading `'` is accepted. Tests added: `tests/feedback-report.test.ts` (+5: coverage rounding
+  and null, a profile with deliveries and no ratings, ratings without deliveries, total = sum),
+  `tests/integration/web-feedback.test.ts` (+1: `sent` only, one offer over two transports
+  counts once, `--since` by `sent_at`, tenant isolation of `ratedDelivered`). Changed tracked
+  assertions (additions only): the existing report expectations gain `delivered`,
+  `ratedDelivered`, `coverage` and `deliveries: []`; the test `deliver` helper gains optional
+  `transport`/`sentAt`. 2274 tests (+6).
+- Do decyzji właściciela (PR-12, notes only, no code): 1–4 decided in the owner review round
+  above. 5. Pilot onboarding: recommend rating in bulk on `/dopasowania` (one click per offer);
+  sentence added to RUNBOOK and LAUNCH_ROADMAP stage 4.
 
 **PR-11 — Karta oferty do oceny w 20 sekund** (`docs/PR_PLAN.md` → PR-11) — **MERGED in PR
 #17 (b974984)** after the owner's review 2026-11-12 (see „Order” below); before that READY locally
@@ -1188,9 +1204,10 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
 
 ## Next action
 
-0. PR-12: READY locally on top of the merged PR-11 (`pr-12-local`, base merged in 2026-11-12);
-   Code & Safety Review PASS (round 2), Quality Review ACCEPT → open its PR for owner review
-   (not merged by the agents). Out of scope there and left for later: scoring that learns
+0. PR-12: PR #18, owner review PASS (2026-11-12); the owner-review round (coverage in
+   `feedback:report`) is reviewed (C&S PASS, Quality ACCEPT) and pushed to PR #18 → owner's
+   review and merge (not merged by the agents). Owner's call (Quality O1): filter the coverage
+   query on `transport = 'smtp'` instead of the documented `--since` caveat. Out of scope there and left for later: scoring that learns
    from ratings, ratings in `match:preview`, XLSX. Then PR-13 (`docs/PR_PLAN.md`). Each PR
    opens only when ready for owner review.
    PR-10: MERGED in PR #16 (3b70f94). PR-11: MERGED in PR #17 (b974984). Follow-ups from
@@ -1462,6 +1479,17 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-12, PR-12 owner-review round (coverage in `feedback:report`; Node 22, pnpm 10.28.0,
+PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2274 tests passed in 65 files,
+none skipped. Code & Safety Review: PASS (L1 — `test`-transport sends count as delivered,
+documented: coverage only with `EMAIL_MODE=smtp`, `--since` from the day after the switch; L2 —
+`total` sums over profiles, i.e. (profile, offer) pairs, documented). Quality Review: ACCEPT
+(M1 — the go/no-go and the ~20-ratings rule use the whole-pilot window, the weekly run is for
+progress only; M2 — why a profile shows `delivered: 0`; M3 — `ratedDelivered` may exceed
+`ratings`, a week's coverage grows on re-run; O2 — reflow; all docs-only). No dependency
+changes; no network requests to live sources; no e-mail sent.
 
 2026-11-12, PR-12 after merging the base branch (PR #17, PR-11, b974984) in (Node 22, pnpm
 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test

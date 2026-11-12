@@ -164,11 +164,17 @@ Szacunek: 4–8 tygodni.
 Oceny „trafne” i „nietrafne” zbiera produkt: przyciski w mailu i na `/dopasowania` (PR-12,
 D-032). Link w mailu działa bez logowania przez 60 dni i ocenia tylko zamówienia wysłane tej
 firmie; ocenę można zmienić. Właściciel czyta je z `feedback:report` (liczby na profil i na
-kategorię oraz precyzja; tygodniowo: `feedback:report --since <poniedziałek>`, RUNBOOK).
+kategorię oraz precyzja; RUNBOOK).
 Precyzja `null` oznacza brak ocen, nie zero trafnych. Klient może pobrać swoją listę jako CSV
 (`/dopasowania.csv`). Przy wdrażaniu firmy poleć ocenianie hurtem na `/dopasowania` (jedno
 kliknięcie na zamówienie, cała lista na jednej stronie). Do decyzji go/no-go patrz też na
-precyzję poszczególnych profili albo jej medianę, nie tylko na łączną `total.precision`.
+precyzję poszczególnych profili albo jej medianę, nie tylko na łączną `total.precision`, i
+zawsze razem z pokryciem (`coverage` = ocenione / wysłane zamówienia; oceniają nieliczni i
+częściej te nietrafione). Decyzję go/no-go podejmuj na raporcie z całego pilotażu
+(`feedback:report --since <dzień po przejściu na smtp>`); z profilu z mniej niż ok. 20 ocenami
+w tym raporcie nie wyciągaj wniosków. Cotygodniowy `feedback:report --since <poniedziałek>`
+służy tylko do śledzenia postępu — raportów tygodniowych nie sumuj (`ratedDelivered` liczy
+oceny z dowolnego czasu).
 
 Tygodniowa ankieta ma 2 pytania:
 

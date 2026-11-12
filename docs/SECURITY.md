@@ -394,7 +394,7 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   `=`, `+`, `-`, `@`, tabulatora lub CR dostaje prefiks `'` (OWASP CSV injection — `=1+1`
   zostaje tekstem), cudzysłowy według RFC 4180, brak wartości → pusta komórka (nigdy `0`),
   link tylko `http(s)`. `feedback:report` wypisuje wyłącznie id profili, klucze kategorii i liczby
-  (precyzja `null` przy zerze ocen).
+  (precyzja `null` przy zerze ocen, pokrycie `null` przy zerze wysłanych).
 - **Twardnienie HTTP:** ciało ≤ 8 KB (413), tylko `application/x-www-form-urlencoded`
   (inaczej 415); wyjątek: POST wypisu RFC 8058 przyjmuje też `multipart/form-data` (RFC 8058
   §3.2 — SHOULD), czytany własnym ścisłym parserem bez zależności (`src/web/multipart.ts`:

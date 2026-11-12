@@ -1124,10 +1124,13 @@ release failed`. `ingest` i `digest` nie blokują się wzajemnie.
 - `digest` przy ustawionym `PUBLIC_BASE_URL` dodaje do e-maili linki (§4.5), od PR-12 także
   „Trafne”/„Nietrafne” na końcu każdej karty, po szczegółach dopasowania (jeden token
   `feedback` na e-mail, 60 dni).
-- `feedback:report [--since YYYY-MM-DD]` (PR-12, D-032) — `countFeedback` (dwa `GROUP BY`
-  w jednej migawce `REPEATABLE READ`: na profil i na zestaw kodów CPV oferty; `--since` to
-  północ czasu polskiego, porównywana z `updated_at`) → `buildFeedbackReport` (kategorie MVP
-  z CPV, precyzja `null` przy zerze ocen). Jedna linia JSON z id, kategoriami i liczbami.
+- `feedback:report [--since YYYY-MM-DD]` (PR-12, D-032) — `countFeedback` (trzy `GROUP BY`
+  w jednej migawce `REPEATABLE READ`: oceny na profil i na zestaw kodów CPV oferty oraz
+  pokrycie na profil — `deliveries` `sent` `LEFT JOIN match_feedback` po (profil, oferta),
+  `count(DISTINCT …)`; `--since` to północ czasu polskiego, porównywana z `updated_at` ocen i
+  `sent_at` dostaw) → `buildFeedbackReport` (kategorie MVP z CPV, precyzja `null` przy zerze
+  ocen, `coverage` `null` przy zerze wysłanych; profile z ocenami lub z wysłanymi ofertami).
+  Jedna linia JSON z id, kategoriami i liczbami.
   Zły argument → kod 2; nieaktualny schemat albo baza niedostępna → kod 1.
 - `deliveries:pending` i `deliveries:resolve <profileId> --sent|--failed [--date] [--transport]`
   (PR-09, D-024) — decyzja operatora o wierszach `pending` (`deliveries-repository.ts`):

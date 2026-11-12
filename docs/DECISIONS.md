@@ -2255,6 +2255,17 @@ filename="dopasowania-YYYY-MM-DD.csv"`, `Cache-Control: no-store`.
     zaokrąglona do 3 miejsc, **`null` przy zerze ocen** (nigdy 0). `--since` to dzień w
     Polsce (oceny z `updated_at` od północy czasu polskiego). Oba odczyty w jednej migawce
     (`REPEATABLE READ`). Bez adresów i tytułów. Kody wyjścia jak inne komendy (0/1/2).
+  - **Pokrycie w `feedback:report` (decyzja właściciela po review, 2026-11-12):** `total` i
+    każdy profil mają `delivered` (różne zamówienia z dostawą `sent`; od `--since` wg
+    `sent_at`), `ratedDelivered` (z nich ocenione, dowolnym werdyktem i kiedykolwiek) i
+    `coverage` = ocenione / wysłane (3 miejsca, `null` przy zerze wysłanych); profile bez ocen,
+    ale z wysłanymi ofertami, są na liście. `total.delivered`/`total.ratedDelivered` to sumy
+    po profilach, więc liczą pary (profil, oferta). Liczą się też dostawy transportu `test`,
+    więc pokrycie ma sens tylko dla e-maili z `EMAIL_MODE=smtp` (`--since` od dnia po
+    przełączeniu). Oceniają nieliczni i częściej te nietrafione, więc sama precyzja bez
+    pokrycia myli przy go/no-go; decyzja go/no-go opiera się na raporcie z całego pilotażu,
+    a z profilu z mniej niż ok. 20 ocenami w nim nie wyciąga się wniosków (reguła czytania w
+    RUNBOOK, bez flagi w raporcie).
   - **Logi i Caddy:** log żądania zawiera tylko trasę `feedback`, status i czas; Caddy
     pomija i redaguje `/ocena/…` jak `/dostep/…`. Strony z tokenem mają `no-store` i
     `Referrer-Policy: strict-origin`.

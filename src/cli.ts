@@ -540,10 +540,13 @@ Commands:
             Print the customers' ratings of offers ("Trafne"/"Nietrafne", from the e-mails
             and the web list) as one JSON line: the counts and the precision (the relevant
             share, null without ratings) in total, per profile (by id) and per category of
-            the rated offers (by their CPV codes; null: none of the categories). Ids,
+            the rated offers (by their CPV codes; null: none of the categories). In total
+            and per profile also the coverage: delivered (distinct offers sent), ratedDelivered
+            (of those, rated) and coverage (their share, null with nothing sent). Ids,
             categories and counts only, never addresses or titles. Read-only. Requires an
             up-to-date schema (migrate).
-            --since  only ratings last set on or after this day (Poland's time)
+            --since  only ratings last set and offers sent on or after this day
+                     (Poland's time)
   backup <dir>
             Dump the database schema (pg_dump >= 16, custom format, no owners or
             privileges) into a new file <dir>/radar-<UTC time>.dump readable by the owner
@@ -1691,8 +1694,8 @@ async function runDeliveriesPending(database: CliDatabase, io: CliIo): Promise<E
 
 /**
  * `feedback:report` (PR-12, D-032): the ratings counted in total, per profile
- * and per category, as one JSON line (ids, categories and counts — never
- * addresses or titles). Read-only, no lock.
+ * and per category, with the coverage of the offers sent, as one JSON line
+ * (ids, categories and counts — never addresses or titles). Read-only, no lock.
  */
 async function runFeedbackReport(
   since: string | null,

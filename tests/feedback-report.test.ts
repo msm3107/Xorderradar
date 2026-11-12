@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ExitCode, runCli, type CliDatabase } from "../src/cli.js";
 import type { FeedbackCounts } from "../src/infrastructure/db/feedback-repository.js";
-import { buildFeedbackReport, precision } from "../src/operations/feedback-report.js";
+import { buildFeedbackReport, coverage, precision } from "../src/operations/feedback-report.js";
 
 /**
  * `feedback:report` (PR-12, D-032): the pure report and the command with a
@@ -12,6 +12,8 @@ import { buildFeedbackReport, precision } from "../src/operations/feedback-repor
 const DATABASE_URL = "postgres://radar:not-a-real-password@db.example.invalid:5432/radar";
 const PROFILE_A = "00000000-0000-4000-8000-0000000000aa";
 const PROFILE_B = "00000000-0000-4000-8000-0000000000bb";
+// Sorts before PROFILE_A ("9" < "a"): the report lists profiles by id.
+const PROFILE_C = "00000000-0000-4000-8000-000000000099";
 
 const COUNTS: FeedbackCounts = {
   profiles: [
@@ -26,7 +28,11 @@ const COUNTS: FeedbackCounts = {
     { cpvCodes: ["03000000-1"], relevant: 0, notRelevant: 2 },
     { cpvCodes: [], relevant: 0, notRelevant: 1 },
   ],
+  // PROFILE_B rated only on /dopasowania: nothing sent to it.
+  deliveries: [{ profileId: PROFILE_A, delivered: 3, ratedDelivered: 2 }],
 };
+
+const NO_COUNTS: FeedbackCounts = { profiles: [], offers: [], deliveries: [] };
 
 describe("precision", () => {
   it("is the relevant share rounded to 3 decimals", () => {
@@ -41,14 +47,54 @@ describe("precision", () => {
   });
 });
 
+describe("coverage", () => {
+  it("is the rated share of the offers sent, rounded to 3 decimals", () => {
+    expect(coverage(2, 3)).toBe(0.667);
+    expect(coverage(1, 3)).toBe(0.333);
+    expect(coverage(1, 8)).toBe(0.125);
+    expect(coverage(5, 5)).toBe(1);
+  });
+
+  it("is 0 when nothing sent was rated, and null when nothing was sent (never 0)", () => {
+    expect(coverage(0, 7)).toBe(0);
+    expect(coverage(0, 0)).toBeNull();
+  });
+});
+
 describe("buildFeedbackReport", () => {
   it("counts in total, per profile and per category, with the precision of each", () => {
     expect(buildFeedbackReport(COUNTS, "2026-11-01")).toEqual({
       since: "2026-11-01",
-      total: { ratings: 6, relevant: 2, notRelevant: 4, precision: 0.333 },
+      total: {
+        ratings: 6,
+        relevant: 2,
+        notRelevant: 4,
+        precision: 0.333,
+        delivered: 3,
+        ratedDelivered: 2,
+        coverage: 0.667,
+      },
       profiles: [
-        { profileId: PROFILE_A, ratings: 3, relevant: 2, notRelevant: 1, precision: 0.667 },
-        { profileId: PROFILE_B, ratings: 3, relevant: 0, notRelevant: 3, precision: 0 },
+        {
+          profileId: PROFILE_A,
+          ratings: 3,
+          relevant: 2,
+          notRelevant: 1,
+          precision: 0.667,
+          delivered: 3,
+          ratedDelivered: 2,
+          coverage: 0.667,
+        },
+        {
+          profileId: PROFILE_B,
+          ratings: 3,
+          relevant: 0,
+          notRelevant: 3,
+          precision: 0,
+          delivered: 0,
+          ratedDelivered: 0,
+          coverage: null,
+        },
       ],
       categories: [
         { category: "elektryka", ratings: 3, relevant: 2, notRelevant: 1, precision: 0.667 },
@@ -59,12 +105,98 @@ describe("buildFeedbackReport", () => {
   });
 
   it("reports no rating as zero counts and a null precision", () => {
-    expect(buildFeedbackReport({ profiles: [], offers: [] }, null)).toEqual({
+    expect(buildFeedbackReport(NO_COUNTS, null)).toEqual({
       since: null,
-      total: { ratings: 0, relevant: 0, notRelevant: 0, precision: null },
+      total: {
+        ratings: 0,
+        relevant: 0,
+        notRelevant: 0,
+        precision: null,
+        delivered: 0,
+        ratedDelivered: 0,
+        coverage: null,
+      },
       profiles: [],
       categories: [],
     });
+  });
+
+  it("lists a profile with offers sent but no rating: ratings 0, precision null, coverage 0", () => {
+    const report = buildFeedbackReport(
+      {
+        ...COUNTS,
+        deliveries: [
+          { profileId: PROFILE_A, delivered: 3, ratedDelivered: 2 },
+          { profileId: PROFILE_C, delivered: 7, ratedDelivered: 0 },
+        ],
+      },
+      null,
+    );
+    expect(report.profiles.map((profile) => profile.profileId)).toEqual([
+      PROFILE_C,
+      PROFILE_A,
+      PROFILE_B,
+    ]);
+    expect(report.profiles[0]).toEqual({
+      profileId: PROFILE_C,
+      ratings: 0,
+      relevant: 0,
+      notRelevant: 0,
+      precision: null,
+      delivered: 7,
+      ratedDelivered: 0,
+      coverage: 0,
+    });
+    // Its offers count in the total coverage; its (absent) ratings change no precision.
+    expect(report.total).toEqual({
+      ratings: 6,
+      relevant: 2,
+      notRelevant: 4,
+      precision: 0.333,
+      delivered: 10,
+      ratedDelivered: 2,
+      coverage: 0.2,
+    });
+  });
+
+  it("gives a profile with ratings but nothing sent delivered 0 and a null coverage", () => {
+    const report = buildFeedbackReport({ ...COUNTS, deliveries: [] }, null);
+    expect(report.profiles).toHaveLength(2);
+    for (const profile of report.profiles) {
+      expect(profile).toMatchObject({ delivered: 0, ratedDelivered: 0, coverage: null });
+    }
+    expect(report.total).toMatchObject({ delivered: 0, ratedDelivered: 0, coverage: null });
+  });
+
+  it("sums the profiles into the total", () => {
+    const report = buildFeedbackReport(
+      {
+        profiles: [
+          { profileId: PROFILE_A, relevant: 1, notRelevant: 2 },
+          { profileId: PROFILE_C, relevant: 4, notRelevant: 0 },
+        ],
+        offers: [],
+        deliveries: [
+          { profileId: PROFILE_A, delivered: 5, ratedDelivered: 3 },
+          { profileId: PROFILE_B, delivered: 2, ratedDelivered: 0 },
+          { profileId: PROFILE_C, delivered: 6, ratedDelivered: 4 },
+        ],
+      },
+      null,
+    );
+    const sum = (key: "ratings" | "relevant" | "notRelevant" | "delivered" | "ratedDelivered") =>
+      report.profiles.reduce((total, profile) => total + profile[key], 0);
+    expect(report.total).toEqual({
+      ratings: sum("ratings"),
+      relevant: sum("relevant"),
+      notRelevant: sum("notRelevant"),
+      precision: precision(sum("relevant"), sum("ratings")),
+      delivered: sum("delivered"),
+      ratedDelivered: sum("ratedDelivered"),
+      coverage: coverage(sum("ratedDelivered"), sum("delivered")),
+    });
+    expect(report.total).toMatchObject({ ratings: 7, delivered: 13, ratedDelivered: 7 });
+    expect(report.total.coverage).toBe(0.538);
   });
 });
 
@@ -127,12 +259,20 @@ describe("feedback:report", () => {
   });
 
   it("prints a null precision (never 0) when there are no ratings", async () => {
-    const result = await run(["feedback:report"], { counts: { profiles: [], offers: [] } });
+    const result = await run(["feedback:report"], { counts: NO_COUNTS });
     expect(result.code).toBe(ExitCode.Ok);
     expect(JSON.parse(result.stdout)).toEqual({
       status: "ok",
       since: null,
-      total: { ratings: 0, relevant: 0, notRelevant: 0, precision: null },
+      total: {
+        ratings: 0,
+        relevant: 0,
+        notRelevant: 0,
+        precision: null,
+        delivered: 0,
+        ratedDelivered: 0,
+        coverage: null,
+      },
       profiles: [],
       categories: [],
     });

@@ -403,16 +403,37 @@ node dist/main.js feedback:report --since 2026-11-02   # zmienione od tego dnia 
 Wypisuje jedną linię JSON: `total`, `profiles` (id profilu) i `categories` (kategoria MVP z
 kodów CPV oferty; oferta w dwóch kategoriach liczy się w obu, bez kategorii — `null`) — każda z
 `ratings`, `relevant`, `notRelevant` i `precision` (trafne / wszystkie, 3 miejsca po przecinku).
-**`precision: null` znaczy brak ocen, nie zero trafnych.** Bez adresów i tytułów — wynik można
-wkleić do notatek z pilotażu. Kody: `0` raport, `1` baza niedostępna albo schemat nieaktualny
-(`migrate`), `2` zły argument (`--since` musi być datą `YYYY-MM-DD`). Raport liczy oceny wg
-ostatniej zmiany: ocena zmieniona po `--since` liczy się z nowym werdyktem.
+**`precision: null` znaczy brak ocen, nie zero trafnych.** `total` i każdy profil mają też
+pokrycie: `delivered` (ile różnych zamówień firmie wysłano — tylko dostawy `sent`; `pending` i
+`failed` się nie liczą; z `--since` — wysłane od tego dnia), `ratedDelivered` (ile z nich firma
+oceniła — dowolnie i kiedykolwiek) i `coverage` (`ratedDelivered / delivered`, 3 miejsca po
+przecinku; **`null`, gdy nic nie wysłano**, nigdy `0`). W profilu `delivered` liczy różne
+zamówienia; `total.delivered` i `total.ratedDelivered` to sumy po profilach, czyli pary (firma,
+zamówienie) — zamówienie wysłane dwóm firmom liczy się dwa razy. `ratings` liczy oceny
+ustawione od `--since`, a `ratedDelivered` — zamówienia wysłane w tym okresie i ocenione
+kiedykolwiek, więc `ratedDelivered` może być większe niż `ratings`, a pokrycie danego tygodnia
+rośnie, gdy raport uruchomisz później (firmy oceniają z opóźnieniem). Pokrycie ma sens tylko
+dla e-maili wysłanych przy `EMAIL_MODE=smtp`: dostawy z trybu `test` (`sent` w outboxie, do
+klienta nic nie trafia) też się liczą, więc po przejściu na `smtp` uruchamiaj raport z
+`--since` od dnia po przełączeniu. Na liście `profiles` są też firmy, które nic nie oceniły
+(`ratings: 0`, `precision: null`), oraz firmy, którym w tym okresie nic nie wysłano (np. oceniły
+starsze zamówienia albo oceniały tylko na `/dopasowania`) — `delivered: 0`, `coverage: null`.
+Kategorie mają tylko oceny. Bez adresów i tytułów — wynik można wkleić do notatek z pilotażu.
+Kody: `0` raport, `1` baza niedostępna albo schemat nieaktualny (`migrate`), `2` zły argument
+(`--since` musi być datą `YYYY-MM-DD`). Raport liczy oceny wg ostatniej zmiany: ocena
+zmieniona po `--since` liczy się z nowym werdyktem.
 
-Tydzień pilotażu (etap 4): `feedback:report --since <poniedziałek>`; trafność to
-`total.precision`. `total.precision` liczy wszystkie oceny razem, więc firma, która ocenia
-dużo, waży w nim najwięcej — do decyzji go/no-go patrz też na `precision` poszczególnych
-profili (`profiles[]`) albo ich medianę. Firma z wieloma „nietrafne” w jednej kategorii —
-sprawdź jej profil (`match:preview <profileId>`) i słowa wykluczające razem z firmą.
+Pilotaż (etap 4): **decyzję go/no-go podejmuj na raporcie z całego pilotażu** —
+`feedback:report --since <dzień po przejściu na smtp>`; trafność to `total.precision`.
+Cotygodniowy `feedback:report --since <poniedziałek>` służy tylko do śledzenia postępu —
+raportów tygodniowych nie sumuj, bo `ratedDelivered` liczy oceny z dowolnego czasu.
+`total.precision` liczy wszystkie oceny razem, więc firma, która ocenia dużo, waży w nim
+najwięcej — do decyzji go/no-go patrz też na `precision` poszczególnych profili (`profiles[]`)
+albo ich medianę. Precyzję czytaj zawsze razem z `coverage`: oceniają nieliczni i częściej te
+nietrafione, więc precyzja przy niskim pokryciu bywa myląca. **Z profilu z mniej niż ok. 20
+ocenami (`ratings`) w raporcie z całego pilotażu nie wyciągaj wniosków** — to reguła czytania,
+raport jej nie oznacza. Firma z wieloma „nietrafne” w jednej kategorii — sprawdź jej profil
+(`match:preview <profileId>`) i słowa wykluczające razem z firmą.
 
 Przy wdrażaniu firmy w pilotaż poleć ocenianie hurtem na `/dopasowania` (jedno kliknięcie na
 zamówienie, cała lista na jednej stronie) zamiast pojedynczych linków z e-maili — więcej ocen

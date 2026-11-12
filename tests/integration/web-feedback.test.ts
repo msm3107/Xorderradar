@@ -12,7 +12,11 @@ import { createCompanyProfile } from "../../src/infrastructure/db/company-profil
 import { migrateToLatest } from "../../src/infrastructure/db/database.js";
 import { countFeedback, rateOffer } from "../../src/infrastructure/db/feedback-repository.js";
 import { upsertOpportunity } from "../../src/infrastructure/db/opportunities-repository.js";
-import type { DeliveryStatus, FeedbackVerdict } from "../../src/infrastructure/db/schema.js";
+import type {
+  DeliveryStatus,
+  DeliveryTransport,
+  FeedbackVerdict,
+} from "../../src/infrastructure/db/schema.js";
 import { upsertSource } from "../../src/infrastructure/db/sources-repository.js";
 import { createLogger } from "../../src/infrastructure/logger.js";
 import { csrfTokenFor, SESSION_COOKIE } from "../../src/web/session.js";
@@ -119,18 +123,26 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
     return result.opportunity.id;
   }
 
-  async function deliver(profileId: string, opportunityId: string, status: DeliveryStatus) {
+  async function deliver(
+    profileId: string,
+    opportunityId: string,
+    status: DeliveryStatus,
+    {
+      transport = "test",
+      sentAt = new Date(),
+    }: { transport?: DeliveryTransport; sentAt?: Date } = {},
+  ) {
     await schema.db
       .insertInto("deliveries")
       .values({
         profile_id: profileId,
         opportunity_id: opportunityId,
-        transport: "test",
+        transport,
         digest_date: "2026-11-02",
         status,
         attempts: 1,
         error_code: status === "failed" ? "smtp_transient" : null,
-        sent_at: status === "sent" ? new Date() : null,
+        sent_at: status === "sent" ? sentAt : null,
       })
       .execute();
   }
@@ -681,7 +693,15 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
       expect(JSON.parse(result.stdout)).toEqual({
         status: "ok",
         since: null,
-        total: { ratings: 0, relevant: 0, notRelevant: 0, precision: null },
+        total: {
+          ratings: 0,
+          relevant: 0,
+          notRelevant: 0,
+          precision: null,
+          delivered: 0,
+          ratedDelivered: 0,
+          coverage: null,
+        },
         profiles: [],
         categories: [],
       });
@@ -706,13 +726,24 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
       expect(parsed).toEqual({
         status: "ok",
         since: null,
-        total: { ratings: 4, relevant: 2, notRelevant: 2, precision: 0.5 },
+        total: {
+          ratings: 4,
+          relevant: 2,
+          notRelevant: 2,
+          precision: 0.5,
+          delivered: 0,
+          ratedDelivered: 0,
+          coverage: null,
+        },
         profiles: [first, second].map((profileId) => ({
           profileId,
           ratings: 2,
           relevant: 1,
           notRelevant: 1,
           precision: 0.5,
+          delivered: 0,
+          ratedDelivered: 0,
+          coverage: null,
         })),
         categories: [
           { category: "elektryka", ratings: 3, relevant: 2, notRelevant: 1, precision: 0.667 },
@@ -734,7 +765,97 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
       });
       // countFeedback agrees with the command.
       expect((await countFeedback(schema.db, "2020-02-02")).profiles).toHaveLength(2);
-      expect(await countFeedback(schema.db, "2099-01-01")).toEqual({ profiles: [], offers: [] });
+      expect(await countFeedback(schema.db, "2099-01-01")).toEqual({
+        profiles: [],
+        offers: [],
+        deliveries: [],
+      });
+    });
+
+    it("reports coverage: offers sent once each, from --since on (Poland's day), per profile only", async () => {
+      const twice = await offer();
+      const early = await offer();
+      const pending = await offer();
+      const failed = await offer();
+      const annas = await offer();
+      // Sent over both transports (the unique key allows it): one offer delivered.
+      // 23:30 UTC on 31 January is 1 February in Poland, from --since on.
+      const firstOfFebruary = new Date("2020-01-31T23:30:00.000Z");
+      await deliver(jan.id, twice, "sent", { sentAt: firstOfFebruary });
+      await deliver(jan.id, twice, "sent", { transport: "smtp", sentAt: firstOfFebruary });
+      // 22:30 UTC is 23:30 on 31 January in Poland, before --since.
+      await deliver(jan.id, early, "sent", { sentAt: new Date("2020-01-31T22:30:00.000Z") });
+      // Claimed or failed: never received, so not delivered — even when rated on the web.
+      await deliver(jan.id, pending, "pending");
+      await deliver(jan.id, failed, "failed");
+      await deliver(anna.id, annas, "sent");
+      await rateOffer(schema.db, jan.id, twice, "relevant");
+      await rateOffer(schema.db, jan.id, pending, "relevant");
+      await rateOffer(schema.db, jan.id, failed, "not_relevant");
+      // Another profile's ratings never cover an offer sent to this one.
+      await rateOffer(schema.db, jan.id, annas, "relevant");
+      await rateOffer(schema.db, anna.id, early, "not_relevant");
+
+      const byId = <T extends { profileId: string }>(rows: T[]) =>
+        rows.sort((a, b) => a.profileId.localeCompare(b.profileId));
+      const all = await report();
+      expect(all.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(all.stdout)).toMatchObject({
+        total: {
+          ratings: 5,
+          relevant: 3,
+          notRelevant: 2,
+          precision: 0.6,
+          delivered: 3,
+          ratedDelivered: 1,
+          coverage: 0.333,
+        },
+        profiles: byId([
+          {
+            profileId: jan.id,
+            ratings: 4,
+            relevant: 3,
+            notRelevant: 1,
+            precision: 0.75,
+            delivered: 2,
+            ratedDelivered: 1,
+            coverage: 0.5,
+          },
+          {
+            profileId: anna.id,
+            ratings: 1,
+            relevant: 0,
+            notRelevant: 1,
+            precision: 0,
+            delivered: 1,
+            ratedDelivered: 0,
+            coverage: 0,
+          },
+        ]),
+      });
+
+      const since = await report(["--since", "2020-02-01"]);
+      expect(since.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(since.stdout)).toMatchObject({
+        since: "2020-02-01",
+        total: { delivered: 2, ratedDelivered: 1, coverage: 0.5 },
+        profiles: byId([
+          { profileId: jan.id, delivered: 1, ratedDelivered: 1, coverage: 1 },
+          { profileId: anna.id, delivered: 1, ratedDelivered: 0, coverage: 0 },
+        ]),
+      });
+
+      // A profile that only has offers sent is listed by countFeedback too.
+      await sql`DELETE FROM match_feedback`.execute(schema.db);
+      expect(await countFeedback(schema.db, null)).toEqual({
+        profiles: [],
+        offers: [],
+        deliveries: byId([
+          { profileId: jan.id, delivered: 2, ratedDelivered: 0 },
+          { profileId: anna.id, delivered: 1, ratedDelivered: 0 },
+        ]),
+      });
+      expect((await countFeedback(schema.db, "2099-01-01")).deliveries).toEqual([]);
     });
 
     it("refuses a bad --since (exit 2)", async () => {
