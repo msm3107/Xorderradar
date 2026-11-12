@@ -24,7 +24,8 @@ const warsawFormat = new Intl.DateTimeFormat("en-US", {
   hourCycle: "h23",
 });
 
-function warsawWallTime(instant: Date): WarsawLocalTime {
+/** The wall-clock time Warsaw clocks show at `instant` (to the minute). */
+export function warsawWallTime(instant: Date): WarsawLocalTime {
   const parts = new Map(warsawFormat.formatToParts(instant).map((part) => [part.type, part.value]));
   const part = (type: Intl.DateTimeFormatPartTypes) => Number(parts.get(type));
   return {

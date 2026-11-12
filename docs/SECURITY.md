@@ -268,8 +268,8 @@ Baza Konkurencyjności (`bk`, PR-08, D-030):
   do sprawdzenia w konfiguracji serwera SMTP przed wysyłką do prawdziwych odbiorców (PR-07).
 - UI (PR-06A, `src/web/pages.ts`): każda wartość przez ten sam `escapeHtml`
   (`src/infrastructure/html.ts`), bez inline JS i stylów (CSP niżej, §11). PR-06B: strona
-  `/dopasowania` pokazuje oferty przez ten sam `digestItemView` co e-mail (link tylko
-  `http(s)`, `rel="noopener noreferrer"`), a formularz profilu odsyła wysłane wartości
+  `/dopasowania` pokazuje oferty przez tę samą kartę co e-mail (od PR-11 `offerCard`
+  z `notifications/card.ts`; link tylko `http(s)`, `rel="noopener noreferrer"`), a formularz profilu odsyła wysłane wartości
   escapowane (także w `<textarea>`); wartości pól wyboru spoza zamkniętych list nie są
   odsyłane. Testy z wrogim tytułem, URL-em `javascript:` i wartościami formularza.
 - Alert operatora (`status --notify`, PR-07A, D-028): tylko na `OPERATOR_EMAIL` (adres

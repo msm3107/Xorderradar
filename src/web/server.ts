@@ -34,11 +34,12 @@ import {
   matchingItems,
   readDigestCandidates,
 } from "../notifications/candidates.js";
-import { digestItemView, digestOrder } from "../notifications/digest.js";
+import { offerCard } from "../notifications/card.js";
+import { digestOrder } from "../notifications/digest.js";
 import type { EmailSender } from "../notifications/sender.js";
 import { formatWarsawMinute } from "../sources/normalize/warsaw-time.js";
 import { createAccessMailer, type AccessMailer } from "./access-mail.js";
-import { EXAMPLE_ITEMS, EXAMPLE_PROFILE_VIEW } from "./example.js";
+import { exampleView } from "./example.js";
 import { createMatchesSlot, type MatchesSlot } from "./matches-slot.js";
 import { multipartBoundary, multipartFieldValues } from "./multipart.js";
 import {
@@ -447,6 +448,12 @@ export interface WebServerOptions {
    * notice to the old address; absent or null: no contact shown.
    */
   readonly contactEmail?: string | null;
+  /**
+   * The clock of /dopasowania and /przyklad: their deadline lines count days
+   * from it, and /dopasowania reads candidates at it (tests). Default: the
+   * real clock. Tokens and sessions keep the database's clock.
+   */
+  readonly now?: () => Date;
 }
 
 export interface WebServer {
@@ -536,6 +543,11 @@ function createHealthCheck(
   };
 }
 
+/** The render time of /dopasowania and /przyklad: WebServerOptions.now or the real clock. */
+function clock(options: WebServerOptions): Date {
+  return options.now === undefined ? new Date() : options.now();
+}
+
 /**
  * The handling of one request: a reply, decided without writing anything yet
  * (`res` is only watched for the client hanging up, never written here).
@@ -555,7 +567,7 @@ async function handle(
       case "home":
         return pageReply(homePage({ contactEmail: options.contactEmail ?? null }));
       case "example":
-        return pageReply(examplePage({ ...EXAMPLE_PROFILE_VIEW, items: EXAMPLE_ITEMS }));
+        return pageReply(examplePage(exampleView(clock(options))));
       case "health": {
         // Plain text without any detail: only whether this process reaches the database.
         const healthy = await state.health();
@@ -639,7 +651,7 @@ async function handle(
             });
           }
           try {
-            return await matchesReply(db, session.profileId, new Date(), () =>
+            return await matchesReply(db, session.profileId, clock(options), () =>
               unauthenticated(req),
             );
           } finally {
@@ -936,7 +948,7 @@ async function matchesReply(
       hasCounties: profile.counties.length > 0,
       stateAt: formatWarsawMinute(now),
       windowDays: DIGEST_NEW_DAYS,
-      items: items.slice(0, MATCHES_SHOWN).map(digestItemView),
+      items: items.slice(0, MATCHES_SHOWN).map((item) => offerCard(item, now)),
       more: Math.max(0, items.length - MATCHES_SHOWN),
       truncated: candidates.truncated,
     }),

@@ -15,7 +15,7 @@ export interface FormatReasonOptions {
    * with ", " ("kategoria: „Elektryka”, „Serwis, naprawy i konserwacja”"):
    * labels contain commas themselves, the quotes say where one ends, and
    * "; " stays the separator between reasons. The CPV codes are left out
-   * (the digest's "Kategoria:" line shows them). Without it the keys are
+   * (the offer card's "Szczegóły dopasowania" show them, PR-11). Without it the keys are
    * shown with their codes (`match:preview`, the operator's view).
    */
   readonly categoryLabels?: Readonly<Record<MvpCategory, string>>;

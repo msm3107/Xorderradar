@@ -107,6 +107,26 @@ describe("pages", () => {
     }
   });
 
+  it("share one header, one footer and a stylesheet with a dark scheme and a one-column card at 390 px", () => {
+    const { html } = homePage();
+    expect(html).toContain(
+      '<body>\n<header class="site"><a href="/">Radar Zamówień</a></header>\n<main>\n',
+    );
+    expect(html).toContain(
+      '</main>\n<footer class="site"><p>Radar Zamówień — nowe zamówienia publiczne dobrane do ' +
+        "profilu firmy. Dane z publicznych ogłoszeń: Biuletyn Zamówień Publicznych i Baza " +
+        "Konkurencyjności.</p></footer>\n</body>",
+    );
+    expect(STYLESHEET).toContain(":root{color-scheme:light dark;");
+    expect(STYLESHEET).toContain("@media (prefers-color-scheme:dark){:root{");
+    expect(STYLESHEET).toContain(".matches dl{display:grid;grid-template-columns:max-content 1fr;");
+    // 30rem = 480 px at the default font size: a 390 px phone gets one column.
+    expect(STYLESHEET).toContain("@media (max-width:30rem){.matches dl{grid-template-columns:1fr}");
+    expect(STYLESHEET).toContain(":focus-visible{outline:3px solid var(--accent)");
+    // No remote resources from the stylesheet: the CSP allows only 'self'.
+    expect(STYLESHEET).not.toMatch(/url\(|@import/);
+  });
+
   it("escape the profile name and use real buttons in POST forms", () => {
     const page = profilePage(
       { name: `<img src=x onerror="alert(1)">&'`, email: "kontakt@example.invalid", active: true },

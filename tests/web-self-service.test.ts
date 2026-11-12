@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabase } from "../src/infrastructure/db/database.js";
 import { createLogger } from "../src/infrastructure/logger.js";
-import { EXAMPLE_ITEMS, EXAMPLE_PROFILE_VIEW } from "../src/web/example.js";
+import { matchOpportunity } from "../src/matching/match.js";
+import { EXAMPLE_PROFILE, exampleOffers, exampleView } from "../src/web/example.js";
 import {
   emailChangedPage,
   emailConfirmPage,
@@ -225,19 +226,23 @@ describe("PR-10 pages", () => {
   });
 
   it("show the sample digest from made-up data, matched by the real rules", () => {
-    expect(EXAMPLE_ITEMS.map((item) => item.title)).toEqual([
-      "Wykonanie instalacji elektrycznej w budynku szkoleniowym",
-      "Modernizacja oświetlenia ulicznego w Przykładowie",
-    ]);
-    for (const item of EXAMPLE_ITEMS) {
-      const labels = item.fields.map((field) => field.label);
-      expect(labels).toContain("Dlaczego pasuje");
-      for (const field of item.fields) {
-        if (field.href !== undefined) expect(new URL(field.href).hostname).toMatch(/\.invalid$/);
-        if (field.value.includes("@")) expect(field.value).toMatch(/@[a-z.]+\.invalid$/);
-      }
+    const now = new Date("2026-11-09T09:00:00.000Z");
+    for (const offer of exampleOffers(now)) {
+      expect(matchOpportunity(offer, EXAMPLE_PROFILE).matched).toBe(true);
+      expect(new URL(offer.sourceUrl).hostname).toMatch(/\.invalid$/);
+      const email = offer.contact?.email;
+      if (email !== undefined) expect(email).toMatch(/@[a-z.]+\.invalid$/);
+      // Real cards never carry a person's name (D-022): neither does the sample.
+      expect(offer.contact?.name).toBeUndefined();
     }
-    const page = examplePage({ ...EXAMPLE_PROFILE_VIEW, items: EXAMPLE_ITEMS });
+    const view = exampleView(now);
+    expect(view.items.map((card) => card.title)).toEqual([
+      "Wykonanie instalacji elektrycznej w budynku szkoleniowym",
+      "Konserwacja oświetlenia drogowego",
+      "Modernizacja oświetlenia ulicznego w Przykładowie",
+      "Projekt oświetlenia boiska szkolnego",
+    ]);
+    const page = examplePage(view);
     expect(page.status).toBe(200);
     expect(page.html).toContain("<title>Przykładowe zestawienie — Radar Zamówień</title>");
     expect(page.html).toContain("są zmyślone");
@@ -252,6 +257,36 @@ describe("PR-10 pages", () => {
       "Baza Konkurencyjności, Ministerstwo Funduszy i Polityki Regionalnej",
     );
     expect(page.html).not.toMatch(NO_SCRIPT);
+  });
+
+  it("show the main states of a card on one sample page, dated relative to now", () => {
+    // Monday 9 November 2026, 10:00 in Poland.
+    const { html } = examplePage(exampleView(new Date("2026-11-09T09:00:00.000Z")));
+    for (const state of [
+      // a value and none
+      "<dt>Wartość szacunkowa:</dt><dd>120\u00a0000,00 PLN (źródło nie podaje, netto czy brutto)</dd>",
+      "<dt>Wartość szacunkowa:</dt><dd>nie podano</dd>",
+      // an urgent, a normal and no deadline
+      '<dt>Termin składania ofert:</dt><dd><strong class="pilne">PILNE</strong> 10.11.2026 (wt) 12:00 — jutro</dd>',
+      "<dt>Termin składania ofert:</dt><dd>21.11.2026 (sob) 10:00 — za 12 dni</dd>",
+      "<dt>Termin składania ofert:</dt><dd>15.11.2026 (nd) 09:00 — za 6 dni</dd>",
+      "<dt>Termin składania ofert:</dt><dd>nie podano</dd>",
+      // a cut description with the whole one folded
+      "<summary>Pełny opis</summary>",
+      // the region unknown and a CPV code outside the vocabulary
+      "<li>region: nieznany — źródło nie podaje województwa</li>",
+      "<li>kod CPV spoza naszej listy kategorii — kategorii nie da się sprawdzić</li>",
+      // the button
+      '<a class="button" href="https://bzp.przyklad.invalid/ogloszenie/1" rel="noopener noreferrer">Otwórz ogłoszenie</a>',
+      // a contact as the sources give it: e-mail and phone, folded with the publication date
+      "<summary>Więcej szczegółów (data publikacji, kontakt, szczegóły dopasowania)</summary>",
+      "<dt>Kontakt:</dt><dd>zamowienia@fundacja.przyklad.invalid, 000 000 000</dd>",
+    ]) {
+      expect(html).toContain(state);
+    }
+    expect(html.match(/<article>/g)).toHaveLength(4);
+    expect(html.match(/Pełny opis/g)).toHaveLength(1);
+    expect(html).not.toMatch(/Kowalsk[a-z]*@|\.pl\b|\.com\b/);
   });
 });
 
@@ -270,6 +305,8 @@ describe("PR-10 routes without a database", () => {
       port: 0,
       cleanupIntervalMs: null,
       contactEmail: "kontakt@example.invalid",
+      // Monday 9 November 2026, 10:00 in Poland: /przyklad dates are relative to it.
+      now: () => new Date("2026-11-09T09:00:00.000Z"),
     });
     url = `http://127.0.0.1:${String(server.port)}`;
   });
@@ -311,7 +348,13 @@ describe("PR-10 routes without a database", () => {
     const example = await fetch(`${url}/przyklad`);
     expect(example.status).toBe(200);
     expectSecurityHeaders(example);
-    expect(await example.text()).toContain("Modernizacja oświetlenia ulicznego w Przykładowie");
+    const exampleHtml = await example.text();
+    expect(exampleHtml).toContain("Modernizacja oświetlenia ulicznego w Przykładowie");
+    // The injected clock dates the sample: tomorrow is urgent, the street lights in 12 days.
+    expect(exampleHtml).toContain(
+      '<strong class="pilne">PILNE</strong> 10.11.2026 (wt) 12:00 — jutro',
+    );
+    expect(exampleHtml).toContain("21.11.2026 (sob) 10:00 — za 12 dni");
     expect((await fetch(`${url}/przyklad`, { method: "HEAD" })).status).toBe(200);
   });
 

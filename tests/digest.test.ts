@@ -6,7 +6,9 @@ import { matchOpportunity } from "../src/matching/match.js";
 import { MATCH_YIELD_AFTER_MS, matchingItems } from "../src/notifications/candidates.js";
 import {
   buildDigest,
+  digestSubject,
   escapeHtml,
+  newCount,
   SNIPPET_MAX_CHARS,
   snippet,
   type DigestItem,
@@ -71,27 +73,50 @@ describe("buildDigest", () => {
   it("shows every field the source gave, in text and HTML", () => {
     const one = item({ title: "Modernizacja oświetlenia w szkole" });
     const { subject, text, html } = digest([one]);
-    expect(subject).toBe("Radar Zamówień: 1 nowe zamówienie — Jan Kowalski Elektryka");
+    expect(subject).toBe("Radar Zamówień: 1 nowe, najbliższy termin 05.11");
     const lines = [
       "Znaleźliśmy dziś 1 nowe zamówienie pasujące do Twojej firmy.",
       "1. Modernizacja oświetlenia w szkole",
+      "   Wartość szacunkowa: nie podano",
+      "   Termin składania ofert: 05.11.2026 (czw) 12:00 — za 4 dni",
+      "   Dlaczego pasuje: Elektryka · słowo „oświetlenie” w tytule · mazowieckie",
+      `   Otwórz ogłoszenie: ${one.offer.sourceUrl}`,
       "   Zamawiający: Gmina Przykładowa",
       "   Lokalizacja: Przykładowo, woj. mazowieckie",
-      "   Termin składania ofert: 2026-11-05 12:00 (czas polski)",
-      "   Data publikacji: 2026-10-30",
-      "   Kategoria: Elektryka · CPV: 45310000-3",
       "   Opis: Wymiana opraw oświetleniowych na LED.",
+      "   Data publikacji: 30.10.2026",
       "   Kontakt: Jan Kowalski, kontakt@example.invalid, 000 000 000",
-      "   Dlaczego pasuje: kategoria: „Elektryka”; słowo: oświetlenie (tytuł); region: mazowieckie",
-      `   Link: ${one.offer.sourceUrl}`,
+      "   Szczegóły dopasowania: CPV: 45310000-3",
     ];
-    for (const line of lines) expect(text.split("\n")).toContain(line);
-    // The same content in the HTML part.
+    // In this order, one card: the title, value, deadline and why, the link, the
+    // rest, the details last.
+    const textLines = text.split("\n");
+    const at = textLines.indexOf(lines[1] ?? "");
+    expect(textLines.slice(at - 2, at + lines.length - 1)).toEqual([
+      lines[0],
+      "",
+      ...lines.slice(1),
+    ]);
+    // The same content in the HTML part, in the same order (the link is the button).
+    let from = 0;
     for (const line of lines.slice(1)) {
-      const value = line.replace(/^ *(?:\d+\. |[^:]+: )/u, "");
-      expect(html).toContain(escapeHtml(value));
+      if (line.includes("Otwórz ogłoszenie:")) continue;
+      const value = escapeHtml(line.replace(/^ *(?:\d+\. |[^:]+: )/u, ""));
+      const found = html.indexOf(value, from);
+      expect(found, line).toBeGreaterThan(from);
+      from = found;
     }
-    expect(html).toContain(`<a href="${one.offer.sourceUrl}">`);
+    expect(html.indexOf("<b>Dlaczego pasuje:</b>")).toBeLessThan(
+      html.indexOf("<b>Otwórz ogłoszenie</b>"),
+    );
+    expect(html.indexOf("<b>Otwórz ogłoszenie</b>")).toBeLessThan(
+      html.indexOf("<b>Zamawiający:</b>"),
+    );
+    expect(html).toContain("<small>Szczegóły dopasowania: CPV: 45310000-3</small>");
+    expect(html).toContain(
+      `<a href="${one.offer.sourceUrl}" style="display:inline-block;padding:6px 14px;` +
+        'background:#1d5fb4;color:#fff;text-decoration:none"><b>Otwórz ogłoszenie</b></a>',
+    );
   });
 
   it("says why the e-mail comes and how to unsubscribe, in both parts", () => {
@@ -119,10 +144,16 @@ describe("buildDigest", () => {
         categories: [],
       }),
     ]);
+    expect(text).toContain("   Wartość szacunkowa: nie podano\n");
     expect(text).toContain("   Lokalizacja: nie podano\n");
     expect(text).toContain("   Termin składania ofert: nie podano\n");
     expect(text).toContain("   Data publikacji: nie podano\n");
-    expect(text).toContain("   Kategoria: nie podano\n");
+    // No CPV code: the details say so, among the technical reasons.
+    expect(text).toContain(
+      "   Szczegóły dopasowania: kategoria: ogłoszenie nie podaje kodu CPV · " +
+        "region: nieznany — oferta nie podaje lokalizacji\n",
+    );
+    expect(text).not.toContain("CPV: ");
     expect(text).not.toContain("Opis:");
     expect(text).not.toContain("Kontakt:");
     // Never an invented value.
@@ -154,7 +185,8 @@ describe("buildDigest", () => {
       }),
     ]);
     expect(text).toContain(
-      "   Kategoria: CPV: 03000000-1, 09000000-3, 14000000-1, 15000000-8, 16000000-5 i 1 inny\n",
+      "   Szczegóły dopasowania: CPV: 03000000-1, 09000000-3, 14000000-1, 15000000-8, " +
+        "16000000-5 i 1 inny · kod CPV spoza naszej listy kategorii — kategorii nie da się sprawdzić\n",
     );
   });
 
@@ -174,14 +206,42 @@ describe("buildDigest", () => {
     const lines = text.split("\n");
     const at = lines.indexOf(`   Źródło: ${attribution}`);
     expect(at).toBeGreaterThan(-1);
-    expect(lines[at - 1]).toMatch(/^ {3}Dlaczego pasuje: /u);
-    expect(lines[at + 1]).toBe(`   Link: ${bk.offer.sourceUrl}`);
+    // Visible with the offer, after its description; the link comes before (after the lead).
+    expect(lines[at - 1]).toMatch(/^ {3}Opis: /u);
+    expect(lines[at + 1]).toMatch(/^ {3}Data publikacji: /u);
+    expect(lines.indexOf(`   Otwórz ogłoszenie: ${bk.offer.sourceUrl}`)).toBeLessThan(at);
     expect(html).toContain(escapeHtml(attribution));
 
     // BZP offers carry no such line (D-015): their output is unchanged.
     const bzp = digest([item()]);
     expect(bzp.text).not.toContain("Źródło:");
     expect(bzp.html).not.toContain("Źródło");
+  });
+
+  it("marks a deadline 0–2 days away with PILNE in both parts, and only that offer (PR-11)", () => {
+    // NOW is Sunday 01.11 07:00 in Poland: Monday 02.11 10:00 is "jutro".
+    const urgent = item({ title: "Pilne", deadline: new Date("2026-11-02T09:00:00.000Z") });
+    const calm = item({ title: "Spokojne" });
+    const { text, html } = digest([calm, urgent]);
+    const lines = text.split("\n");
+    const urgentAt = lines.indexOf("1. Pilne");
+    const calmAt = lines.indexOf("2. Spokojne");
+    expect(urgentAt).toBeGreaterThanOrEqual(0);
+    expect(calmAt).toBeGreaterThan(urgentAt);
+    expect(lines[urgentAt + 2]).toBe(
+      "   Termin składania ofert: PILNE 02.11.2026 (pn) 10:00 — jutro",
+    );
+    expect(lines[calmAt + 2]).toBe("   Termin składania ofert: 05.11.2026 (czw) 12:00 — za 4 dni");
+    expect(html).toContain(
+      '<b>Termin składania ofert:</b> <b style="background:#b3261e;color:#fff;padding:0 4px">' +
+        "PILNE</b> 02.11.2026 (pn) 10:00 — jutro",
+    );
+    expect(html).toContain("<b>Termin składania ofert:</b> 05.11.2026 (czw) 12:00 — za 4 dni");
+    // The word once per part: the calm offer's card has none.
+    expect(text.match(/PILNE/g)).toHaveLength(1);
+    expect(html.match(/PILNE/g)).toHaveLength(1);
+    expect(lines.slice(calmAt).join("\n")).not.toContain("PILNE");
+    expect(html.slice(html.indexOf(">Spokojne</h2>"))).not.toContain("PILNE");
   });
 
   it("sorts by deadline, soonest first, unknown last", () => {
@@ -193,14 +253,14 @@ describe("buildDigest", () => {
   });
 
   it.each([
-    [2, "2 nowe zamówienia pasujące", "2 nowe zamówienia"],
-    [5, "5 nowych zamówień pasujących", "5 nowych zamówień"],
-    [12, "12 nowych zamówień pasujących", "12 nowych zamówień"],
-    [22, "22 nowe zamówienia pasujące", "22 nowe zamówienia"],
+    [2, "2 nowe zamówienia pasujące", "2 nowe"],
+    [5, "5 nowych zamówień pasujących", "5 nowych"],
+    [12, "12 nowych zamówień pasujących", "12 nowych"],
+    [22, "22 nowe zamówienia pasujące", "22 nowe"],
   ])("uses the Polish plural for %i offers", (count, heading, subject) => {
     const { text, subject: actual } = digest(Array.from({ length: count }, () => item()));
     expect(text.startsWith(`Znaleźliśmy dziś ${heading} do Twojej firmy.\n`)).toBe(true);
-    expect(actual).toBe(`Radar Zamówień: ${subject} — Jan Kowalski Elektryka`);
+    expect(actual).toBe(`Radar Zamówień: ${subject}, najbliższy termin 05.11`);
   });
 
   it.each([
@@ -216,7 +276,7 @@ describe("buildDigest", () => {
     ).toBe(true);
     expect(html).toContain(
       `<p><strong>${escapeHtml("Znaleźliśmy dziś 1 nowe zamówienie pasujące do Twojej firmy.")}` +
-        `</strong></p>\n<p>${escapeHtml(notice)}</p>\n<ol`,
+        `</strong></p>\n<p>${escapeHtml(notice)}</p>\n<div style=`,
     );
   });
 
@@ -226,14 +286,20 @@ describe("buildDigest", () => {
     expect(html).not.toContain("wyślemy w następnych dniach");
   });
 
-  it("keeps source text out of the subject and line breaks out of the profile name", () => {
+  it("keeps source text and the profile name out of the subject, and line breaks out of the name", () => {
     const hostileProfile = { name: "Firma\r\nBcc: x@example.invalid" };
-    const { subject } = buildDigest(hostileProfile, [item({ title: "Tytuł ze źródła" })], NOW, {
-      overflow: 0,
-    });
-    expect(subject).toBe("Radar Zamówień: 1 nowe zamówienie — Firma Bcc: x@example.invalid");
+    const { subject, text } = buildDigest(
+      hostileProfile,
+      [item({ title: "Tytuł ze źródła" })],
+      NOW,
+      { overflow: 0 },
+    );
+    expect(subject).toBe("Radar Zamówień: 1 nowe, najbliższy termin 05.11");
     expect(subject).not.toMatch(/[\r\n]/);
     expect(subject).not.toContain("Tytuł ze źródła");
+    expect(subject).not.toContain("Firma");
+    // The footer names the profile, cleaned of the line break.
+    expect(text).toContain("dla firmy „Firma Bcc: x@example.invalid” założono profil");
   });
 
   it("escapes hostile source text and drops non-http links (AC3)", () => {
@@ -255,7 +321,8 @@ describe("buildDigest", () => {
     );
     expect(html).not.toContain("<a ");
     expect(text).toContain("   Link: nie podano\n");
-    expect(html).toContain("<li><strong>Link:</strong> nie podano</li>");
+    expect(html).toContain("<br><b>Link:</b> nie podano</p>");
+    expect(html).not.toContain("Otwórz ogłoszenie");
     expect(text).not.toContain("javascript:");
   });
 
@@ -267,15 +334,66 @@ describe("buildDigest", () => {
     const { html, text } = digest([item({ sourceUrl })]);
     expect(html).not.toContain("<a ");
     expect(text).toContain("   Link: nie podano\n");
-    expect(html).toContain("<li><strong>Link:</strong> nie podano</li>");
+    expect(html).toContain("<br><b>Link:</b> nie podano</p>");
   });
 
   it("escapes an http(s) link inside the href attribute", () => {
     const { html } = digest([item({ sourceUrl: `https://example.invalid/a?q="><script>'\`` })]);
-    const href = /<a href="([^"]*)">/.exec(html)?.[1];
+    const href = /<a href="([^"]*)" style=/.exec(html)?.[1];
     expect(href).toBeDefined();
     expect(href).not.toMatch(/[<>"'`]/);
     expect(html).not.toContain("<script");
+  });
+});
+
+describe("subject (PR-11)", () => {
+  it.each([
+    [1, "1 nowe"],
+    [2, "2 nowe"],
+    [4, "4 nowe"],
+    [5, "5 nowych"],
+    [11, "11 nowych"],
+    [12, "12 nowych"],
+    [14, "14 nowych"],
+    [21, "21 nowych"],
+    [22, "22 nowe"],
+    [25, "25 nowych"],
+    [100, "100 nowych"],
+    [101, "101 nowych"],
+    [102, "102 nowe"],
+    [112, "112 nowych"],
+  ])("counts %i as „%s”", (count, expected) => {
+    expect(newCount(count)).toBe(expected);
+  });
+
+  it("names the earliest deadline not passed, as a day in Poland", () => {
+    const items = [
+      item({ deadline: new Date("2026-11-20T10:00:00.000Z") }),
+      // 18 November 00:30 in Poland, still 17 November in UTC.
+      item({ deadline: new Date("2026-11-17T23:30:00.000Z") }),
+      item({ deadline: null }),
+      // Passed at NOW: never the "nearest" one.
+      item({ deadline: new Date("2026-11-01T05:59:00.000Z") }),
+    ];
+    expect(digestSubject(items, NOW)).toBe("Radar Zamówień: 4 nowe, najbliższy termin 18.11");
+    expect(buildDigest(profile, items, NOW, { overflow: 0 }).subject).toBe(
+      "Radar Zamówień: 4 nowe, najbliższy termin 18.11",
+    );
+  });
+
+  it("leaves the deadline out when no offer has one still open", () => {
+    const items = [
+      item({ deadline: null }),
+      item({ deadline: new Date("2026-10-31T10:00:00.000Z") }),
+      item({ deadline: null }),
+    ];
+    expect(digestSubject(items, NOW)).toBe("Radar Zamówień: 3 nowe");
+  });
+
+  it("counts a deadline at the very render time as not passed", () => {
+    expect(digestSubject([item({ deadline: NOW })], NOW)).toBe(
+      "Radar Zamówień: 1 nowe, najbliższy termin 01.11",
+    );
   });
 });
 
@@ -321,17 +439,20 @@ describe("category labels in the digest (PR-09)", () => {
       NOW,
       { overflow: 0 },
     );
-    const line = text.split("\n").find((candidate) => candidate.startsWith("   Kategoria: "));
-    expect(line).toMatch(/Sprzątanie/u);
-    expect(line).toMatch(/Elektryka/u);
-    expect(text).toContain("   Dlaczego pasuje: kategoria: „Elektryka”, „Sprzątanie”; ");
-    expect(html).toContain("„Elektryka”, „Sprzątanie”; słowo: oświetlenie (opis)");
+    expect(text).toContain(
+      "   Dlaczego pasuje: Elektryka · Sprzątanie · słowo „oświetlenie” w opisie · mazowieckie\n",
+    );
+    // The lead's last line (PR-11, owner's review of PR #17).
+    expect(html).toContain(
+      "<b>Dlaczego pasuje:</b> Elektryka · Sprzątanie · słowo „oświetlenie” w opisie · " +
+        "mazowieckie</p>",
+    );
     for (const part of [text, html]) {
       expect(part).not.toMatch(/\bsprzatanie\b|\belektryka\b/u);
     }
   });
 
-  it("keeps labels that contain commas apart: semicolons on the Kategoria line, quotes in the reasons", () => {
+  it("keeps labels that contain commas apart: middle dots in the sentence, semicolons in the details", () => {
     const service: CompanyProfile = {
       ...profile,
       categories: ["serwis", "instalacje"],
@@ -345,14 +466,25 @@ describe("category labels in the digest (PR-09)", () => {
       NOW,
       { overflow: 0 },
     );
+    // The sentence names the categories only: the codes are in the details.
     expect(text).toContain(
-      "   Kategoria: Instalacje budowlane (wod.-kan., ogrzewanie, wentylacja); " +
-        "Serwis, naprawy i konserwacja · CPV: 50000000-5, 45330000-9\n",
+      "   Dlaczego pasuje: Instalacje budowlane (wod.-kan., ogrzewanie, wentylacja) · " +
+        "Serwis, naprawy i konserwacja · mazowieckie\n",
     );
-    // The reason names the categories only: the codes are on the Kategoria line.
-    expect(text).toContain(
-      "   Dlaczego pasuje: kategoria: „Instalacje budowlane (wod.-kan., ogrzewanie, wentylacja)”, " +
-        "„Serwis, naprawy i konserwacja”; region: mazowieckie\n",
+    expect(text).toContain("   Szczegóły dopasowania: CPV: 50000000-5, 45330000-9\n");
+    // The offer's categories outside the profile: in the details, "; " between names.
+    const electrician = buildDigest(
+      profile,
+      [item({ categories: [...value.categories, "45310000-3"] })],
+      NOW,
+      {
+        overflow: 0,
+      },
+    );
+    expect(electrician.text).toContain(
+      "   Szczegóły dopasowania: Inne kategorie ogłoszenia: Instalacje budowlane " +
+        "(wod.-kan., ogrzewanie, wentylacja); Serwis, naprawy i konserwacja · " +
+        "CPV: 50000000-5, 45330000-9, 45310000-3\n",
     );
   });
 
@@ -370,9 +502,10 @@ describe("category labels in the digest (PR-09)", () => {
     });
     const { text } = digest([{ offer: value, reasons: matchOpportunity(value, profile).reasons }]);
     expect(text).toContain(
-      "   Kategoria: Elektryka · CPV: 45310000-3, 03000000-1, 09000000-3, 14000000-1, " +
+      "   Szczegóły dopasowania: CPV: 45310000-3, 03000000-1, 09000000-3, 14000000-1, " +
         "15000000-8 i 2 inne\n",
     );
+    expect(text).toContain("   Dlaczego pasuje: Elektryka · ");
   });
 });
 

@@ -1,7 +1,16 @@
 import { CATEGORY_LABELS, VOIVODESHIPS, MVP_CATEGORIES } from "../domain/vocabulary.js";
 import { escapeHtml } from "../infrastructure/html.js";
-import { plural, type DigestField, type DigestItemView } from "../notifications/digest.js";
-import { ATTRIBUTION_LABEL } from "../sources/bk/attribution.js";
+import {
+  FULL_DESCRIPTION_LABEL,
+  DESCRIPTION_LABEL,
+  MATCH_DETAILS_LABEL,
+  MORE_LABEL,
+  OPEN_LABEL,
+  URGENT_WORD,
+  type CardRow,
+  type OfferCard,
+} from "../notifications/card.js";
+import { plural } from "../notifications/digest.js";
 import {
   FIELD_LABELS,
   FIELD_ORDER,
@@ -24,37 +33,62 @@ export interface Page {
   readonly html: string;
 }
 
-/** The one stylesheet, served as /styl.css. */
-export const STYLESHEET = `body{font-family:system-ui,sans-serif;line-height:1.5;max-width:40rem;margin:2rem auto;padding:0 1rem;color:#1a1a1a;background:#fff}
+/**
+ * The one stylesheet, served as /styl.css. One accent colour; a dark scheme
+ * for `prefers-color-scheme: dark`. Contrast (WCAG AA, ≥ 4.5:1 for text):
+ * light — text #1a1a1a on #fff / card #f4f7fb ≥ 16:1, accent #1d5fb4 on
+ * #f4f7fb 5.8:1, button text #fff on the accent 6.3:1, hints #555 6.9:1;
+ * dark — text #e8eaed on #1b2028 13.6:1, accent #8ab4f8 on the card 7.8:1,
+ * button text #0b1a2e on the accent 8.3:1, hints #b8bcc2 8.6:1. The card
+ * grid falls back to one column under 30rem (a 390 px phone).
+ */
+export const STYLESHEET = `:root{color-scheme:light dark;--fg:#1a1a1a;--bg:#fff;--card:#f4f7fb;--line:#c3cedb;--accent:#1d5fb4;--on-accent:#fff;--muted:#555;--error:#b00020;--ok:#1a7f37;--ok-bg:#f0f7f1;--warn:#8a6d00;--warn-bg:#fbf6e6}
+@media (prefers-color-scheme:dark){:root{--fg:#e8eaed;--bg:#121417;--card:#1b2028;--line:#3a4452;--accent:#8ab4f8;--on-accent:#0b1a2e;--muted:#b8bcc2;--error:#ff8a80;--ok:#7ee2a8;--ok-bg:#14261a;--warn:#f0c674;--warn-bg:#2a2410}}
+body{font-family:system-ui,sans-serif;line-height:1.5;max-width:44rem;margin:0 auto;padding:0 1rem;color:var(--fg);background:var(--bg)}
+a{color:var(--accent)}
+a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible,summary:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.site{border-bottom:3px solid var(--accent);padding:.8rem 0;margin-bottom:1rem}
+.site a{font-weight:bold;font-size:1.1rem;text-decoration:none}
+footer.site{border-bottom:0;border-top:1px solid var(--line);margin:2rem 0 1rem;color:var(--muted);font-size:.9rem}
 h1{font-size:1.4rem}
 form{margin:1rem 0}
 button{font:inherit;padding:.5rem 1rem;cursor:pointer}
 .status{font-weight:bold}
-.notice{border-left:.3rem solid #1a7f37;padding:.5rem 1rem;background:#f0f7f1}
-.note{border-left:.3rem solid #8a6d00;padding:.5rem 1rem;background:#fbf6e6}
-.error-summary{border:.2rem solid #b00020;padding:.5rem 1rem;margin:1rem 0}
+.notice{border-left:.3rem solid var(--ok);padding:.5rem 1rem;background:var(--ok-bg)}
+.note{border-left:.3rem solid var(--warn);padding:.5rem 1rem;background:var(--warn-bg)}
+.error-summary{border:.2rem solid var(--error);padding:.5rem 1rem;margin:1rem 0}
 .error-summary h2{font-size:1.1rem;margin:.3rem 0}
-.error{color:#b00020;font-weight:bold;margin:.3rem 0}
-.hint{color:#555;margin:.3rem 0}
+.error{color:var(--error);font-weight:bold;margin:.3rem 0}
+.hint{color:var(--muted);margin:.3rem 0}
 .field{margin:1.2rem 0}
-fieldset{border:1px solid #ccc;margin:1.2rem 0;padding:.5rem 1rem}
+fieldset{border:1px solid var(--line);margin:1.2rem 0;padding:.5rem 1rem}
 legend{font-weight:bold;padding:0 .3rem}
 label{display:block;font-weight:bold}
 .option label{display:inline;font-weight:normal;margin-left:.4rem}
-input[type=text],input[type=email],textarea{box-sizing:border-box;width:100%;font:inherit;padding:.4rem}
-[aria-invalid=true]{border:.15rem solid #b00020}
-.matches{padding-left:1.2rem}
-.matches h2{font-size:1.05rem;margin:1.5rem 0 .3rem}
-dl{margin:0}
-dt{font-weight:bold;float:left;clear:left;margin-right:.4rem}
-dd{margin:0 0 .2rem}
-.matches details{margin:.3rem 0}
-.matches summary{cursor:pointer}
+input[type=text],input[type=email],textarea{box-sizing:border-box;width:100%;font:inherit;padding:.4rem;color:var(--fg);background:var(--bg);border:1px solid var(--line)}
+[aria-invalid=true]{border:.15rem solid var(--error)}
+.matches{list-style:none;padding:0}
+.matches article{border:1px solid var(--line);border-left:.3rem solid var(--accent);border-radius:.4rem;background:var(--card);padding:.2rem 1rem .8rem;margin:1rem 0}
+.matches h2{font-size:1.1rem;margin:.6rem 0 .5rem}
+.matches dl{display:grid;grid-template-columns:max-content 1fr;gap:.2rem .8rem;margin:0}
+.matches dl+dl{margin-top:.8rem}
+.matches dt{font-weight:bold}
+.matches dd{margin:0;overflow-wrap:anywhere}
+.pilne{color:var(--error)}
+.button{display:inline-block;padding:.5rem 1.1rem;border-radius:.3rem;background:var(--accent);color:var(--on-accent);font-weight:bold;text-decoration:none}
+.matches details{margin:.4rem 0}
+.matches summary{cursor:pointer;color:var(--accent)}
+.matches ul{margin:.3rem 0;padding-left:1.2rem}
+@media (max-width:30rem){.matches dl{grid-template-columns:1fr}.matches dd{margin-bottom:.4rem}}
 nav p{margin:1.5rem 0}
 h2{font-size:1.15rem;margin:1.5rem 0 .3rem}
 `;
 
 const SITE_NAME = "Radar Zamówień";
+/** Every page's footer: what the service is and where its data come from (the home page's sources). */
+const SITE_FOOTER =
+  "Radar Zamówień — nowe zamówienia publiczne dobrane do profilu firmy. Dane z publicznych " +
+  "ogłoszeń: Biuletyn Zamówień Publicznych i Baza Konkurencyjności.";
 
 /**
  * How a customer gets back in: the links are single-use and expire, and the
@@ -154,10 +188,12 @@ function layout(title: string, body: readonly string[]): string {
     '<link rel="stylesheet" href="/styl.css">',
     "</head>",
     "<body>",
+    `<header class="site">${link("/", SITE_NAME)}</header>`,
     "<main>",
     `<h1>${escapeHtml(title)}</h1>`,
     ...body,
     "</main>",
+    `<footer class="site">${paragraph(SITE_FOOTER)}</footer>`,
     "</body>",
     "</html>",
     "",
@@ -689,59 +725,61 @@ export interface MatchesView {
   readonly stateAt: string;
   /** How many days back "new" goes (DIGEST_NEW_DAYS). */
   readonly windowDays: number;
-  /** The shown offers, soonest deadline first. */
-  readonly items: readonly DigestItemView[];
+  /** The shown offers' cards, soonest deadline first. */
+  readonly items: readonly OfferCard[];
   /** Matching offers beyond the shown ones. */
   readonly more: number;
   /** The candidate limit was reached: some offers were not considered. */
   readonly truncated: boolean;
 }
 
-/** The source link: only an http(s) href (digestItemView checked it), named by its host. */
-function sourceLink(href: string): string {
-  const host = URL.parse(href)?.host ?? "";
-  return (
-    `<a href="${escapeHtml(href)}" rel="noopener noreferrer">Otwórz ogłoszenie w źródle` +
-    `${host === "" ? "" : ` (${escapeHtml(host)})`}</a>`
-  );
+/** One row in the card's grid; `more` ends its value (the full description). */
+function cardRow(row: CardRow, more = ""): string {
+  const urgent = row.urgent ? `<strong class="pilne">${URGENT_WORD}</strong> ` : "";
+  return `<dt>${escapeHtml(row.label)}:</dt><dd>${urgent}${escapeHtml(row.value)}${more}</dd>`;
 }
 
 /**
- * The digest fields a match card shows at once, the place of work among them
- * (for a whole-country profile the reasons do not name it); the others
- * (publication date, category, description, contact) wait in its <details>.
+ * One offer card (src/notifications/card.ts, the digest's content) in the
+ * card's order: the lead rows in a grid, one "Otwórz ogłoszenie" button, the
+ * body rows (the full description under the excerpt when it was cut), then
+ * one native <details> (no script) with the more rows and the match
+ * details. Its summary names what is inside, so the contact is not hidden
+ * from someone who looks for it. The two disclosures are never nested.
  */
-const CARD_LABELS: ReadonlySet<string> = new Set([
-  "Zamawiający",
-  "Lokalizacja",
-  "Termin składania ofert",
-  "Dlaczego pasuje",
-  // Attribution the source's terms require (D-030), so never folded away.
-  ATTRIBUTION_LABEL,
-  "Link",
-]);
-
-function fieldList(fields: readonly DigestField[]): string {
-  const rows = fields.map(
-    (field) =>
-      `<dt>${escapeHtml(field.label)}:</dt><dd>${
-        field.href === undefined ? escapeHtml(field.value) : sourceLink(field.href)
-      }</dd>`,
-  );
-  return `<dl>${rows.join("")}</dl>`;
-}
-
-/** A compact card: the essentials, the rest behind a native <details> (no script). */
-function matchItem(item: DigestItemView): string {
-  const shown = item.fields.filter((field) => CARD_LABELS.has(field.label));
-  const folded = item.fields.filter((field) => !CARD_LABELS.has(field.label));
-  const details =
-    folded.length === 0
+function cardItem(card: OfferCard): string {
+  const full =
+    card.fullDescription === null
       ? ""
-      : `<details><summary>Szczegóły ogłoszenia</summary>${fieldList(folded)}</details>`;
+      : `<details><summary>${FULL_DESCRIPTION_LABEL}</summary>` +
+        `<p>${escapeHtml(card.fullDescription)}</p></details>`;
+  const lead = card.lead.map((row) => cardRow(row));
+  const body = card.body.map((row) => cardRow(row, row.label === DESCRIPTION_LABEL ? full : ""));
+  // Only an http(s) URL (offerCard checked it); a new tab must not reach back to this page.
+  const button =
+    card.url === null
+      ? ""
+      : `<p><a class="button" href="${escapeHtml(card.url)}" rel="noopener noreferrer">` +
+        `${OPEN_LABEL}</a></p>`;
+  const more = card.more.map((row) => cardRow(row));
+  if (card.matchDetails.length > 0) {
+    more.push(
+      `<dt>${MATCH_DETAILS_LABEL}:</dt><dd><ul>` +
+        `${card.matchDetails.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></dd>`,
+    );
+  }
+  const inside = [
+    ...card.more.map((row) => row.label),
+    ...(card.matchDetails.length > 0 ? [MATCH_DETAILS_LABEL] : []),
+  ].map((label) => label.toLocaleLowerCase("pl"));
+  const details =
+    more.length === 0
+      ? ""
+      : `<details><summary>${MORE_LABEL} (${escapeHtml(inside.join(", "))})</summary>` +
+        `<dl>${more.join("")}</dl></details>`;
   return (
-    `<li><article><h2>${escapeHtml(item.title)}</h2>${fieldList(shown)}${details}` +
-    "</article></li>"
+    `<li><article><h2>${escapeHtml(card.title)}</h2><dl>${lead.join("")}</dl>${button}` +
+    `<dl>${body.join("")}</dl>${details}</article></li>`
   );
 }
 
@@ -787,7 +825,7 @@ export function matchesPage(view: MatchesView): Page {
     body.push(
       paragraph(`${window} Najbliższy termin na górze. Stan na ${view.stateAt} (czas polski).`),
       paragraph("Lista obejmuje także zamówienia, które już wysłaliśmy e-mailem."),
-      `<ol class="matches">${view.items.map(matchItem).join("")}</ol>`,
+      `<ol class="matches">${view.items.map(cardItem).join("")}</ol>`,
     );
     if (view.more > 0) {
       const offers = plural(
@@ -828,7 +866,7 @@ export interface ExampleView {
   readonly name: string;
   /** The profile's rules in one line. */
   readonly summary: string;
-  readonly items: readonly DigestItemView[];
+  readonly items: readonly OfferCard[];
 }
 
 /**
@@ -844,7 +882,7 @@ export function examplePage(view: ExampleView): Page {
           "i ogłoszenia poniżej są zmyślone.",
       ),
       `<p>Profil: <strong>${escapeHtml(view.name)}</strong> — ${escapeHtml(view.summary)}</p>`,
-      `<ol class="matches">${view.items.map(matchItem).join("")}</ol>`,
+      `<ol class="matches">${view.items.map(cardItem).join("")}</ol>`,
       paragraph(
         "Codzienna wiadomość e-mail pokazuje zamówienia tak samo, a strona profilu " +
           "„Pasujące zamówienia” — wszystkie aktualnie pasujące.",

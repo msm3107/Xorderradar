@@ -1,12 +1,14 @@
 # Current State
 
 Current phase: PHASE 4 — PILOT
-Current PR: PR-10 — Wejście bez pułapek (UX/QOL series PR-10 – PR-13)
+Current PR: PR-11 — Karta oferty do oceny w 20 sekund (UX/QOL series PR-10 – PR-13)
 Status: PR-08 **MERGED in PR #14 (366618e)**. PR-09 **MERGED in PR #15 (42dd008)**. PR-10
 (first PR of the UX/QOL series from the independent UX audit of 2026-11-06; plan in
-`docs/PR_PLAN.md` → PR-10 – PR-13, `docs/LAUNCH_ROADMAP.md` → 3d) **READY** (Code & Safety
-Review PASS, Quality Review ACCEPT), base branch merged in after PR #15; its PR opens for owner
-review. Owner steps on the VPS for PR-08 (AC1, `bk` backfill, DEPLOY §6) remain in Blockers.
+`docs/PR_PLAN.md` → PR-10 – PR-13, `docs/LAUNCH_ROADMAP.md` → 3d) **MERGED in PR #16
+(3b70f94)**. PR-11 **open as PR #17**: owner review 2026-11-12 PASS + 2 QoL changes (card
+order for the phone, a name-free `/przyklad` contact) implemented; Code & Safety Review PASS,
+Quality Review ACCEPT. Owner steps on the VPS for PR-08 (AC1, `bk` backfill, DEPLOY §6) remain
+in Blockers.
 
 ## Completed
 
@@ -683,6 +685,111 @@ Round-1 fixes:
 
 ## In progress
 
+**PR-11 — Karta oferty do oceny w 20 sekund** (`docs/PR_PLAN.md` → PR-11) — READY locally
+for review: implemented on top of PR-10 (`pr-11-local`), `pnpm check` green (2157 tests),
+Code & Safety Review PASS (round 3, after the Quality minors 1–4 fix below), Quality Review
+ACCEPT. D-030 (value line) updated; D-024
+and D-027 point to the new card; README, ARCHITECTURE (§2 tree, dependency rule, §4.5, §4.6)
+and SECURITY updated.
+
+- One pure card module `src/notifications/card.ts` (`offerCard`), rendered by the digest text,
+  the digest HTML, `/dopasowania` and `/przyklad`; `web` now also imports `card.ts`.
+  `digestItemView`/`DigestField`/`DigestItemView` and `CARD_LABELS` removed.
+- Order (owner review of PR #17, D-030 „Kolejność karty oferty”): `lead` = value („Wartość
+  szacunkowa: 120 000,00 PLN (źródło nie podaje, netto czy brutto)”, from the stored string,
+  never a float; NBSP thousands, kept extra decimals; null → „nie podano”), deadline
+  („18.11.2026 (śr) 10:00 — za 12 dni”, Warsaw time, weekday table, dziś/jutro/za N
+  dni/minął, „PILNE” for 0–2 days), „Dlaczego pasuje” as one sentence joined with „ · ” (no
+  usable link → „Link: nie podano” ends the lead) → the „Otwórz ogłoszenie” button (text
+  mail: „Otwórz ogłoszenie: URL”) → `body` = buyer, location, description excerpt (≤ 300
+  chars at a word boundary, „…” only when cut; the web folds the full text in „Pełny opis”),
+  bk „Źródło” (always visible; attribution date stays YYYY-MM-DD) → `more` = publication date
+  (DD.MM.YYYY, null → „nie podano”), contact (e-mail/phone only, D-022), then CPV codes and
+  technical reasons („Szczegóły dopasowania”). Web: `more` + match details in one
+  `<details>` „Więcej szczegółów (…)”; mail HTML all visible (`more` 0.9em, match details
+  `<small>`); mail text the same order. „(czas polski)” dropped from the deadline line (the
+  footer's „Stan na … (czas polski)” stays). Scoring unchanged. `/przyklad` contact has no
+  name (e-mail + phone), as real cards.
+- Subject „Radar Zamówień: 3 nowe, najbliższy termin 18.11” (1 nowe / 2–4 nowe except 12–14 /
+  nowych; the earliest not-passed deadline; none → „Radar Zamówień: 3 nowe”), no company name.
+- Clock: `WebServerOptions.now` (default process clock) dates `/dopasowania` and `/przyklad`;
+  the digest uses its run time. `/przyklad` (`exampleView(now)`) has dates relative to now and
+  the main card states on one page (najważniejsze stany karty: value/none, deadline in some
+  days/„jutro” with PILNE/none, cut/short/no description, unknown region, CPV outside the
+  vocabulary, BZP and BK; no „dziś” and no „minął”), pseudonymised, no database.
+- Look: site header and footer on every page, one accent colour, cards with border and
+  background, `dl` grid collapsing to one column under 30rem (390 px), dark scheme, visible
+  focus, AA contrast (ratios in the `STYLESHEET` comment). CSP byte-identical. Mail: inline
+  styles, no fixed greys on text (footer `color:#555` removed).
+- Mail size, 5 typical offers with real-length BZP URLs: HTML 8183 → 8039 bytes, text 5551 →
+  5857 bytes (the value lines and the „Szczegóły dopasowania” line).
+- Changed tracked assertions (the approved format change; each replaced by an exact assertion
+  of the new text, none dropped without a replacement):
+  - `tests/digest.test.ts`: the „every field” test (subject „Radar Zamówień: 1 nowe,
+    najbliższy termin 05.11”, the new lines and order, the button instead of `<a href="…">`);
+    „missing values” (`Kategoria: nie podano` → `Wartość szacunkowa: nie podano` and the
+    details line); the CPV-cap line (`Kategoria: CPV: …` → `Szczegóły dopasowania: CPV: …`);
+    the line before the bk attribution (`Dlaczego pasuje:` → `Opis:`); the plural subjects
+    („… nowe zamówienia — Jan Kowalski Elektryka” → „… nowe, najbliższy termin 05.11”); the
+    overflow HTML (`<ol` → `<div style=`); the hostile-name subject test (now: no company
+    name in the subject, the footer cleaned); the missing-link HTML
+    (`<li><strong>Link:</strong> nie podano</li>` → `<br><b>Link:</b> nie podano</p>`); the
+    href regex; the PR-09 category-label tests (`Kategoria:` line and `kategoria: „…”` reason →
+    the why sentence and „Inne kategorie ogłoszenia: …” in the details).
+  - `tests/integration/digest.test.ts`: the subjects („Radar Zamówień: 3 nowe, najbliższy
+    termin 03.11”; „contains 1 nowe zamówienie” → exactly „Radar Zamówień: 1 nowe, najbliższy
+    termin 20.11”) and the overflow deadline lines („2026-11-10 12:00” → „10.11.2026 (wt)
+    12:00 — za 9 dni”).
+  - `tests/integration/web-profile.test.ts` (matches page): the why/`Kategoria:` rows, the
+    source link → the button, „Szczegóły ogłoszenia” → „Szczegóły dopasowania” with the CPV
+    code, the field order (an exact row: the page's clock is injected, `WebServerOptions.now`).
+  - `tests/web-pages.test.ts` (matchesPage): the deadline/publication formats, the why row, the
+    link → the button; the compact-card test (essentials vs `<details>`) → an exact whole-card
+    assertion; the bk „Źródło” row followed by the button; „missing description” no longer
+    looks inside `<details>`; `w źródle (` → no `class="button"`.
+  - `tests/web-self-service.test.ts`: `EXAMPLE_ITEMS`/`EXAMPLE_PROFILE_VIEW` → `exampleView(now)`
+    (every sample offer checked with `matchOpportunity(...).matched`, links and e-mails
+    `.invalid`).
+- New tests: `tests/card.test.ts` (39: value, every weekday, urgency, 23:59:59/00:00/00:00:01,
+  both 2026 DST changes, passed earlier the same day, null, why sentence, match details, row
+  order), the subject plurals (1, 2, 4, 5, 11, 12, 14, 21, 22, 25, 100, 101, 102, 112) and
+  nearest deadline, PILNE, „Pełny opis”, the main `/przyklad` states, `/przyklad` and
+  `/dopasowania` with an injected clock, header/footer and stylesheet checks. 2157 tests in
+  62 files (+63 over PR-10's 2094).
+- Code & Safety Review PASS; its findings addressed (tests and docs only, no production change):
+  M-1 the „PILNE” marker in the e-mail text and HTML, and none on a non-urgent offer of the same
+  digest (`tests/digest.test.ts`); N-1 the `/dopasowania` integration test asserts the exact
+  card rows under an injected clock instead of a regex; N-2 one offer rendered by the digest
+  text, the digest HTML and `/dopasowania` shows the same labels and values in the same order
+  (`tests/card.test.ts`, AC3); N-3 D-027's pre-PR-11 card layout marked historical. N-4 (`rel`
+  on the e-mail's anchors) is information only, unchanged.
+- Quality Review ACCEPT; its minors fixed (owner-approved product wording):
+  1. subject for one offer „1 nowe” (was „1 nowa”), agreeing with the body's „1 nowe
+     zamówienie” (`newCount`: 1 nowe / 3 nowe / 5 nowych);
+  2. the e-mail HTML shows „PILNE” as a badge (inline style: white bold text on `#b3261e`,
+     contrast 6.5:1, WCAG AA), so it does not blend with the bold label; the text part
+     unchanged;
+  3. README/ARCHITECTURE no longer claim `/przyklad` shows every card state: „najważniejsze
+     stany karty” with the list of what it shows;
+  4. „Szczegóły dopasowania” on the card: „więcej niż jedno słowo kluczowe (N)” dropped (the
+     keywords are in „Dlaczego pasuje”), „CPV spoza słownika — kategoria niesprawdzalna” →
+     „kod CPV spoza naszej listy kategorii — kategorii nie da się sprawdzić”. Card only
+     (`card.ts`); `formatReason`/`formatReasons` and so `match:preview` keep their wording.
+- Code & Safety round 2 Lows fixed: L-1 the `/dopasowania` integration test logs in inside
+  `try`, so the clocked server always closes; L-2 the `tests/card.test.ts` count corrected.
+- Do decyzji właściciela: the value clause — now „(źródło nie podaje, netto czy brutto)” (as in
+  `docs/PR_PLAN.md` PR-11 and D-030) or „(źródło nie podaje, czy netto, czy brutto)”.
+- Deferred to PR-12/PR-13: the e-mail footer date „Stan na 2026-11-09 15:38” → DD.MM.YYYY,
+  like the card.
+- Deferred / not in this PR: the 390 px and 1280 px screenshots (AC4) are taken for the PR
+  description, not stored in the repository; the e-mail's look in real clients (Gmail,
+  Outlook, a dark-mode client) is checked by eye before the first real send, not by tests;
+  the repeated „Pełny opis” / „Szczegóły dopasowania” summaries do not name the offer (an
+  accessibility nit, below in Next action); `/przyklad` has no „dziś” and no „minął” card
+  (a passed offer is never listed, and a „dziś” hour may already be past — both states are
+  covered by `tests/card.test.ts`); D-024/D-027 keep their PR-05 – PR-10 wording as history,
+  with a pointer to the PR-11 card.
+
 **PR-10 — Wejście bez pułapek** (`docs/PR_PLAN.md` → PR-10) — READY locally: Code & Safety
 Review PASS (re-checked after every fix round; the last round without findings), Quality
 Review ACCEPT (all 6 ACs met). D-031 new; D-026 and D-027 changed. Migration
@@ -728,7 +835,8 @@ Review ACCEPT (all 6 ACs met). D-031 new; D-026 and D-027 changed. Migration
   outbox; Caddy `@token` and the log redaction include `/potwierdz-email/`); the migration
   lists gain `0008_self_service_access`. 2094 tests in 61 files (+76).
 - Deferred: Quality NIT 1 — `/przyklad` dates are fixed (already in the past); make them
-  relative to the render time with an injectable clock (`docs/PR_PLAN.md` → PR-11). Optional
+  relative to the render time with an injectable clock (`docs/PR_PLAN.md` → PR-11; done in
+  PR-11). Optional
   C&S notes: the test helpers wait 5 s, as long as the Vitest timeout; in RUNBOOK the
   `login_link` database step can still log `failed`/`no_profile`/`limit_reached` after
   `dropped`; `deploy/radar.env.example` could say „when an address change is requested”.
@@ -973,9 +1081,15 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
 
 ## Next action
 
-0. PR-10: READY (Code & Safety Review PASS, Quality Review ACCEPT), base branch merged in
-   after PR #15 → owner review of its PR (not merged by the agents). Then PR-11 – PR-13 in
-   order (`docs/PR_PLAN.md`). Each PR opens only when ready for owner review.
+0. PR-10: MERGED in PR #16 (3b70f94). PR-11: open as PR #17; the owner's review (PASS + card
+   order, name-free sample contact) is addressed → owner re-review and merge (not merged by
+   the agents); screenshots at 390 px and 1280 px go in its PR description (AC4). Follow-ups
+   (later PR): the phone number in a card wraps mid-number at 390 px — format `contact.phone`
+   with no-break spaces (Quality Review nit 2); optional desktop alignment of the two card
+   `<dl>` grids (`minmax(11.5rem,max-content) 1fr`, nit 1); follow-up (C&S round 3 L-a, later PR): `tests/email-sender.test.ts`
+   fixture subject still uses the old company-name format (pass-through only, nothing asserts
+   it). Then PR-12 – PR-13 in order (`docs/PR_PLAN.md`). Each PR opens only when ready for
+   owner review.
 1. PR-09: MERGED in PR #15 (42dd008). On the VPS
    (PR-08 is merged, 366618e): PR-07B checklist (`docs/DEPLOY.md` §13) if not done yet, then
    PR-08 AC1 and the `bk` backfill (Blockers). Follow-ups from the PR-08 reviews (owner to
@@ -1020,10 +1134,11 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
    - Re-measure `/dopasowania` on pilot data (C&S measured 8.5–9 s for 5 000 candidates with 3.2 KB descriptions).
    - (Done in PR-10: the old address gets a notice when a change is requested, and the change
      waits for a confirmation from the new address, D-031.)
-   - Build `CARD_LABELS` (`src/web/pages.ts`) from label constants exported by the digest
-     (C&S L-3; today a renamed digest label would move that field into `<details>`).
-   - Accessibility nits (Quality Low): the repeated „Szczegóły ogłoszenia” summary label could
-     name the offer; find-in-page does not search closed `<details>` in some browsers.
+   - (Done in PR-11: `CARD_LABELS` removed — the web and the mail render one card from
+     `notifications/card.ts`.)
+   - Accessibility nits (Quality Low): the repeated „Szczegóły dopasowania” / „Pełny opis”
+     summary labels (since PR-11) could name the offer; find-in-page does not search closed
+     `<details>` in some browsers.
      Pilot follow-ups from the owner's PR #9 review (owner to choose the PR):
    - (Done in PR-09: a description-only keyword hit gives +15 and `profile:create` hints at
      exclude words, D-023; further calibration on pilot profiles if real runs still show false
@@ -1034,9 +1149,11 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
    - Before real customers: confirm `smtp` explicitly (SECURITY §10/§14) and send one digest to an own
      mailbox first. Optional follow-ups from the PR-05 Quality Review: (done in PR-09 for the digest
      and `/dopasowania` — the reason shows labels only; `match:preview` keeps the codes) cap
-     the CPV codes repeated in „Dlaczego pasuje”; Polish date format („3.11.2026, 11:00”); a different heading for a new
+     the CPV codes repeated in „Dlaczego pasuje”; (done in PR-11: Polish date format on the card,
+     „03.11.2026 (wt) 11:00”); a different heading for a new
      profile's first e-mail (up to 7 days of offers); the other „CPV spoza słownika … kategoria
-     niesprawdzalna” wording. Known limits: the stderr pending count misses profiles reported
+     niesprawdzalna” wording (done in PR-11 on the card: „kod CPV spoza naszej listy kategorii —
+     kategorii nie da się sprawdzić”; `match:preview` keeps the operator wording). Known limits: the stderr pending count misses profiles reported
      `not_run`; a server that closes with an error reply at the greeting spends attempts (D-024).
      Still from PR-04: backfill still-open offers with `ingest bzp --from … --to …` (≤ 31 days
      per call, README); cosmetic nits from Part B (over-wide `ingest` help lines in
@@ -1230,11 +1347,28 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
 
 ## Last verification
 
+2026-11-12, PR-11 after the owner's review of PR #17 (card order, name-free `/przyklad`
+contact; Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2199 tests passed in 62 files,
+none skipped. `/przyklad` at 390×844: the first card's „Otwórz ogłoszenie” button at 614–654 px
+(first screen), scrollWidth 390.
+
+2026-11-10, PR-11 after merging the base branch (PR #16, 3b70f94) in (Node 22, pnpm 10.28.0,
+PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2196 tests passed in 62 files,
+none skipped (2157 PR-11 + 39 from the PR-09 owner-review round). Conflicts only in
+`docs/STATE.md` (status lines; both sides kept).
+
 2026-11-10, PR-10 after merging the base branch (PR #15, 42dd008) in (Node 22, pnpm 10.28.0,
 PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
 REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2133 tests passed in 61 files,
 none skipped (2094 PR-10 + 39 from the PR-09 owner-review round). Conflicts only in README,
 STATE and one `src/cli.ts` config block (both sides kept).
+
+2026-11-09, PR-11 READY locally for review (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2157 tests passed in 62 files,
+none skipped (run by the coder after the Quality minors 1–4 and Code & Safety L-1/L-2). No dependency changes; no network requests to live sources;
+no e-mail sent.
 
 2026-11-09, PR-10 before the PR (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
 REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2094 tests passed in 61 files,

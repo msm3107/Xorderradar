@@ -254,7 +254,8 @@ describe.skipIf(skipWithoutDatabase)("digest (PostgreSQL)", () => {
     expect(first.sent).toHaveLength(1);
     const email = first.sent[0]?.email;
     expect(email?.to).toBe(EMAIL);
-    expect(email?.subject).toBe("Radar Zamówień: 3 nowe zamówienia — Jan Kowalski Elektryka");
+    // PR-11: no company name; the nearest deadline is the sooner offer's.
+    expect(email?.subject).toBe("Radar Zamówień: 3 nowe, najbliższy termin 03.11");
     const titles = email?.text.match(/^\d+\. .*$/gmu);
     expect(titles).toEqual([`1. ${sooner.title}`, `2. ${later.title}`, `3. ${noDeadline.title}`]);
     expect(email?.text).toContain("Termin składania ofert: nie podano");
@@ -290,7 +291,7 @@ describe.skipIf(skipWithoutDatabase)("digest (PostgreSQL)", () => {
       claimed: 1,
       sent: 1,
     });
-    expect(nextDay.sent[0]?.email.subject).toContain("1 nowe zamówienie");
+    expect(nextDay.sent[0]?.email.subject).toBe("Radar Zamówień: 1 nowe, najbliższy termin 20.11");
     expect(await deliveries()).toHaveLength(4);
   });
 
@@ -567,8 +568,8 @@ describe.skipIf(skipWithoutDatabase)("digest (PostgreSQL)", () => {
       "3 kolejne pasujące zamówienia wyślemy w następnych dniach, jeśli będą wtedy aktualne.",
     );
     // The soonest deadlines were taken.
-    expect(text).toContain("Termin składania ofert: 2026-11-10 12:00");
-    expect(text).not.toContain("Termin składania ofert: 2026-11-10 12:52");
+    expect(text).toContain("Termin składania ofert: 10.11.2026 (wt) 12:00 — za 9 dni");
+    expect(text).not.toContain("Termin składania ofert: 10.11.2026 (wt) 12:52");
 
     const nextDay = fakeSender();
     const tomorrow = await run([], {
