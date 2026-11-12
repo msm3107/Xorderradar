@@ -112,7 +112,8 @@ export function exampleOffers(now: Date): Opportunity[] {
       estimatedValue: null,
       currency: null,
       categories: ["45311000-0"],
-      contact: { name: "Anna Nowak", phone: "000 000 000" },
+      // E-mail and phone only: real cards never carry a person's name (D-022; bk drops it).
+      contact: { email: "zamowienia@fundacja.przyklad.invalid", phone: "000 000 000" },
     },
     {
       // No MVP category behind its CPV code: the keywords and the region carry it.

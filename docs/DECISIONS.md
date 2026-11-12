@@ -2033,6 +2033,23 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     każdej wartości — także BZP, bo ani BZP, ani Baza tego nie podaje (gdy źródło kiedyś
     poda, dopisek trzeba zastąpić tą informacją). Brak wartości → „Wartość szacunkowa: nie
     podano”, nigdy 0. Atrybucja „Źródło:” (dzień `fetched_at` RRRR-MM-DD) bez zmian.
+  - **Kolejność karty oferty (PR-11, decyzja właściciela po przeglądzie PR #17):** cel to
+    ocena w 20 sekund na telefonie 390 px — pierwszy ekran ma odpowiedzieć „ile, do kiedy,
+    dlaczego ja”. `offerCard` (`src/notifications/card.ts`) dzieli wiersze na grupy, a
+    wszystkie widoki (tekst i HTML e-maila, `/dopasowania`, `/przyklad`) pokazują je w tej
+    samej kolejności: tytuł → `lead` (wartość, termin, „Dlaczego pasuje”) → przycisk
+    „Otwórz ogłoszenie” (tekst e-maila: linia „Otwórz ogłoszenie: …”; bez linku `http(s)`
+    w tym miejscu „Link: nie podano”) → `body` (zamawiający, lokalizacja, wyciąg opisu i na
+    stronach „Pełny opis”, atrybucja „Źródło:” Bazy) → `more` (data publikacji, kontakt,
+    gdy jest) → „Szczegóły dopasowania”. Atrybucja zostaje **widoczna** (regulamin, pkt
+    5.1–5.3), nigdy pod `<details>`. Na stronach `more` i „Szczegóły dopasowania” są w jednym
+    natywnym `<details>` „Więcej szczegółów (data publikacji, kontakt, szczegóły
+    dopasowania)” — podsumowanie wymienia tylko to, co jest w środku; bez skryptu i bez
+    zagnieżdżania `<details>`. W e-mailu wszystko jest widoczne (programy pocztowe nie
+    wszystkie obsługują `<details>`), `more` i szczegóły mniejszym drukiem na końcu karty.
+    Brakujące wartości bez zmian: „nie podano”, nigdy zgadywane. Przykład `/przyklad` ma
+    kontakt tylko z e-mailem i telefonem, jak prawdziwe karty (D-022: adaptery nie
+    zapisują imion i nazwisk).
 
 ## D-031 — Samoobsługowe wejście („Wyślij mi link”) i potwierdzanie zmiany adresu
 

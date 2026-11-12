@@ -5,9 +5,10 @@ Current PR: PR-11 — Karta oferty do oceny w 20 sekund (UX/QOL series PR-10 –
 Status: PR-08 **MERGED in PR #14 (366618e)**. PR-09 **MERGED in PR #15 (42dd008)**. PR-10
 (first PR of the UX/QOL series from the independent UX audit of 2026-11-06; plan in
 `docs/PR_PLAN.md` → PR-10 – PR-13, `docs/LAUNCH_ROADMAP.md` → 3d) **MERGED in PR #16
-(3b70f94)**. PR-11 **READY** (Code & Safety Review PASS round 3, after the Quality minors 1–4
-fix; Quality Review ACCEPT), base branch merged in after PR #16; its PR opens for owner
-review. Owner steps on the VPS for PR-08 (AC1, `bk` backfill, DEPLOY §6) remain in Blockers.
+(3b70f94)**. PR-11 **open as PR #17**: owner review 2026-11-12 PASS + 2 QoL changes (card
+order for the phone, a name-free `/przyklad` contact) implemented; Code & Safety Review PASS,
+Quality Review ACCEPT. Owner steps on the VPS for PR-08 (AC1, `bk` backfill, DEPLOY §6) remain
+in Blockers.
 
 ## Completed
 
@@ -694,17 +695,21 @@ and SECURITY updated.
 - One pure card module `src/notifications/card.ts` (`offerCard`), rendered by the digest text,
   the digest HTML, `/dopasowania` and `/przyklad`; `web` now also imports `card.ts`.
   `digestItemView`/`DigestField`/`DigestItemView` and `CARD_LABELS` removed.
-- Rows: value („Wartość szacunkowa: 120 000,00 PLN (źródło nie podaje, netto czy brutto)”,
-  from the stored string, never a float; NBSP thousands, kept extra decimals; null → „nie
-  podano”), deadline („18.11.2026 (śr) 10:00 — za 12 dni”, Warsaw time, weekday table,
-  dziś/jutro/za N dni/minął, „PILNE” for 0–2 days), buyer, location, publication date
-  (DD.MM.YYYY), contact, „Dlaczego pasuje” as one sentence joined with „ · ”, description
-  excerpt (≤ 300 chars at a word boundary, „…” only when cut; the web folds the full text in
-  „Pełny opis”), bk „Źródło” (attribution date stays YYYY-MM-DD, D-030), then the
-  „Otwórz ogłoszenie” button (text mail: „Link: URL”). CPV codes and technical reasons in
-  „Szczegóły dopasowania” (web `<details>`, mail HTML a `<small>` last line, mail text the last
-  line). „(czas polski)” dropped from the deadline line (the footer's „Stan na … (czas polski)”
-  stays). Scoring unchanged.
+- Order (owner review of PR #17, D-030 „Kolejność karty oferty”): `lead` = value („Wartość
+  szacunkowa: 120 000,00 PLN (źródło nie podaje, netto czy brutto)”, from the stored string,
+  never a float; NBSP thousands, kept extra decimals; null → „nie podano”), deadline
+  („18.11.2026 (śr) 10:00 — za 12 dni”, Warsaw time, weekday table, dziś/jutro/za N
+  dni/minął, „PILNE” for 0–2 days), „Dlaczego pasuje” as one sentence joined with „ · ” (no
+  usable link → „Link: nie podano” ends the lead) → the „Otwórz ogłoszenie” button (text
+  mail: „Otwórz ogłoszenie: URL”) → `body` = buyer, location, description excerpt (≤ 300
+  chars at a word boundary, „…” only when cut; the web folds the full text in „Pełny opis”),
+  bk „Źródło” (always visible; attribution date stays YYYY-MM-DD) → `more` = publication date
+  (DD.MM.YYYY, null → „nie podano”), contact (e-mail/phone only, D-022), then CPV codes and
+  technical reasons („Szczegóły dopasowania”). Web: `more` + match details in one
+  `<details>` „Więcej szczegółów (…)”; mail HTML all visible (`more` 0.9em, match details
+  `<small>`); mail text the same order. „(czas polski)” dropped from the deadline line (the
+  footer's „Stan na … (czas polski)” stays). Scoring unchanged. `/przyklad` contact has no
+  name (e-mail + phone), as real cards.
 - Subject „Radar Zamówień: 3 nowe, najbliższy termin 18.11” (1 nowe / 2–4 nowe except 12–14 /
   nowych; the earliest not-passed deadline; none → „Radar Zamówień: 3 nowe”), no company name.
 - Clock: `WebServerOptions.now` (default process clock) dates `/dopasowania` and `/przyklad`;
@@ -1076,10 +1081,12 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
 
 ## Next action
 
-0. PR-10: MERGED in PR #16 (3b70f94). PR-11: READY (Code & Safety Review PASS round 3,
-   Quality Review ACCEPT, minors 1–4 fixed), base branch merged in after PR #16 → owner review
-   of its PR (not merged by the agents); screenshots at 390 px and 1280 px go in its PR
-   description (AC4); follow-up (C&S round 3 L-a, later PR): `tests/email-sender.test.ts`
+0. PR-10: MERGED in PR #16 (3b70f94). PR-11: open as PR #17; the owner's review (PASS + card
+   order, name-free sample contact) is addressed → owner re-review and merge (not merged by
+   the agents); screenshots at 390 px and 1280 px go in its PR description (AC4). Follow-ups
+   (later PR): the phone number in a card wraps mid-number at 390 px — format `contact.phone`
+   with no-break spaces (Quality Review nit 2); optional desktop alignment of the two card
+   `<dl>` grids (`minmax(11.5rem,max-content) 1fr`, nit 1); follow-up (C&S round 3 L-a, later PR): `tests/email-sender.test.ts`
    fixture subject still uses the old company-name format (pass-through only, nothing asserts
    it). Then PR-12 – PR-13 in order (`docs/PR_PLAN.md`). Each PR opens only when ready for
    owner review.
@@ -1339,6 +1346,12 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
   - No-argument usage goes to stdout (exit 2) while unknown-command usage goes to stderr.
 
 ## Last verification
+
+2026-11-12, PR-11 after the owner's review of PR #17 (card order, name-free `/przyklad`
+contact; Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2199 tests passed in 62 files,
+none skipped. `/przyklad` at 390×844: the first card's „Otwórz ogłoszenie” button at 614–654 px
+(first screen), scrollWidth 390.
 
 2026-11-10, PR-11 after merging the base branch (PR #16, 3b70f94) in (Node 22, pnpm 10.28.0,
 PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test

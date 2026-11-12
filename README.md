@@ -319,17 +319,22 @@ Nieoczekiwany błąd wewnętrzny kończy komendę kodem `1` ze stałym komunikat
 - Nakładające się uruchomienia są bezpieczne: drugie kończy się
   `{"status":"skipped","reason":"lock_busy",…}`, komunikatem `Digest skipped: …` i kodem `0`.
 - **Karta oferty (PR-11, `src/notifications/card.ts`):** jedna czysta funkcja `offerCard`
-  dla tekstu i HTML e-maila, `/dopasowania` i `/przyklad`. Wiersze po kolei: tytuł,
-  „Wartość szacunkowa: 120 000,00 PLN (źródło nie podaje, netto czy brutto)” (brak →
-  „nie podano”, nigdy 0; D-030), „Termin składania ofert: 18.11.2026 (śr) 10:00 — za 12 dni”
-  (czas polski; „dziś”, „jutro”, „za N dni”, „minął”; 0–2 dni → przedrostek „PILNE”; brak →
-  „nie podano”), zamawiający, lokalizacja, data publikacji (DD.MM.RRRR), kontakt (gdy jest),
-  „Dlaczego pasuje” jednym zdaniem („Elektryka · słowo „oświetlenie” w tytule ·
-  mazowieckie”), opis (wyciąg do ok. 300 znaków, ucięty na granicy słowa, „…” tylko po
-  ucięciu; e-mail ma sam wyciąg), źródło (tylko oferty Bazy Konkurencyjności — atrybucja
-  wymagana regulaminem, D-030) i przycisk „Otwórz ogłoszenie” (tekst e-maila: „Link: …”).
-  Kody CPV i powody techniczne (np. nieznany region) — w „Szczegółach dopasowania” (ostatnia
-  linia karty w e-mailu). Dni liczy chwila przebiegu digestu (strona: chwila żądania).
+  dla tekstu i HTML e-maila, `/dopasowania` i `/przyklad`; wszędzie ta sama treść w tej samej
+  kolejności (D-030), tak żeby na telefonie 390 px pierwszy ekran mówił: ile, do kiedy,
+  dlaczego. Po kolei: tytuł; „Wartość szacunkowa: 120 000,00 PLN (źródło nie podaje, netto
+  czy brutto)” (brak → „nie podano”, nigdy 0; D-030), „Termin składania ofert: 18.11.2026
+  (śr) 10:00 — za 12 dni” (czas polski; „dziś”, „jutro”, „za N dni”, „minął”; 0–2 dni →
+  przedrostek „PILNE”; brak → „nie podano”), „Dlaczego pasuje” jednym zdaniem („Elektryka ·
+  słowo „oświetlenie” w tytule · mazowieckie”); przycisk „Otwórz ogłoszenie” (tekst e-maila:
+  linia „Otwórz ogłoszenie: …”; bez użytecznego linku w tym miejscu „Link: nie podano”);
+  zamawiający, lokalizacja, opis (wyciąg do ok. 300 znaków, ucięty na granicy słowa, „…”
+  tylko po ucięciu; e-mail ma sam wyciąg), źródło (tylko oferty Bazy Konkurencyjności —
+  atrybucja wymagana regulaminem, zawsze widoczna, D-030); na końcu data publikacji
+  (DD.MM.RRRR), kontakt (gdy jest) i „Szczegóły dopasowania” (kody CPV i powody techniczne,
+  np. nieznany region). Na stronach te trzy są w jednym natywnym `<details>` „Więcej
+  szczegółów (…)”; w e-mailu (programy pocztowe nie wszystkie obsługują `<details>`) są
+  widoczne, mniejszym drukiem, jako ostatnie linie karty. Dni liczy chwila przebiegu digestu
+  (strona: chwila żądania).
   **Temat:** „Radar Zamówień: 3 nowe, najbliższy termin 18.11” (1 nowe, 2–4 nowe, 5+ nowych
   z polską odmianą; najbliższy termin nieminiony, bez niego samo „Radar Zamówień: 3 nowe”),
   bez nazwy firmy i bez danych źródła.
@@ -389,9 +394,9 @@ PUBLIC_BASE_URL=https://radar.example.invalid node dist/main.js serve
     (pierwszy zapis w ostatnich 7 dniach, bez ofert po terminie), najbliższy termin pierwszy,
     najwyżej 50, z powodami dopasowania i linkiem do źródła. Pokazuje też oferty już
     wysłane e-mailem. Ta sama karta oferty co w e-mailu (niżej, „Karta oferty”); pełny opis
-    pod „Pełny opis”, gdy wyciąg jest skrócony, kody CPV i powody techniczne pod „Szczegóły
-    dopasowania” (natywne `<details>`, bez JavaScriptu). Wygląd: nagłówek i stopka serwisu,
-    jeden kolor akcentu, schemat ciemny (`prefers-color-scheme`), widoczny fokus, przy
+    pod „Pełny opis”, gdy wyciąg jest skrócony, data publikacji, kontakt, kody CPV i powody
+    techniczne pod „Więcej szczegółów” (natywne `<details>`, bez JavaScriptu). Wygląd:
+    nagłówek i stopka serwisu, jeden kolor akcentu, schemat ciemny (`prefers-color-scheme`), widoczny fokus, przy
     wąskim ekranie (np. 390 px) etykiety nad wartościami.
 - **Wypis:** `/wypis/<token>` — strona z przyciskiem; POST RFC 8058 z programu pocztowego
   (`multipart/form-data` albo `application/x-www-form-urlencoded`) wypisuje bez logowania i

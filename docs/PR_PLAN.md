@@ -745,6 +745,8 @@ ile, do kiedy, co i dlaczego.
      w `WebServerOptions`; odłożone z przeglądu jakości PR-10, NIT 1).
 3. **Opis:** widoczne pierwsze ~300 znaków, cały opis w `<details>`. Kody CPV i techniczne
    powody (region nieznany, CPV spoza słownika) w `<details>` „Szczegóły dopasowania”.
+   Po review właściciela PR #17 kolejność i zwinięta sekcja „Więcej szczegółów” wg D-030
+   („Kolejność karty oferty”).
 4. **„Dlaczego pasuje”:** jedno ludzkie zdanie, np. „Elektryka · słowo „oświetlenie” w
    tytule · mazowieckie”.
 5. **Wygląd:**

@@ -242,13 +242,13 @@ describe("matchesPage", () => {
     expect(html).toContain('<a href="/profil">Twój profil</a>');
   });
 
-  it("shows the card's rows in the digest's order, the button, then the match details", () => {
+  it("shows value, deadline and why, the button, the rest, then one disclosure with the details", () => {
     const full: Opportunity = {
       ...offer,
       estimatedValue: "120000.00",
       currency: "PLN",
       description: "Wymiana opraw <LED> & słupów",
-      contact: { name: "Anna Nowak", email: "zamowienia@example.invalid" },
+      contact: { email: "zamowienia@example.invalid", phone: "000 000 000" },
     };
     const { html } = matchesPage(view({ items: [cardOf(full)] }));
     expect(html).not.toMatch(NO_SCRIPT);
@@ -257,15 +257,26 @@ describe("matchesPage", () => {
       "<h2>Modernizacja oświetlenia</h2><dl>" +
         "<dt>Wartość szacunkowa:</dt><dd>120\u00a0000,00 PLN (źródło nie podaje, netto czy brutto)</dd>" +
         "<dt>Termin składania ofert:</dt><dd>05.11.2026 (czw) 12:00 — za 4 dni</dd>" +
+        "<dt>Dlaczego pasuje:</dt><dd>Elektryka · słowo „oświetlenie” w tytule · mazowieckie</dd></dl>" +
+        '<p><a class="button" href="https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/id/1" ' +
+        'rel="noopener noreferrer">Otwórz ogłoszenie</a></p><dl>' +
         "<dt>Zamawiający:</dt><dd>Gmina Przykładowa</dd>" +
         "<dt>Lokalizacja:</dt><dd>Przykładowo, woj. mazowieckie</dd>" +
-        "<dt>Data publikacji:</dt><dd>30.10.2026</dd>" +
-        "<dt>Kontakt:</dt><dd>Anna Nowak, zamowienia@example.invalid</dd>" +
-        "<dt>Dlaczego pasuje:</dt><dd>Elektryka · słowo „oświetlenie” w tytule · mazowieckie</dd>" +
         "<dt>Opis:</dt><dd>Wymiana opraw &lt;LED&gt; &amp; słupów</dd></dl>" +
-        '<p><a class="button" href="https://ezamowienia.gov.pl/mo-client-board/bzp/notice-details/id/1" ' +
-        'rel="noopener noreferrer">Otwórz ogłoszenie</a></p>' +
-        "<details><summary>Szczegóły dopasowania</summary><ul><li>CPV: 45310000-3</li></ul></details>",
+        "<details><summary>Więcej szczegółów (data publikacji, kontakt, szczegóły dopasowania)</summary><dl>" +
+        "<dt>Data publikacji:</dt><dd>30.10.2026</dd>" +
+        "<dt>Kontakt:</dt><dd>zamowienia@example.invalid, 000 000 000</dd>" +
+        "<dt>Szczegóły dopasowania:</dt><dd><ul><li>CPV: 45310000-3</li></ul></dd></dl></details>",
+    );
+    // One disclosure for the details, never one inside another.
+    expect(card.match(/<details>/g)).toHaveLength(1);
+  });
+
+  it("names only what the disclosure holds in its summary", () => {
+    const { html } = matchesPage(view());
+    expect(html).toContain(
+      "<details><summary>Więcej szczegółów (data publikacji, szczegóły dopasowania)</summary><dl>" +
+        "<dt>Data publikacji:</dt><dd>30.10.2026</dd>",
     );
   });
 
@@ -307,12 +318,12 @@ describe("matchesPage", () => {
       "<dt>Dlaczego pasuje:</dt><dd>Elektryka · słowo „oświetlenie” w tytule</dd>",
     );
     expect(html).toContain(
-      "<details><summary>Szczegóły dopasowania</summary><ul><li>CPV: 45310000-3</li>" +
-        "<li>region: nieznany — źródło nie podaje województwa</li></ul></details>",
+      "<dt>Szczegóły dopasowania:</dt><dd><ul><li>CPV: 45310000-3</li>" +
+        "<li>region: nieznany — źródło nie podaje województwa</li></ul></dd></dl></details>",
     );
   });
 
-  it("shows a Baza Konkurencyjności offer's attribution in the visible part, before the link", () => {
+  it("shows a Baza Konkurencyjności offer's attribution in the visible part, after the link", () => {
     const bk: Opportunity = {
       ...offer,
       sourceId: "bk",
@@ -322,10 +333,12 @@ describe("matchesPage", () => {
     const { html } = matchesPage(view({ items: [cardOf(bk)] }));
     const [visible = "", folded = ""] = html.split("<details>");
     expect(visible).toContain(
-      "<dt>Źródło:</dt><dd>Baza Konkurencyjności, Ministerstwo Funduszy i Polityki Regionalnej; " +
-        "pobrano 2026-10-30; dane przetworzone: skrócone i ujednolicone</dd></dl>" +
-        '<p><a class="button" href="https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl/ogloszenia/296920" ' +
-        'rel="noopener noreferrer">Otwórz ogłoszenie</a></p>',
+      '<p><a class="button" href="https://bazakonkurencyjnosci.funduszeeuropejskie.gov.pl/ogloszenia/296920" ' +
+        'rel="noopener noreferrer">Otwórz ogłoszenie</a></p><dl>' +
+        "<dt>Zamawiający:</dt><dd>Gmina Przykładowa</dd>" +
+        "<dt>Lokalizacja:</dt><dd>Przykładowo, woj. mazowieckie</dd>" +
+        "<dt>Źródło:</dt><dd>Baza Konkurencyjności, Ministerstwo Funduszy i Polityki Regionalnej; " +
+        "pobrano 2026-10-30; dane przetworzone: skrócone i ujednolicone</dd></dl>",
     );
     expect(folded).not.toContain("Źródło");
     // A BZP card has none.
@@ -364,6 +377,8 @@ describe("matchesPage", () => {
     );
     expect(html).toContain("<dd>&lt;b&gt;Gmina&lt;/b&gt;</dd>");
     expect(html).toContain("<dt>Link:</dt><dd>nie podano</dd></dl>");
+    // Where the button would be: right after "Dlaczego pasuje", before the buyer.
+    expect(html).toContain("</dd><dt>Link:</dt><dd>nie podano</dd></dl><dl><dt>Zamawiający:</dt>");
     expect(html).not.toContain('class="button"');
 
     const quoted = { ...offer, sourceUrl: 'https://example.invalid/a?b="><script>' };

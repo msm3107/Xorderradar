@@ -563,8 +563,12 @@ Szczegóły i uzasadnienie: D-010 (SMTP, biblioteka) i D-024 (wybór ofert, idem
   termin, PR-11). HTML ma style inline (e-mail nie dostaje `/styl.css`) bez stałych szarości
   na tekście, żeby ciemny motyw programu pocztowego zostawał czytelny.
 - Karta oferty (PR-11, `card.ts`, czyste, bez I/O): `offerCard({ offer, reasons }, now)` →
-  `{ title, rows, fullDescription, url, matchDetails }` — jedno źródło treści dla tekstu
-  i HTML e-maila, `/dopasowania` i `/przyklad` (każdy tylko inaczej ją układa). Wartość
+  `{ title, lead, url, body, fullDescription, more, matchDetails }` — jedno źródło treści
+  i kolejności dla tekstu i HTML e-maila, `/dopasowania` i `/przyklad` (każdy tylko inaczej
+  ją składa): `lead` (wartość, termin, „Dlaczego pasuje”; bez linku `http(s)` jeszcze „Link:
+  nie podano”), przycisk/linia „Otwórz ogłoszenie” (`url`), `body` (zamawiający,
+  lokalizacja, wyciąg opisu, atrybucja BK — zawsze widoczna), `more` (data publikacji,
+  kontakt) i `matchDetails` na końcu (D-030). Wartość
   z zapisanego tekstu `numeric` (`formatAmount`, nigdy przez float), termin w czasie polskim
   z dniem tygodnia ze stałej tabeli i odległością w dniach kalendarzowych
   (`formatDeadline`; „PILNE” dla 0–2 dni), „Dlaczego pasuje” jednym zdaniem
@@ -686,9 +690,11 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
 - Strona dopasowań (`/dopasowania`): `readDigestCandidates` + `matchingItems` (jak digest),
   kolejność `digestOrder` (najbliższy termin), najwyżej 50 (`MATCHES_SHOWN`) + „I N
   kolejnych…”, ta sama karta co e-mail (`offerCard`, §4.5), przycisk „Otwórz ogłoszenie”
-  tylko dla `http(s)` z `rel="noopener noreferrer"`. Wiersze w `<dl>` (siatka dwóch kolumn,
-  przy wąskim ekranie jedna); pełny opis w `<details>` „Pełny opis” tylko, gdy wyciąg jest
-  ucięty, CPV i powody techniczne w `<details>` „Szczegóły dopasowania” (bez JS). Pusty
+  tylko dla `http(s)` z `rel="noopener noreferrer"`, zaraz po `lead`. Grupy wierszy w `<dl>`
+  (siatka dwóch kolumn, przy wąskim ekranie jedna); pełny opis w `<details>` „Pełny opis”
+  tylko, gdy wyciąg jest ucięty; data publikacji, kontakt, CPV i powody techniczne w jednym
+  `<details>` „Więcej szczegółów (…)” — podsumowanie wymienia, co jest w środku (bez JS,
+  bez zagnieżdżania). Pusty
   stan objaśnia okno 7 dni; profil nieaktywny dostaje notkę; wiersz profilu odrzucany przez
   schemat → prośba o poprawkę w ustawieniach. Koszt: liczone na żądanie w procesie `serve`;
   `matchingItems` oddaje pętlę zdarzeń po ok. 20 ms pracy (`MATCH_YIELD_AFTER_MS`), a serwer liczy
