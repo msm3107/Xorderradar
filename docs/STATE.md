@@ -10,7 +10,8 @@ Status: PR-08 **MERGED in PR #14 (366618e)**. PR-09 **MERGED in PR #15 (42dd008)
 base branch (b4c7e4c, PR-11 + PR-12) merged in 2026-11-15 — conflicts resolved keeping the
 D-030 card, the rating at the card's end and the short intro from the base, and PR-13's pages
 of 50, region radio, read-only powiaty and 503/429/409 pages; `pnpm check` green (2332 tests);
-awaiting Code & Safety and Quality review of the merge. Owner steps on the VPS for PR-08 (AC1,
+Code & Safety Review PASS (05dc031, f98c90c), Quality Review ACCEPT WITH NOTES (88e0964) → PR
+open for owner review (not merged by the agents). Owner steps on the VPS for PR-08 (AC1,
 `bk` backfill, DEPLOY §6) remain in Blockers.
 
 ## Completed
@@ -691,7 +692,7 @@ Round-1 fixes:
 **PR-13 — Ustawienia bez pułapek** (`docs/PR_PLAN.md` → PR-13) — base branch (b4c7e4c, PR-11 +
 PR-12 merged) merged in 2026-11-15 (05dc031); `pnpm check` green (2332 tests in 65 files, DB
 tests required). Code & Safety Review PASS on the merge (05dc031) and on its follow-up
-(f98c90c, last-page order test); Quality Review of the merge after the STATE fix below. Before
+(f98c90c, last-page order test); Quality Review ACCEPT WITH NOTES after the docs fix (88e0964). Before
 the merge (on top of an early PR-12 commit): 2279 tests (2224 before PR-13, 2269 before the
 round 1 fixes, 2274 before the minors and nits), Code & Safety Review PASS round 3, Quality
 Review ACCEPT.
@@ -1391,9 +1392,10 @@ invalid operator counties → 409 with the support contact, not 500).
 
 ## Next action
 
-0. PR-13: base merged in (2026-11-15) → Code & Safety and Quality review of the merge, AC3
-   screenshots (390 px, form before/after), then open the PR for owner review (not merged by
-   the agents). PR-12: MERGED in PR #18 (b4c7e4c). Out of scope and left for later: scoring
+0. PR-13: base merged in (2026-11-15), Code & Safety PASS, Quality ACCEPT WITH NOTES → owner
+   review of the PR (not merged by the agents). Owner choices: a whole-list CSV (≤ 1000 rows)
+   as a small follow-up; a shorter read-only counties note (about 3 lines) so a profile with
+   operator counties also gets ≥ 40% lower. PR-12: MERGED in PR #18 (b4c7e4c). Out of scope and left for later: scoring
    that learns from ratings, ratings in `match:preview`, XLSX.
    Known PR-13 edge cases for the owner (C&S Low 1, Low 3 of the merge review):
    - „Trafne” on a greyed card on page 2+ moves the card back to its deadline position, which
