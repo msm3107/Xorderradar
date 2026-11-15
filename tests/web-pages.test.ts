@@ -705,6 +705,17 @@ describe("matchesPage", () => {
       expect(lastPage).toContain(
         "Lista kończy się na 100 zamówieniach. Nie pokazujemy 7 kolejnych pasujących zamówień",
       );
+      // Under the list on the last page: the overflow note, then the pager, then
+      // the notes about the whole list.
+      const at = [
+        lastPage.indexOf("</ol>"),
+        lastPage.indexOf("<p>Lista kończy się na 100 zamówieniach."),
+        lastPage.indexOf('<nav aria-label="Strony listy">'),
+        lastPage.indexOf("<p>Oceń zamówienia przyciskami „Trafne” i „Nietrafne”"),
+        lastPage.indexOf("<p>Dane pochodzą z publicznych ogłoszeń."),
+      ];
+      expect(at.every((index) => index >= 0)).toBe(true);
+      expect(at).toEqual([...at].sort((a, b) => a - b));
       const firstPage = matchesPage(
         view({
           items: many(50),

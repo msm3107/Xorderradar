@@ -1388,22 +1388,33 @@ invalid operator counties → 409 with the support contact, not 500).
    screenshots (390 px, form before/after), then open the PR for owner review (not merged by
    the agents). PR-12: MERGED in PR #18 (b4c7e4c). Out of scope and left for later: scoring
    that learns from ratings, ratings in `match:preview`, XLSX.
-   PR-10: MERGED in PR #16 (3b70f94). PR-11: MERGED in PR #17 (b974984). Follow-ups from
-   PR-11 (later PR, not PR-12 scope): the phone number in a card wraps mid-number at 390 px —
-   format `contact.phone` with no-break spaces (Quality Review nit 2); optional desktop
-   alignment of the two card `<dl>` grids (`minmax(11.5rem,max-content) 1fr`, nit 1);
-   `tests/email-sender.test.ts` fixture subject still uses the old company-name format
-   (pass-through only, nothing asserts it; C&S round 3 L-a). PR-12 changes neither
-   `contact.phone` formatting, the card `<dl>` grid rules nor that fixture subject (its one addition
-   to `tests/email-sender.test.ts` is the `/ocena/` redaction case), so all three stay open.
-   Also later, not PR-12 scope: the e-mail footer's „Stan na …” date is ISO
-   („2026-11-09 15:38”) while the page says „12.11.2026 07:00” (deferred from PR-11, Quality
-   N3). After the pilot (Quality N5 of PR-12): a card rated „nietrafne” has no label at its
-   top (only greyed and moved last), and the chosen rating button is only bold
-   (`aria-pressed` for screen readers).
-1. PR-09: MERGED in PR #15 (42dd008). On the VPS
-2. PR-10 – PR-12: merged (PR #16 – #18). Open follow-up from PR-11 (C&S round 3 L-a, later
-   PR): `tests/email-sender.test.ts` fixture subject still uses the old company-name format.
+   Known PR-13 edge cases for the owner (C&S Low 1, Low 3 of the merge review):
+   - „Trafne” on a greyed card on page 2+ moves the card back to its deadline position, which
+     may be on an earlier page; the redirect opens the same page without that anchor (top of
+     the page). No data is wrong. Option: redirect such a change to page 1.
+   - Page 2+, notifications off, a three-line title: the first „Otwórz ogłoszenie” ends at
+     ~849 px of an 844 px viewport (390 px). Option: shorten the page line or put the
+     inactive-profile note under the list on page 2+.
+
+   AC3 (390 px, `<form>` height, base b4c7e4c → PR-13): typical profile 2299 → 1355 px
+   (−41%); worst case (16 voivodeships, 3 counties, pending e-mail change) 2299 → 1619 px
+   (−30%).
+
+   Follow-ups from PR-11 and PR-12 (later PRs):
+   - The phone number in a card wraps mid-number at 390 px; format `contact.phone` with
+     no-break spaces (PR-11 Quality nit 2).
+   - Optional desktop alignment of the two card `<dl>` grids
+     (`minmax(11.5rem,max-content) 1fr`, PR-11 Quality nit 1).
+   - `tests/email-sender.test.ts` fixture subject still uses the old company-name format
+     (pass-through only, nothing asserts it; PR-11 C&S round 3 L-a).
+   - The e-mail footer's „Stan na …” date is ISO („2026-11-09 15:38”) while the page says
+     „12.11.2026 07:00” (PR-11 Quality N3).
+   - After the pilot (PR-12 Quality N5): a card rated „nietrafne” has no label at its top
+     (only greyed and moved last), and the chosen rating button is only bold (`aria-pressed`
+     for screen readers).
+
+1. PR-09: MERGED in PR #15 (42dd008).
+2. PR-10 – PR-12: merged (PR #16 – #18); their open follow-ups are listed under item 0.
 3. On the VPS (PR-08 is merged, 366618e): PR-07B checklist (`docs/DEPLOY.md` §13) if not done yet, then
    PR-08 AC1 and the `bk` backfill (Blockers). Follow-ups from the PR-08 reviews (owner to
    choose the PR):
