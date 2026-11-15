@@ -160,20 +160,18 @@ export function correctableInForm(fields: readonly string[]): boolean {
   );
 }
 
-/** The region radio's messages (PR-13): a contradiction is refused, never guessed. */
+/** The region radio's messages (PR-13). */
 export const REGION_ERRORS = {
   unknown: "Wybierz „Cała Polska” albo „Wybrane województwa”.",
-  allWithTicked:
-    "Zaznaczono „Cała Polska” i województwa. Wybierz „Wybrane województwa” albo odznacz " +
-    "województwa.",
   selectedWithout: "Zaznacz co najmniej jedno województwo albo wybierz „Cała Polska”.",
 } as const;
 
-/** The region radio against the ticked voivodeships; null when they agree. */
+/**
+ * The region radio against the ticked voivodeships; null when they agree.
+ * „Cała Polska” always agrees: its ticks are discarded (validateProfileForm).
+ */
 function regionError(values: ProfileFormValues): string | null {
-  if (values.region === REGION_ALL) {
-    return values.voivodeships.length === 0 ? null : REGION_ERRORS.allWithTicked;
-  }
+  if (values.region === REGION_ALL) return null;
   if (values.region === REGION_SELECTED) {
     return values.voivodeships.length > 0 ? null : REGION_ERRORS.selectedWithout;
   }
@@ -183,8 +181,11 @@ function regionError(values: ProfileFormValues): string | null {
 /**
  * Validates the form with the domain's settings schema. A new address is not
  * typed twice: it takes effect only through the confirmation link sent to it
- * (D-031), so a typo cannot lock the customer out. The region radio must
- * agree with the ticked voivodeships (PR-13).
+ * (D-031), so a typo cannot lock the customer out. The region radio is the
+ * explicit choice (PR-13, owner's decision in the review of PR #19): with
+ * „Cała Polska” the ticked voivodeships are discarded unvalidated and an
+ * empty list is saved — the page has no script, so boxes ticked before the
+ * radio changed are still sent. „Wybrane województwa” needs one ticked.
  */
 export function validateProfileForm(values: ProfileFormValues): ProfileFormResult {
   const lists = {
@@ -195,7 +196,7 @@ export function validateProfileForm(values: ProfileFormValues): ProfileFormResul
     name: values.name,
     email: values.email,
     categories: values.categories,
-    voivodeships: values.voivodeships,
+    voivodeships: values.region === REGION_ALL ? [] : values.voivodeships,
     includeKeywords: lists.includeKeywords.map((entry) => entry.value),
     excludeKeywords: lists.excludeKeywords.map((entry) => entry.value),
   };

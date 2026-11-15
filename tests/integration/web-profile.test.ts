@@ -410,8 +410,8 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       ]);
     });
 
-    // PR-13 (AC1): the region is an explicit choice; a contradiction saves nothing.
-    it("refuses „Wybrane województwa” without one and „Cała Polska” with some, saving nothing", async () => {
+    // PR-13 (AC1): the region is an explicit choice; „Wybrane” without one or an unknown choice saves nothing.
+    it("refuses „Wybrane województwa” without one and an unknown choice, saving nothing", async () => {
       const { cookie, csrf } = await login();
       const before = await stored();
       const changed = { name: "Zmieniona nazwa", email: NEW_EMAIL };
@@ -423,17 +423,6 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       expect(selectedHtml).toContain(REGION_ERRORS.selectedWithout);
       expect(selectedHtml).toContain('value="selected" checked required aria-invalid="true"');
       expect(selectedHtml).toContain('value="Zmieniona nazwa"');
-
-      const all = await post(
-        "/profil/ustawienia",
-        settingsForm(csrf, { ...changed, region: "all" }),
-        { cookie },
-      );
-      expect(all.status).toBe(400);
-      const allHtml = await all.text();
-      expect(allHtml).toContain(REGION_ERRORS.allWithTicked);
-      expect(allHtml).toContain('value="all" checked required aria-invalid="true"');
-      expect(allHtml).toContain('value="mazowieckie" checked aria-invalid="true">');
 
       // An unknown value: the same form error; never echoed as a choice.
       for (const region of ["", "ALL", "wszystkie", "selected "]) {
@@ -468,6 +457,53 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
         await fetch(`${url}/profil/ustawienia`, { headers: { cookie } })
       ).text();
       expect(reopened).toContain('id="region-polska" name="region" value="all" checked required>');
+    });
+
+    // PR-13, the owner's decision in the review of PR #19: the page has no script, so the
+    // boxes ticked before „Cała Polska” was chosen are still sent; the radio wins.
+    it("saves „Cała Polska” with voivodeships still ticked as the whole country", async () => {
+      await sql`UPDATE company_profiles SET counties = ARRAY['piaseczyński'] WHERE id = ${profile.id}`.execute(
+        schema.db,
+      );
+      const { cookie, csrf } = await login();
+      expect((await stored()).voivodeships).toEqual(["mazowieckie"]);
+      const checkedBox = /name="voivodeships" value="[^"]*" checked/;
+
+      // Another field's error first: the form comes back as sent, the region without an error.
+      const invalid = await post(
+        "/profil/ustawienia",
+        settingsForm(csrf, { name: "", region: "all" }),
+        { cookie },
+      );
+      expect(invalid.status).toBe(400);
+      const invalidHtml = await invalid.text();
+      expect(invalidHtml).toContain('value="all" checked required>');
+      expect(invalidHtml).toContain('value="mazowieckie" checked>');
+      expect(invalidHtml).not.toContain(REGION_ERRORS.selectedWithout);
+      expect(invalidHtml).not.toContain(REGION_ERRORS.unknown);
+      expect((await stored()).voivodeships).toEqual(["mazowieckie"]);
+
+      // Fixed and saved as sent again, with a tampered box too: no voivodeship is stored.
+      const body = new URLSearchParams(settingsForm(csrf, { region: "all" }));
+      body.append("voivodeships", "Nieznane");
+      const saved = await post("/profil/ustawienia", body.toString(), { cookie });
+      expect(saved.status).toBe(303);
+      expect(saved.headers.get("location")).toBe("/profil");
+      expect(await saved.text()).toBe("");
+      expect(await stored()).toMatchObject({
+        name: "Jan Kowalski Elektryka",
+        voivodeships: [],
+        counties: ["piaseczyński"],
+      });
+      expect(await pendingEmail()).toBeNull();
+
+      const reopened = await (
+        await fetch(`${url}/profil/ustawienia`, { headers: { cookie } })
+      ).text();
+      expect(reopened).toContain('id="region-polska" name="region" value="all" checked required>');
+      expect(reopened).toContain('id="region-wybrane" name="region" value="selected" required>');
+      expect(reopened).not.toMatch(checkedBox);
+      expect(reopened).toContain('name="voivodeships" value="mazowieckie">');
     });
 
     // PR-13 (AC2): counties are the operator's (CLI); a save never touches them.
@@ -537,11 +573,14 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
         const form = await (await fetch(contactUrl, { headers: { cookie } })).text();
         expect(form).toContain(contactNote);
         expect(form).not.toContain("odpowiedz na ostatnią wiadomość");
+        // A region error: „Wybrane województwa” with none ticked.
+        const withoutVoivodeship = new URLSearchParams(settingsForm(csrf, { name: "Inna nazwa" }));
+        withoutVoivodeship.delete("voivodeships");
         const refused = await fetch(contactUrl, {
           method: "POST",
           redirect: "manual",
           headers: { "content-type": FORM, origin: BASE, cookie },
-          body: settingsForm(csrf, { name: "Inna nazwa", region: "all" }),
+          body: withoutVoivodeship.toString(),
         });
         expect(refused.status).toBe(400);
         const refusedHtml = await refused.text();

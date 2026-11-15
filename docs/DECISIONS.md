@@ -1490,11 +1490,14 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
 - **Zmiana (PR-13, „Ustawienia bez pułapek”)** — formularz i `/dopasowania`:
   - **Region jawnym wyborem:** pole radio `region` — „Cała Polska” (`all`) / „Wybrane
     województwa” (`selected`), zaznaczone według zapisanego profilu (bez województw → „Cała
-    Polska”). Bez JavaScriptu; CSP bez zmian. Walidacja w `profile-form.ts`, nic nie jest
-    zgadywane: `selected` bez województwa → błąd przy polu; `all` z zaznaczonymi
-    województwami → błąd (nie odznaczamy za klienta); inna wartość (także pusta, wielkie
-    litery, spacja) → błąd „Wybierz…”, 400 z formularzem. `region` brak albo dwa razy → wadliwy
-    formularz, 400 bez formularza. Za każdym razem nic nie jest zapisane.
+    Polska”). Bez JavaScriptu; CSP bez zmian. Walidacja w `profile-form.ts`: radio to jawna
+    intencja — przy `all` serwer pomija przesłane województwa (bez walidacji, także wartości
+    spoza listy) i zapisuje pustą listę (decyzja właściciela z review PR #19: strona bez JS
+    zostawia zaznaczenia po zmianie radia; formularz pokazany ponownie po błędzie innego pola
+    zostawia je jak wysłane, a zapis z „Cała Polska” i tak zapisuje pustą listę);
+    `selected` bez województwa → błąd przy polu; inna wartość (także pusta, wielkie litery,
+    spacja) → błąd „Wybierz…”, 400 z formularzem. `region` brak albo dwa razy → wadliwy
+    formularz, 400 bez formularza. Przy każdym z tych błędów nic nie jest zapisane.
   - **Powiaty poza formularzem:** ustawia je wyłącznie operator (`profile:create`, SQL —
     `docs/RUNBOOK.md`). `companyProfileSettingsSchema` = schemat profilu bez `active` i bez
     `counties`, więc `UPDATE` zapisu nie zawiera kolumny `counties` — zapisane powiaty zostają
@@ -1566,8 +1569,9 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     503 (wyżej) i 429 (D-028). Odświeżenie po 3 s przy `Retry-After: 5` jest celowe: 3 s to
     czas z planu dla przeglądarki (meta refresh), a `Retry-After` zostaje dla klientów innych
     niż przeglądarka (czytniki, skrypty) i nie zmienia się z PR-13.
-  - **Odrzucone:** odznaczanie województw za klienta przy „Cała Polska” (zgadywanie);
-    przycisk JS „zaznacz wszystkie” (CSP bez skryptów); wynik listy w pamięci między stronami
+  - **Odrzucone:** 400 przy `all` z zaznaczonymi województwami (pułapka: strona bez JS
+    zostawia zaznaczenia, klient musiał odznaczać do 16 pól); przycisk JS „zaznacz
+    wszystkie” (CSP bez skryptów); wynik listy w pamięci między stronami
     (cache — unieważnianie, D-027); 400 dla złego numeru strony (404 = taka strona nie istnieje,
     tak jak inne nieznane adresy); zostawienie pola powiatów z ostrzeżeniem (pułapka zostaje).
 

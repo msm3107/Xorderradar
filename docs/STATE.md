@@ -11,7 +11,8 @@ base branch (b4c7e4c, PR-11 + PR-12) merged in 2026-11-15 — conflicts resolved
 D-030 card, the rating at the card's end and the short intro from the base, and PR-13's pages
 of 50, region radio, read-only powiaty and 503/429/409 pages; `pnpm check` green (2332 tests);
 Code & Safety Review PASS (05dc031, f98c90c), Quality Review ACCEPT WITH NOTES (88e0964) → PR
-open for owner review (not merged by the agents). Owner steps on the VPS for PR-08 (AC1,
+open for owner review (not merged by the agents). Owner review of PR #19: PASS with one Medium
+(`region=all` with ticks → 400) fixed — `all` now ignores the ticks and saves `[]` (2335 tests). Owner steps on the VPS for PR-08 (AC1,
 `bk` backfill, DEPLOY §6) remain in Blockers.
 
 ## Completed
@@ -701,9 +702,11 @@ README, ARCHITECTURE, SECURITY, RUNBOOK („Powiaty profilu (tylko operator)”)
 dependency, no migration.
 
 - Region radio `region` („Cała Polska” `all` / „Wybrane województwa” `selected`), pre-selected
-  from the profile, no JS, CSP unchanged. `selected` without a voivodeship and `all` with
-  ticked voivodeships → field error (400, form re-rendered, nothing written); an unknown value
-  → field error; `region` missing or repeated → malformed form (400 error page). AC1.
+  from the profile, no JS, CSP unchanged. `selected` without a voivodeship → field error (400,
+  form re-rendered, nothing written); `all` ignores the submitted voivodeships and saves `[]`
+  (owner's review of PR #19: the page has no JS, so ticks stay after switching the radio; the
+  earlier 400 for `all` with ticks was a trap); an unknown value → field error; `region`
+  missing or repeated → malformed form (400 error page). AC1.
 - Counties left the form: `companyProfileSettingsSchema` omits `counties`, so the `UPDATE` of a
   save has no `counties` column — stored counties stay byte-identical (integration test compares
   `counties::text`). A stray `counties`/`powiaty` field (old cached form) → 400, nothing
@@ -1392,18 +1395,22 @@ invalid operator counties → 409 with the support contact, not 500).
 
 ## Next action
 
-0. PR-13: base merged in (2026-11-15), Code & Safety PASS, Quality ACCEPT WITH NOTES → owner
-   review of the PR (not merged by the agents). Owner choices: a whole-list CSV (≤ 1000 rows)
-   as a small follow-up; a shorter read-only counties note (about 3 lines) so a profile with
-   operator counties also gets ≥ 40% lower. PR-12: MERGED in PR #18 (b4c7e4c). Out of scope and left for later: scoring
-   that learns from ratings, ratings in `match:preview`, XLSX.
-   Known PR-13 edge cases for the owner (C&S Low 1, Low 3 of the merge review):
-   - „Trafne” on a greyed card on page 2+ moves the card back to its deadline position, which
-     may be on an earlier page; the redirect opens the same page without that anchor (top of
-     the page). No data is wrong. Option: redirect such a change to page 1.
-   - Page 2+, notifications off, a three-line title: the first „Otwórz ogłoszenie” ends at
-     ~849 px of an 844 px viewport (390 px). Option: shorten the page line or put the
-     inactive-profile note under the list on page 2+.
+0. PR-13: owner review of PR #19 (2026-11-15) — PASS with one Medium fixed in this PR:
+   `region=all` with ticked voivodeships no longer gives 400; the server ignores them and saves
+   `[]` (D-027 updated; Code & Safety PASS, Quality ACCEPT WITH NOTES; 2335 tests). Not merged by
+   the agents. QR note: no extra form text (AC3 margin); if the pilot shows lost selections, a
+   `/profil` notice variant „zaznaczone województwa usunięte”. Owner decisions:
+   - **Next PR (PR-14, small):** whole-list CSV (≤ 1000 rows) and, with it, a shorter
+     read-only counties note (about 3 lines) so a profile with operator counties also gets
+     ≥ 40% lower.
+   - „Trafne” on a greyed card on page 2+ (card moves back to its deadline position, maybe an
+     earlier page; redirect opens the same page at the top): **stays as is** — data correct,
+     a redirect to page 1 would lose context.
+   - Page 2+, notifications off, three-line title, first „Otwórz ogłoszenie” at ~849 px of
+     844 px: **negligible, no change**.
+
+   PR-12: MERGED in PR #18 (b4c7e4c). Out of scope and left for later: scoring that learns
+   from ratings, ratings in `match:preview`, XLSX.
 
    AC3 (390 px, `<form>` height, base b4c7e4c → PR-13): typical profile 2299 → 1355 px
    (−41%); worst case (16 voivodeships, 3 counties, pending e-mail change) 2299 → 1619 px

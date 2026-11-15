@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CATEGORY_LABELS, MVP_CATEGORIES } from "../src/domain/vocabulary.js";
+import { CATEGORY_LABELS, MVP_CATEGORIES, VOIVODESHIPS } from "../src/domain/vocabulary.js";
 import {
   correctableInForm,
   FIELD_ORDER,
@@ -168,7 +168,7 @@ describe("validateProfileForm", () => {
     expect(FIELD_ORDER.filter((field) => field in errors)).toEqual(Object.keys(errors));
   });
 
-  // PR-13: the region is an explicit choice; a choice contradicting the boxes is refused.
+  // PR-13: the region is an explicit choice; with „Cała Polska” the ticked boxes are discarded.
   describe("the region radio", () => {
     it("saves the whole country with no voivodeship and the ticked ones otherwise", () => {
       const all = validateProfileForm(values({ region: REGION_ALL, voivodeships: [] }));
@@ -187,13 +187,32 @@ describe("validateProfileForm", () => {
       });
     });
 
-    it("refuses „Cała Polska” with voivodeships ticked, instead of ignoring them", () => {
-      expect(errorsOf(values({ region: REGION_ALL, voivodeships: ["mazowieckie"] }))).toEqual({
-        voivodeships: [
-          "Zaznaczono „Cała Polska” i województwa. Wybierz „Wybrane województwa” albo " +
-            "odznacz województwa.",
-        ],
+    // The owner's decision in the review of PR #19: the page has no script, so boxes
+    // ticked before „Cała Polska” was chosen are still sent; the radio wins.
+    it("saves „Cała Polska” with voivodeships ticked as the whole country, discarding them", () => {
+      for (const voivodeships of [["mazowieckie"], [...VOIVODESHIPS]]) {
+        const result = validateProfileForm(values({ region: REGION_ALL, voivodeships }));
+        if (!result.ok) throw new Error("expected the form to be valid");
+        expect(result.settings.voivodeships).toEqual([]);
+      }
+    });
+
+    it("discards tampered voivodeships with „Cała Polska” unvalidated, storing none", () => {
+      for (const voivodeships of [["Mazowieckie"], ["x", "mazowieckie", "mazowieckie"], [""]]) {
+        const result = validateProfileForm(values({ region: REGION_ALL, voivodeships }));
+        if (!result.ok) throw new Error("expected the form to be valid");
+        expect(result.settings.voivodeships).toEqual([]);
+      }
+    });
+
+    it("still refuses „Wybrane województwa” with none and an unknown choice after discarding", () => {
+      expect(errorsOf(values({ region: REGION_SELECTED, voivodeships: [] }))).toEqual({
+        voivodeships: [REGION_ERRORS.selectedWithout],
       });
+      expect(errorsOf(values({ region: "wszystkie", voivodeships: ["mazowieckie"] }))).toEqual({
+        voivodeships: [REGION_ERRORS.unknown],
+      });
+      expect(Object.keys(REGION_ERRORS).sort()).toEqual(["selectedWithout", "unknown"]);
     });
 
     it("refuses an unknown choice whatever is ticked", () => {
@@ -208,8 +227,12 @@ describe("validateProfileForm", () => {
     });
 
     it("adds its message after the schema's for an unknown voivodeship", () => {
-      expect(errorsOf(values({ region: REGION_ALL, voivodeships: ["Mazowieckie"] }))).toEqual({
-        voivodeships: ["Wybierz województwa z listy.", REGION_ERRORS.allWithTicked],
+      expect(errorsOf(values({ region: "ALL", voivodeships: ["Mazowieckie"] }))).toEqual({
+        voivodeships: ["Wybierz województwa z listy.", REGION_ERRORS.unknown],
+      });
+      // „Wybrane województwa” keeps validating the ticked ones.
+      expect(errorsOf(values({ region: REGION_SELECTED, voivodeships: ["Mazowieckie"] }))).toEqual({
+        voivodeships: ["Wybierz województwa z listy."],
       });
     });
   });

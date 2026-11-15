@@ -667,7 +667,8 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   tylko ten kod → 409 `profileSaveBlockedPage` z kontaktem do obsługi, log `warn` z id
   profilu i ścieżkami pól; `/dopasowania` przy profilu odrzucanym na polach spoza formularza
   (`correctableInForm`) odsyła do obsługi, nie do ustawień. Walidacja schematem domeny plus spójność
-  regionu (`selected` bez województwa, `all` z województwami, inna wartość → błąd przy polu),
+  regionu (`selected` bez województwa, inna wartość → błąd przy polu; przy `all` przesłane
+  województwa są pomijane i zapisuje się pusta lista),
   błędy po polsku przy polach (numer wiersza dla list) i w podsumowaniu z odnośnikami; `label`,
   `fieldset`/`legend`, `aria-describedby`, `aria-invalid`. Błąd → 400 z wysłanymi wartościami;
   zapis → 303 `/profil` z komunikatem „… Lista dopasowań pokazuje zmiany od razu, e-mail — od

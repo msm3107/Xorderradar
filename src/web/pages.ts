@@ -686,10 +686,13 @@ const COUNTIES_NOTE_ID = "powiaty-uwaga";
 
 /**
  * The region (PR-13): an explicit „Cała Polska” / „Wybrane województwa”
- * radio, then the voivodeships. No script: a contradicting choice is refused
- * by the server (validateProfileForm), never guessed. `counties`: set by the
- * operator, shown read-only — they change what „Cała Polska” matches — with
- * the way to the operator (`contactEmail`, CONTACT_EMAIL, when set).
+ * radio, then the voivodeships. No script: with „Cała Polska” the server
+ * discards the ticked boxes (validateProfileForm), and a form shown again
+ * after another field's error keeps them as sent — switching back to
+ * „Wybrane województwa” needs no re-ticking, and saving with „Cała Polska”
+ * still stores none. `counties`: set by the operator, shown read-only — they
+ * change what „Cała Polska” matches — with the way to the operator
+ * (`contactEmail`, CONTACT_EMAIL, when set).
  */
 function regionGroup(
   values: ProfileFormValues,
