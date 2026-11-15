@@ -8,6 +8,7 @@ import {
   invalidLinkPage,
   loginRequiredPage,
   matchesHref,
+  matchesRequestHref,
   profilePage,
   STYLESHEET,
   unsubscribedPage,
@@ -20,6 +21,7 @@ import {
   MATCHES_MAX_PAGES,
   MAX_BODY_BYTES,
   matchesPageFromUrl,
+  matchesRequestFromUrl,
   parseForm,
   parseMultiValueForm,
   parsePageNumber,
@@ -130,8 +132,48 @@ describe("page numbers of /dopasowania (PR-13)", () => {
   it("links page 1 without the parameter and the CSV of a page", () => {
     expect(matchesHref(1)).toBe("/dopasowania");
     expect(matchesHref(2)).toBe("/dopasowania?strona=2");
-    expect(matchesHref(1, "csv")).toBe("/dopasowania.csv");
-    expect(matchesHref(20, "csv")).toBe("/dopasowania.csv?strona=20");
+    expect(matchesRequestHref({ kind: "page", page: 1 })).toBe("/dopasowania");
+    expect(matchesRequestHref({ kind: "page", page: 2 })).toBe("/dopasowania?strona=2");
+    expect(matchesRequestHref({ kind: "csv_page", page: 20 })).toBe("/dopasowania.csv?strona=20");
+  });
+
+  // PR-14: the CSV without `strona` is the whole list; page 1 keeps its parameter,
+  // so a 503 reload of `?strona=1` fetches that page, not the whole list.
+  it("links the whole list's CSV without the parameter and a CSV page with it", () => {
+    expect(matchesRequestHref({ kind: "csv_all" })).toBe("/dopasowania.csv");
+    expect(matchesRequestHref({ kind: "csv_page", page: 1 })).toBe("/dopasowania.csv?strona=1");
+  });
+
+  it("reads the CSV without `strona` as the whole list, with it as that page (PR-14)", () => {
+    for (const url of ["/dopasowania.csv", "/dopasowania.csv?", "/dopasowania.csv?x=5"]) {
+      expect(matchesRequestFromUrl("matches_csv", url, 20)).toEqual({ kind: "csv_all" });
+    }
+    expect(matchesRequestFromUrl("matches_csv", "/dopasowania.csv?strona=1", 20)).toEqual({
+      kind: "csv_page",
+      page: 1,
+    });
+    expect(matchesRequestFromUrl("matches_csv", "/dopasowania.csv?x=1&strona=%32", 20)).toEqual({
+      kind: "csv_page",
+      page: 2,
+    });
+    // The list has no whole list: without `strona` it is page 1, as before.
+    expect(matchesRequestFromUrl("matches", "/dopasowania", 20)).toEqual({ kind: "page", page: 1 });
+    expect(matchesRequestFromUrl("matches", "/dopasowania?strona=3", 20)).toEqual({
+      kind: "page",
+      page: 3,
+    });
+    for (const query of [
+      "strona",
+      "strona=",
+      "strona=0",
+      "strona=01",
+      "strona=21",
+      "strona=x",
+      "strona=1&strona=1",
+    ]) {
+      expect(matchesRequestFromUrl("matches_csv", `/dopasowania.csv?${query}`, 20)).toBeNull();
+      expect(matchesRequestFromUrl("matches", `/dopasowania?${query}`, 20)).toBeNull();
+    }
   });
 });
 

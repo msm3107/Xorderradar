@@ -71,10 +71,12 @@ import {
   loginRefusedPage,
   matchesBusyPage,
   matchesHref,
+  matchesRequestHref,
   matchesTooManyPage,
   matchesPage,
   matchesUnavailablePage,
   type MatchesPagination,
+  type MatchesRequest,
   type Page,
   profilePage,
   profileSaveBlockedPage,
@@ -440,6 +442,12 @@ export function parsePageNumber(value: string, maxPages: number): number | null 
   return page <= maxPages ? page : null;
 }
 
+/** Every `strona` of a URL's query, URL-decoded (none without a query). */
+function stronaValues(url: string): string[] {
+  const at = url.indexOf("?");
+  return at === -1 ? [] : new URLSearchParams(url.slice(at + 1)).getAll("strona");
+}
+
 /**
  * The page asked for in a /dopasowania(.csv) URL (PR-13): 1 without
  * `strona`; the number when it occurs exactly once and parsePageNumber takes
@@ -448,11 +456,27 @@ export function parsePageNumber(value: string, maxPages: number): number | null 
  * parameters are ignored, as on every route.
  */
 export function matchesPageFromUrl(url: string, maxPages: number): number | null {
-  const at = url.indexOf("?");
-  const values = at === -1 ? [] : new URLSearchParams(url.slice(at + 1)).getAll("strona");
+  const values = stronaValues(url);
   if (values.length === 0) return 1;
   if (values.length > 1) return null;
   return parsePageNumber(values[0] ?? "", maxPages);
+}
+
+/**
+ * What a GET of /dopasowania or /dopasowania.csv asks for (PR-14): the list
+ * reads its page as before (matchesPageFromUrl, 1 without `strona`); the CSV
+ * without any `strona` is the whole list, with one the page of PR-13 by the
+ * same rules (anything malformed: null, a 404).
+ */
+export function matchesRequestFromUrl(
+  route: "matches" | "matches_csv",
+  url: string,
+  maxPages: number,
+): MatchesRequest | null {
+  if (route === "matches_csv" && stronaValues(url).length === 0) return { kind: "csv_all" };
+  const page = matchesPageFromUrl(url, maxPages);
+  if (page === null) return null;
+  return route === "matches" ? { kind: "page", page } : { kind: "csv_page", page };
 }
 
 export interface MultiValueForm<S extends string, M extends string> {
@@ -767,13 +791,13 @@ async function handle(
         if (session === null) return unauthenticated(req);
         // A malformed page is refused before any work; one past the end is clamped later.
         const maxPages = matchesMaxPages(options);
-        const page = matchesPageFromUrl(req.url ?? "", maxPages);
-        if (page === null) return pageReply(errorPage(404));
-        const kind = route.name === "matches" ? "page" : "csv";
-        const href = matchesHref(page, kind);
+        const request = matchesRequestFromUrl(route.name, req.url ?? "", maxPages);
+        if (request === null) return pageReply(errorPage(404));
+        const href = matchesRequestHref(request);
+        const kind = request.kind === "page" ? "page" : "csv";
         return withMatchesSlot(res, state, session.sessionId, href, kind, async () => {
           const now = clock(options);
-          const list = await matchesList(db, session.profileId, now, page, maxPages);
+          const list = await matchesList(db, session.profileId, now);
           if (list !== null && "invalidFields" in list) {
             return pageReply(
               matchesUnavailablePage(
@@ -783,9 +807,22 @@ async function handle(
             );
           }
           if (list === null) return unauthenticated(req);
-          return kind === "page"
-            ? matchesReply(list, now, csrfTokenFor(session.token))
-            : matchesCsvReply(list, now);
+          switch (request.kind) {
+            case "page":
+              return matchesReply(
+                list,
+                listPage(list.ordered, request.page, maxPages),
+                now,
+                csrfTokenFor(session.token),
+              );
+            case "csv_page": {
+              const { shown, pagination } = listPage(list.ordered, request.page, maxPages);
+              return matchesCsvReply(shown, now, pagination.page);
+            }
+            case "csv_all":
+              // The rows of all pages together, in the list's order: the same cut at the limit.
+              return matchesCsvReply(list.ordered.slice(0, maxPages * MATCHES_SHOWN), now, null);
+          }
         });
       }
       case "link_request":
@@ -1102,8 +1139,9 @@ async function saveProfileSettings(
  * Runs `compute` in the one /dopasowania slot (D-027): 429 when this session
  * already has MATCHES_MAX_PER_SESSION requests in progress, 503 when the wait
  * is refused or runs out. Shared by the page and its CSV (PR-12). `href`:
- * the URL asked for, rebuilt from its parsed page (matchesHref) — where the
- * 503 page reloads to and the 429 page links (PR-13); `kind`: a page or its CSV.
+ * the URL asked for, rebuilt from its parsed request (matchesRequestHref) —
+ * where the 503 page reloads to and the 429 page links (PR-13, PR-14);
+ * `kind`: a page or a CSV.
  */
 async function withMatchesSlot(
   res: ServerResponse,
@@ -1155,16 +1193,22 @@ interface MatchesList {
   readonly hasVoivodeships: boolean;
   readonly hasCounties: boolean;
   /**
-   * One page, at most MATCHES_SHOWN: the digest's order, offers rated
+   * Every matching offer, before any cut: the digest's order, offers rated
    * „Nietrafne” last — across the whole list, before it is cut into pages.
    */
+  readonly ordered: readonly RatedItem[];
+  readonly truncated: boolean;
+}
+
+/** One page of a MatchesList (PR-13). */
+interface MatchesListPage {
+  /** At most MATCHES_SHOWN, in the list's order. */
   readonly shown: readonly RatedItem[];
   /** The offer right after the page (on the next page or on none), null: none. */
   readonly following: RatedItem | null;
   readonly pagination: MatchesPagination;
   /** Matching offers beyond the page limit. */
   readonly more: number;
-  readonly truncated: boolean;
 }
 
 /** A stored profile the schema refuses at these field paths (names only, never values). */
@@ -1174,19 +1218,16 @@ interface InvalidStoredProfile {
 
 /**
  * The digest's candidates and rules for this one profile (D-027), with its
- * ratings read in one query (PR-12), cut to page `page` of at most
- * `maxPages` (PR-13) — one computation, whichever the page. A page past the
- * last one shows the last one (the list may have shrunk since the link was
- * made). InvalidStoredProfile: a stored profile the schema refuses (the
- * form or, for e.g. counties, only the operator can correct it); null: no
- * such profile.
+ * ratings read in one query (PR-12) — one computation, whichever the page
+ * or file (listPage cuts a page, the whole-list CSV the first
+ * `maxPages × MATCHES_SHOWN`). InvalidStoredProfile: a stored profile the
+ * schema refuses (the form or, for e.g. counties, only the operator can
+ * correct it); null: no such profile.
  */
 async function matchesList(
   db: Kysely<Database>,
   profileId: string,
   now: Date,
-  page: number,
-  maxPages: number,
 ): Promise<MatchesList | InvalidStoredProfile | null> {
   const profile = await getCompanyProfile(db, profileId).catch(
     (error: unknown): InvalidStoredProfile => {
@@ -1209,6 +1250,20 @@ async function matchesList(
     ...rated.filter((entry) => entry.verdict !== "not_relevant"),
     ...rated.filter((entry) => entry.verdict === "not_relevant"),
   ];
+  return {
+    active: profile.active,
+    hasVoivodeships: profile.voivodeships.length > 0,
+    hasCounties: profile.counties.length > 0,
+    ordered,
+    truncated: candidates.truncated,
+  };
+}
+
+/**
+ * Page `page` of the list, of at most `maxPages` (PR-13). A page past the
+ * last one is the last one (the list may have shrunk since the link was made).
+ */
+function listPage(ordered: readonly RatedItem[], page: number, maxPages: number): MatchesListPage {
   const limit = maxPages * MATCHES_SHOWN;
   const listed = Math.min(ordered.length, limit);
   const pages = Math.max(1, Math.ceil(listed / MATCHES_SHOWN));
@@ -1216,19 +1271,15 @@ async function matchesList(
   const offset = (shownPage - 1) * MATCHES_SHOWN;
   const end = Math.min(offset + MATCHES_SHOWN, listed);
   return {
-    active: profile.active,
-    hasVoivodeships: profile.voivodeships.length > 0,
-    hasCounties: profile.counties.length > 0,
     shown: ordered.slice(offset, end),
     following: ordered[end] ?? null,
     pagination: { page: shownPage, pages, offset, listed, limit },
     more: ordered.length - listed,
-    truncated: candidates.truncated,
   };
 }
 
-/** GET /dopasowania: the list as cards, each with its rating form. */
-function matchesReply(list: MatchesList, now: Date, csrf: string): Reply {
+/** GET /dopasowania: one page of the list as cards, each with its rating form. */
+function matchesReply(list: MatchesList, cut: MatchesListPage, now: Date, csrf: string): Reply {
   return pageReply(
     matchesPage({
       active: list.active,
@@ -1236,34 +1287,36 @@ function matchesReply(list: MatchesList, now: Date, csrf: string): Reply {
       hasCounties: list.hasCounties,
       stateAt: formatWarsawMinute(now),
       windowDays: DIGEST_NEW_DAYS,
-      items: list.shown.map(({ item, verdict }, index) => ({
+      items: cut.shown.map(({ item, verdict }, index) => ({
         ...offerCard(item, now),
         feedback: {
           opportunityId: item.offer.id,
           verdict,
           csrf,
           // The last card's next is the next page's first: it moves up after „Nietrafne”.
-          next: (list.shown[index + 1] ?? list.following)?.item.offer.id ?? null,
-          page: list.pagination.page,
+          next: (cut.shown[index + 1] ?? cut.following)?.item.offer.id ?? null,
+          page: cut.pagination.page,
         },
       })),
-      pagination: list.pagination,
-      more: list.more,
+      pagination: cut.pagination,
+      more: cut.more,
       truncated: list.truncated,
     }),
   );
 }
 
 /**
- * GET /dopasowania.csv (PR-12, D-032): the same rows and order as the page;
- * since PR-13 the page asked for (`?strona=N`, file name `…-strona-N.csv`).
+ * GET /dopasowania.csv (PR-12, D-032): `rows` in the list's order. Since
+ * PR-14 without `strona` the whole list (`page` null, file
+ * `dopasowania-RRRR-MM-DD.csv`); with it (PR-13, old links) that page, file
+ * name `…-strona-N.csv` — page 1 too, so it never takes the whole list's name.
  */
-function matchesCsvReply(list: MatchesList, now: Date): Reply {
-  const { page } = list.pagination;
-  const name = `dopasowania-${warsawDay(now)}${page > 1 ? `-strona-${String(page)}` : ""}.csv`;
+function matchesCsvReply(rows: readonly RatedItem[], now: Date, page: number | null): Reply {
+  const suffix = page === null ? "" : `-strona-${String(page)}`;
+  const name = `dopasowania-${warsawDay(now)}${suffix}.csv`;
   return {
     status: 200,
-    body: matchesCsv(list.shown.map(({ item, verdict }) => ({ offer: item.offer, verdict }))),
+    body: matchesCsv(rows.map(({ item, verdict }) => ({ offer: item.offer, verdict }))),
     contentType: "text/csv; charset=utf-8",
     headers: { "Content-Disposition": `attachment; filename="${name}"` },
   };

@@ -482,10 +482,9 @@ Przy wdrażaniu firmy w pilotaż poleć ocenianie hurtem na `/dopasowania` (jedn
 zamówienie, 50 zamówień na stronę, kolejne strony linkiem „Następna strona”, od PR-13) zamiast
 pojedynczych linków z e-maili — więcej ocen w krótszym czasie.
 
-Klient może też pobrać swoją listę dopasowań jako CSV („Pobierz listę jako CSV” na
-`/dopasowania`, przy kilku stronach „Ta strona jako CSV” — zamówienia oglądanej strony,
-pozostałe strony z ich stron; CSV całej listy czeka na decyzję właściciela; separator `;`, UTF-8
-z BOM — otwiera się w Excelu i Arkuszach Google). Lista kończy się na 20 stronach (1000
+Klient może też pobrać swoją listę dopasowań jako CSV („Pobierz listę jako CSV” na każdej
+stronie `/dopasowania` — od PR-14 jeden plik z całą listą, najwyżej 1000 zamówień; separator
+`;`, UTF-8 z BOM — otwiera się w Excelu i Arkuszach Google). Lista kończy się na 20 stronach (1000
 zamówień); większy nadmiar to sygnał do zawężenia profilu.
 
 ## E-maile dostępu i kontakt (`serve`, D-031)

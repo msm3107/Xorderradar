@@ -723,17 +723,18 @@ function regionGroup(
       extra,
     ) +
     "</div>";
-  const who =
-    contactEmail === null
-      ? "Powiaty zmienia obsługa — odpowiedz na ostatnią wiadomość od nas."
-      : `Powiaty zmienia obsługa. ${SUPPORT_MAIL_TEXT}: ${mailLink(contactEmail)}.`;
+  // Short (PR-14): about five lines at 390 px with three counties, in the group's hint
+  // style — the warning box took nine. The same substance: the counties, their effect
+  // on „Cała Polska” and who changes them. Form 1473 px; the planned ~3 lines did not
+  // fit (the form without the note is 1355 px) and the owner accepted this (D-027).
+  const change = contactEmail === null ? "odpowiedz na nasz e-mail" : mailLink(contactEmail);
   const countiesNote =
     counties.length === 0
       ? ""
-      : `<p class="note" id="${COUNTIES_NOTE_ID}">Obsługa serwisu ustawiła w profilu powiaty: ` +
-        `${escapeHtml(counties.join(", "))}. Ogłoszenia nie podają jeszcze powiatu, więc przy ` +
-        "„Cała Polska” pokazujemy tylko zamówienia pasujące jednocześnie kategorią i słowem " +
-        `kluczowym. ${who}</p>`;
+      : `<p class="hint" id="${COUNTIES_NOTE_ID}">Powiaty (ustawia obsługa): ` +
+        `${escapeHtml(counties.join(", "))}. Ogłoszenia nie podają powiatu, więc przy ` +
+        "„Cała Polska” tylko zamówienia z pasującą kategorią i słowem kluczowym. " +
+        `Zmiana: ${change}.</p>`;
   // No hint: the two radio labels say it (PR-13, a shorter form). The note describes the group.
   return group(
     "voivodeships",
@@ -861,13 +862,42 @@ export function settingsPage(
 }
 
 /**
- * The URL of a /dopasowania page or of its CSV (PR-13): page 1 has no
- * parameter (the canonical form), the others `?strona=N`. Built from the
- * parsed number only, never from the request's text.
+ * The URL of a /dopasowania page (PR-13): page 1 has no parameter (the
+ * canonical form), the others `?strona=N`. Built from the parsed number
+ * only, never from the request's text.
  */
-export function matchesHref(page: number, kind: "page" | "csv" = "page"): string {
-  const path = kind === "page" ? "/dopasowania" : "/dopasowania.csv";
-  return page <= 1 ? path : `${path}?strona=${String(page)}`;
+export function matchesHref(page: number): string {
+  return page <= 1 ? "/dopasowania" : `/dopasowania?strona=${String(page)}`;
+}
+
+/** The URL of the whole list's CSV (PR-14), the one the list links. */
+export const MATCHES_CSV_HREF = "/dopasowania.csv";
+
+/**
+ * What a GET of /dopasowania or /dopasowania.csv asks for, once parsed:
+ * a page of the list; one page of the CSV (`?strona=N`, PR-13 — kept for
+ * old links, no longer linked); or the CSV of the whole list (no `strona`,
+ * PR-14). The list itself has no "whole list": without `strona` it is page 1.
+ */
+export type MatchesRequest =
+  | { readonly kind: "page"; readonly page: number }
+  | { readonly kind: "csv_page"; readonly page: number }
+  | { readonly kind: "csv_all" };
+
+/**
+ * The URL of `request`, built from the parsed request only — where the 503
+ * page reloads to and the 429 page links. A CSV page keeps `?strona=N` even
+ * for page 1: without it the reload would fetch the whole list instead.
+ */
+export function matchesRequestHref(request: MatchesRequest): string {
+  switch (request.kind) {
+    case "page":
+      return matchesHref(request.page);
+    case "csv_page":
+      return `${MATCHES_CSV_HREF}?strona=${String(request.page)}`;
+    case "csv_all":
+      return MATCHES_CSV_HREF;
+  }
 }
 
 /** Which page of the list /dopasowania shows (PR-13). */
@@ -1041,7 +1071,6 @@ function pager(pagination: MatchesPagination): string {
 
 const NEXT_PAGE_LABEL = "Następna strona";
 const CSV_LIST_LABEL = "Pobierz listę jako CSV";
-const CSV_PAGE_LABEL = "Ta strona jako CSV";
 
 /**
  * GET /dopasowania: the offers matching the profile now, by the digest's
@@ -1100,11 +1129,9 @@ export function matchesPage(view: MatchesView): Page {
         `${window} Najbliższy termin na górze. Stan na ${view.stateAt} (czas polski). ` +
           "Lista obejmuje także zamówienia, które już wysłaliśmy e-mailem.",
       ),
-      // The CSV is the page shown (the same rows): one file per page. One line on a
-      // 390 px phone (≈ 335 of 358 px; „Pobierz tę stronę jako CSV …” would wrap);
-      // the page line above already gives the page's range.
-      `<p>${link(matchesHref(page, "csv"), pages > 1 ? CSV_PAGE_LABEL : CSV_LIST_LABEL)} ` +
-        "(Excel, Arkusze Google).</p>",
+      // The whole list's CSV on every page (PR-14): all pages' rows in one file, so
+      // nobody joins files page by page. One line on a 390 px phone (≈ 335 of 358 px).
+      `<p>${link(MATCHES_CSV_HREF, CSV_LIST_LABEL)} (Excel, Arkusze Google).</p>`,
       `<ol class="matches"${offset > 0 ? ` start="${String(first)}"` : ""}>` +
         `${view.items.map(cardItem).join("")}</ol>`,
     );
@@ -1252,7 +1279,7 @@ export const MATCHES_REFRESH_SECONDS = 3;
 /**
  * 503 on /dopasowania while this server computes another list (one at a
  * time, D-027): a waiting page that reloads the same URL (`href`, the same
- * page or CSV, built by matchesHref) on its own after
+ * page or CSV, built by matchesRequestHref) on its own after
  * MATCHES_REFRESH_SECONDS — a meta refresh, no script (PR-13). `kind`: what
  * `href` is — for the CSV the text speaks of the file (the reload downloads
  * it).
@@ -1277,7 +1304,7 @@ export function matchesBusyPage(href: string, kind: "page" | "csv" = "page"): Pa
 /**
  * 429: this session already has MATCHES_MAX_PER_SESSION /dopasowania
  * requests in progress — in plain words, with the way back to `href`
- * (matchesHref). No refresh: the other tab is the one computing.
+ * (matchesRequestHref). No refresh: the other tab is the one computing.
  */
 export function matchesTooManyPage(href: string): Page {
   return {

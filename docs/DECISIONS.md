@@ -1527,7 +1527,13 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     adresu e-mail usunięty (pole ma swój `label`). Wysokość formularza przy 390 px: 2299 →
     1355 px (58,9%; limit 60%) dla profilu bez powiatów (domyślny; powiaty ustawia tylko
     operator); z 3 powiatami ustawionymi przez operatora 2299 → 1619 px (70,4%) — dochodzi
-    notka o powiatach tylko do odczytu.
+    notka o powiatach tylko do odczytu. PR-14 skraca notkę (krótszy tekst w stylu podpowiedzi
+    grupy zamiast ramki ostrzeżenia, ok. 5 linii zamiast 9): 1619 → 1473 px (64,1% z 2299,
+    −36%; z kontaktem i bez — tyle samo). Cel z PR_PLAN (≤ 1379 px, −40%, notka ok. 3 linie)
+    okazał się nieosiągalny: sam formularz bez notki ma 1355 px, więc na notkę z jej odstępem
+    zostawałoby 24 px — mniej niż jedna linia z trzema powiatami, wyjaśnieniem wpływu na „Cała
+    Polska” i kontaktem do obsługi. Właściciel zaakceptował (2026-11-15) 1473 px: notka 5 linii
+    w stylu podpowiedzi zamiast żółtej ramki (z ramką i krótszym tekstem byłoby 1571 px).
   - **Po zapisie:** komunikat „Lista dopasowań pokazuje zmiany od razu, e-mail — od jutra.” z
     linkiem „Zobacz pasujące zamówienia” (`/dopasowania`), także przy zmianie adresu.
     Uproszczenie: zapis przed porannym digestem działa już w tym digeście.
@@ -1550,14 +1556,17 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     formularz oceny z 5 lub więcej parami nadal daje 403 (pomocniczy odczyt CSRF z wadliwej
     treści zostaje ograniczony do 4 par, jak przed PR-13).
   - **CSV na stronę:** `/dopasowania.csv?strona=N` to pozycje strony, te same reguły i ten sam
-    slot; nazwa pliku `dopasowania-RRRR-MM-DD-strona-N.csv` dla N > 1. Link nad listą, jedna
+    slot; nazwa pliku `dopasowania-RRRR-MM-DD-strona-N.csv` dla N > 1 (od PR-14 także dla
+    N = 1, D-032). Link nad listą, jedna
     linia na telefonie 390 px (D-030: przycisk pierwszej karty na pierwszym ekranie): przy
     kilku stronach „Ta strona jako CSV (Excel, Arkusze Google).” — zakres strony podaje wiersz
     „Strona X z Y: zamówienia a–b z N.” tuż nad nim; przy jednej stronie „Pobierz listę jako
     CSV (Excel, Arkusze Google).” (PR-12). Notka PR-12 „(…; pierwsze 50 z N — zawęź profil, aby
     mieć wszystkie)” usunięta: z PR-13 pozostałe pozycje są na kolejnych stronach. Pod listą
     kolejno: notka o nadmiarze (ostatnia strona), linki stron, objaśnienie ocen (PR-12), „Dane
-    pochodzą…”. CSV całej listy — do decyzji właściciela (STATE).
+    pochodzą…”. **Od PR-14** (decyzja właściciela, D-032): `/dopasowania.csv` bez `strona` to
+    cała lista, a każda strona linkuje ją jednym linkiem „Pobierz listę jako CSV (Excel, Arkusze
+    Google).”; `?strona=N` na CSV działa jak wyżej dla starych linków, ale nie jest linkowane.
   - **503 i 429 po ludzku:** 503 (kolejka pełna / upływ czasu) zostaje 503 z `Retry-After: 5`,
     a strona „Liczymy listę… strona odświeży się sama za kilka sekund.” ma
     `<meta http-equiv="refresh" content="3; url=…">` na ten sam adres (ta sama strona i rodzaj,
@@ -2331,8 +2340,20 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     koniec (kolejność digestu zachowana w obu częściach) przed obcięciem do
     `MATCHES_SHOWN` (od PR-13: przed podziałem na strony, D-027).
   - **`GET /dopasowania.csv`** (sesja, ten sam slot dopasowań co strona): te same wiersze,
-    kolejność i limit co `/dopasowania` (zmienione w PR-13, D-027: CSV obejmuje bieżącą stronę
-    `?strona=N`, nazwa pliku z `-strona-N` dla N > 1); UTF-8 z BOM, separator `;`, wiersze CRLF, cudzysłowy
+    kolejność i limit co `/dopasowania`. **Od PR-14 bez `strona` — cała lista** (decyzja
+    właściciela po review PR #19: jeden plik zamiast składania plików ze stron): wiersze
+    wszystkich stron razem, najwyżej `MATCHES_MAX_PAGES × MATCHES_SHOWN` = 1000, w kolejności
+    listy („Nietrafne” na końcu), plik `dopasowania-RRRR-MM-DD.csv`. Jedno obliczenie listy
+    (`matchesList`, ta sama, którą tnie strona), bez dodatkowych zapytań, w tym samym slocie
+    (`withMatchesSlot`; 503/429 wskazują `/dopasowania.csv`). Żądanie jest jawną unią
+    (`MatchesRequest`: strona listy / strona CSV / CSV całej listy), nie umownym numerem strony.
+    **`?strona=N`** (PR-13, D-027) zostaje dla starych linków: ta strona, nazwa pliku z
+    `-strona-N` dla każdej strony, **także `-strona-1`** (PR-14, po review: w PR-13 strona 1
+    nie miała przyrostka, a od PR-14 nazwa bez przyrostka należy do pliku całej listy — plik
+    jednej strony nie może wyglądać jak cała lista), błędny numer → 404; strona listy go już nie linkuje (na każdej
+    stronie jeden link do CSV całej listy, jedna linia na 390 px). Odświeżenie 503 dla
+    `?strona=1` zostaje przy `?strona=1` (bez parametru pobrałoby całą listę). Informacji o
+    zamówieniach ponad limit w pliku nie ma (notka na ostatniej stronie listy). UTF-8 z BOM, separator `;`, wiersze CRLF, cudzysłowy
     RFC 4180; komórka zaczynająca się od `= + - @`, tabulatora albo CR dostaje wiodący `'`
     (neutralizacja formuł, OWASP CSV injection). Brakujące wartości to puste komórki (nigdy
     0). Kwota z przecinkiem dziesiętnym bez zaokrąglania; w kolumnie „Źródło” atrybucja BK
