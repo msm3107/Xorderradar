@@ -1522,7 +1522,9 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     na 2 wiersze, przycisk „Zapisz” wyróżniony (`.primary`, ≥ 44 px), wiersz radia regionu
     oddzielony linią od pól województw (`.region`). Jednopolowy `fieldset`
     adresu e-mail usunięty (pole ma swój `label`). Wysokość formularza przy 390 px: 2299 →
-    1355 px (58,9%; limit 60%).
+    1355 px (58,9%; limit 60%) dla profilu bez powiatów (domyślny; powiaty ustawia tylko
+    operator); z 3 powiatami ustawionymi przez operatora 2299 → 1619 px (70,4%) — dochodzi
+    notka o powiatach tylko do odczytu.
   - **Po zapisie:** komunikat „Lista dopasowań pokazuje zmiany od razu, e-mail — od jutra.” z
     linkiem „Zobacz pasujące zamówienia” (`/dopasowania`), także przy zmianie adresu.
     Uproszczenie: zapis przed porannym digestem działa już w tym digeście.

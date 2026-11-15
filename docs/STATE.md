@@ -688,10 +688,13 @@ Round-1 fixes:
 
 ## In progress
 
-**PR-13 — Ustawienia bez pułapek** (`docs/PR_PLAN.md` → PR-13) — READY locally for review on
-top of PR-12 (`pr-13-local`), `pnpm check` green (2279 tests in 65 files, none skipped; 2224
-before PR-13, 2269 before the round 1 fixes, 2274 before the minors and nits). Code & Safety
-Review PASS (round 3, after the Quality minors and nits fix), Quality Review ACCEPT.
+**PR-13 — Ustawienia bez pułapek** (`docs/PR_PLAN.md` → PR-13) — base branch (b4c7e4c, PR-11 +
+PR-12 merged) merged in 2026-11-15 (05dc031); `pnpm check` green (2332 tests in 65 files, DB
+tests required). Code & Safety Review PASS on the merge (05dc031) and on its follow-up
+(f98c90c, last-page order test); Quality Review of the merge after the STATE fix below. Before
+the merge (on top of an early PR-12 commit): 2279 tests (2224 before PR-13, 2269 before the
+round 1 fixes, 2274 before the minors and nits), Code & Safety Review PASS round 3, Quality
+Review ACCEPT.
 D-027 amended (PR-13 section);
 README, ARCHITECTURE, SECURITY, RUNBOOK („Powiaty profilu (tylko operator)”) updated. No new
 dependency, no migration.
@@ -728,8 +731,9 @@ dependency, no migration.
   page 1, never reflected. The malformed rating body's CSRF fallback keeps its pre-PR-13 bound
   (4 pairs) so a 5-pair malformed body stays 403 (pre-existing test unchanged).
 - CSV per page (`/dopasowania.csv?strona=N`, filename `dopasowania-YYYY-MM-DD-strona-N.csv` for
-  N > 1, link „Pobierz tę stronę jako plik CSV (zamówienia a–b…)”); the „pierwsze 50 z N” note
-  is gone.
+  N > 1). Link label after the base merge: „Ta strona jako CSV (Excel, Arkusze Google).” with
+  more than one page (the range is on the page line above), „Pobierz listę jako CSV (Excel,
+  Arkusze Google).” with one; the „pierwsze 50 z N” note is gone.
 - 503 stays 503 + `Retry-After: 5`; its page („Liczymy listę… strona odświeży się sama za kilka
   sekund.”, link „Odśwież teraz”) has `<meta http-equiv="refresh" content="3; url=…">` to the
   same URL (page and kind, built from the parsed number, escaped). 429: „Ta lista właśnie się
@@ -761,7 +765,8 @@ dependency, no migration.
     `ARRAY[NULL]::text[]` f, `ARRAY['a', NULL]` f.
   - MINOR-1 (option B, owner's call): with more than one page the CSV link says the file has
     this page only and the others are downloaded from their pages; D-032 points to the PR-13
-    change (D-027). A CSV of the whole list is left to the owner (below).
+    change (D-027). Superseded in the base merge (2026-11-15): the label is the shorter
+    „Ta strona jako CSV (Excel, Arkusze Google).” under the page line with the range. A CSV of the whole list is left to the owner (below).
   - MINOR-2: under the list „Strona X z Y” on its own line (`.pages-status`), then the
     prev/next links as ≥ 44 px targets (`.pages a`: min-height 44px, padding, border; 46 px
     measured at 390 px); the line above the list gets a plain „Następna strona →” link when a
@@ -869,8 +874,9 @@ Do decyzji właściciela (PR-13, notes only, no code):
    the settings page (only on save, 409, and on `/dopasowania`); each page of `/dopasowania`
    (and its CSV) computes the whole list and slices it.
 
-**PR-12 — Ocena trafności i eksport** (`docs/PR_PLAN.md` → PR-12) — implemented locally on top
-of PR-11 (`pr-12-local`), `pnpm check` green (2274 tests in 65 files after the owner-review
+**PR-12 — Ocena trafności i eksport** (`docs/PR_PLAN.md` → PR-12) — **MERGED in PR #18
+(b4c7e4c)** after the owner's review 2026-11-12; before that implemented locally on top of PR-11
+(`pr-12-local`), `pnpm check` green (2274 tests in 65 files after the owner-review
 round; 2268 after the base merge of 2026-11-12; 2224 before). Code & Safety Review
 PASS (round 2, after the minors and nits fix below), Quality Review ACCEPT. Follow-up (C&S
 round 2, optional): pin the `nastepna` CR/LF rejection with an integration test (the uuid
@@ -1090,7 +1096,8 @@ and SECURITY updated.
   covered by `tests/card.test.ts`); D-024/D-027 keep their PR-05 – PR-10 wording as history,
   with a pointer to the PR-11 card.
 
-**PR-10 — Wejście bez pułapek** (`docs/PR_PLAN.md` → PR-10) — READY locally: Code & Safety
+**PR-10 — Wejście bez pułapek** (`docs/PR_PLAN.md` → PR-10) — **MERGED in PR #16 (3b70f94)**;
+before that READY locally: Code & Safety
 Review PASS (re-checked after every fix round; the last round without findings), Quality
 Review ACCEPT (all 6 ACs met). D-031 new; D-026 and D-027 changed. Migration
 `0008_self_service_access`.

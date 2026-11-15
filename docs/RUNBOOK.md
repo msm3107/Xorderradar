@@ -392,8 +392,9 @@ node dist/main.js access:link <profileId>     # link jest sekretem — tylko wł
 
 Klient nie zmienia powiatów: formularz ustawień ich nie ma, a jego zapis zostawia zapisane
 powiaty bez zmian (formularz sprzed PR-13 z polem powiatów jest odrzucany — 400, nic nie
-zapisane). Ustawienia pokazują klientowi zapisane powiaty tylko do odczytu i odsyłają do
-obsługi. Prośbę o zmianę obsługuje operator:
+zapisane). Po wdrożeniu PR-13 karta ustawień otwarta jeszcze przed wdrożeniem daje przy zapisie
+ogólne 400 („Formularz zawiera nieprawidłowe dane.”) — klient ma ponownie otworzyć ustawienia.
+Ustawienia pokazują klientowi zapisane powiaty tylko do odczytu i odsyłają do obsługi. Prośbę o zmianę obsługuje operator:
 
 - nowy profil — pole `counties` w pliku `profile:create` (z kontrolą nazwy powiatu i
   ostrzeżeniem „powiaty bez województw”);
