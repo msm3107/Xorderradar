@@ -285,6 +285,12 @@ describe("matchOpportunity — keywords", () => {
     ["monitoring", "Monitoring-wizyjny, system"],
     ["oświetlenie", "Wymiana oświe\u00adtlenia w szkole"],
     ["sala", "Wynajem sal konferencyjnych"],
+    // Genitive plural of a "-nie"/"-cie" keyword: the token without "ie", as a whole word.
+    ["szkolenie", "Usługi szkoleń z zakresu BHP"],
+    ["oświetlenie", "Konserwacja oświetleń ulicznych"],
+    ["sprzątanie", "Wykonanie sprzątań biurowych"],
+    ["zajęcie", "Organizacja zajęć dodatkowych"],
+    ["Szkolenie okresowe", "Cykl szkoleń okresowych"],
   ])("finds %j in %j", (keyword, title) => {
     expect(found(keyword, title)).toBe(true);
   });
@@ -304,8 +310,33 @@ describe("matchOpportunity — keywords", () => {
     // A phrase needs consecutive words, in order.
     ["instalacja odgromowa", "Instalacja elektryczna i odgromowa"],
     ["instalacja odgromowa", "Odgromowa instalacja"],
+    // The genitive plural form matches only an equal word, never as a prefix.
+    ["szkolenie", "Program szkolenowy"],
+    ["sprzątanie", "Pomieszczenia sprzątane codziennie"],
+    ["malowanie", "Elementy malowane proszkowo"],
+    ["zarządzanie", "Obsługa zarządzanego mienia"],
+    // No genitive plural form for a "-nie"/"-cie" token of 5 characters …
+    ["danie", "Przygotowanie dań"],
+    // … nor for a keyword in another form than "-nie"/"-cie" (known limitation).
+    ["szkolenia", "Usługi szkoleń z zakresu BHP"],
   ])("does not find %j in %j", (keyword, title) => {
     expect(found(keyword, title)).toBe(false);
+  });
+
+  it.each([
+    ["szkolenie", "szkolen"],
+    ["Oświetlenie", "oswietlen"],
+    ["sprzątanie", "sprzatan"],
+    ["zajęcie", "zajec"],
+    ["pranie", "pran"],
+    ["danie", null],
+    ["życie", null],
+    ["szkolenia", null],
+    ["remont", null],
+    ["nie", null],
+  ])("derives the genitive plural form of %j: %j", (text, expected) => {
+    const [keyword] = prepareKeywords([text]);
+    expect(keyword?.tokens.map((token) => token.genitivePlural)).toEqual([expected]);
   });
 
   it("documents the known over-match of a stem that starts another word", () => {
@@ -313,6 +344,14 @@ describe("matchOpportunity — keywords", () => {
     // "lampart" (D-023, known limitation).
     expect(found("sala", "Salon fryzjerski")).toBe(true);
     expect(found("lampa", "Lampart")).toBe(true);
+  });
+
+  it("documents the known over-match of a genitive plural equal to an infinitive", () => {
+    // For "-ycie"/"-icie" nouns the genitive plural is spelled like the
+    // perfective infinitive (D-023, known limitation, accepted).
+    expect(found("pokrycie", "Należy pokryć koszty")).toBe(true);
+    expect(found("zużycie", "Zużyć materiały")).toBe(true);
+    expect(found("użycie", "Można użyć sprzętu")).toBe(true);
   });
 
   it("searches the description when there is one, and prefers the title", () => {
@@ -389,6 +428,21 @@ describe("matchOpportunity — keywords", () => {
           .reasons,
       ),
     ).not.toContain("exclude");
+  });
+
+  it("applies the genitive plural form to excluding keywords too", () => {
+    // Exclude "szkolenie" also removes "szkoleń" (D-023): without the exclude
+    // the offer would match on its category.
+    const training = offer({ title: "Organizacja szkoleń", categories: [ELEKTRYKA_CPV] });
+    expect(matchOpportunity(training, profile()).matched).toBe(true);
+    const result = matchOpportunity(training, profile({ excludeKeywords: ["szkolenie"] }));
+    expect(result.reasons).toContainEqual({
+      kind: "exclude",
+      points: -100,
+      keyword: "szkolenie",
+      field: "title",
+    });
+    expect(result.matched).toBe(false);
   });
 
   it("counts inflected near-duplicates on the same words once", () => {

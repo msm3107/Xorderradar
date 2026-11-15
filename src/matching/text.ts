@@ -29,11 +29,23 @@ const FINAL_VOWEL = /[aeiouy]$/u;
 /** Inflection is a property of words: a token without a letter ("2024", "110") is not one. */
 const HAS_LETTER = /\p{L}/u;
 
+/** A keyword token ending like the noun "szkolenie" or "zajęcie" (after `comparableText`). */
+const NIE_CIE_ENDING = /[nc]ie$/u;
+
+/** "-nie"/"-cie" keyword tokens shorter than this ("danie", "życie") get no genitive plural form. */
+const MIN_GENITIVE_PLURAL_TOKEN_LENGTH = 6;
+
 /** A keyword token prepared for matching: the token and the prefix that its inflected forms share. */
 interface KeywordToken {
   readonly token: string;
   /** null: exact match only. */
   readonly stem: string | null;
+  /**
+   * The genitive plural of a "-nie"/"-cie" token ("szkolenie" → "szkolen",
+   * the comparable form of "szkoleń"): matched only as a whole, equal word,
+   * never as a prefix. null: none.
+   */
+  readonly genitivePlural: string | null;
 }
 
 /**
@@ -42,22 +54,49 @@ interface KeywordToken {
  * when it starts with the keyword token minus one final vowel. So
  * "oswietlenie" matches "oswietlenia" and "oswietleniem", "instalacja" matches
  * "instalacji", "remont" matches "remontu" and "szkolenie" "szkoleniach".
+ * A keyword token of at least 6 characters ending in "nie" or "cie" also
+ * matches a text token equal to it without the final "ie" — the genitive
+ * plural, which drops the stem's last vowel: "szkolenie" matches "szkolen"
+ * ("szkoleń"), "oswietlenie" "oswietlen", "sprzatanie" "sprzatan", "zajecie"
+ * "zajec" ("zajęć"). Equality only: as a prefix, "malowan" would also match
+ * the participle "malowane" and "zarzadzan" "zarzadzanego".
  * A token without a letter (a number: "2024") matches only an equal token,
  * so "2024" does not match "20245".
  * Known limits: a stem that changes inside the word is not recognised
  * ("kabel" does not match "kable", "sól" not "soli"), and a short stem can
  * match an unrelated longer word ("sala" → "sal" also matches "salon"); the
  * same holds for excluding keywords ("auto" also excludes "automatyka").
+ * The genitive plural is derived only from the "-nie"/"-cie" form itself:
+ * the keyword "szkolenia" does not match "szkoleń", nor "danie" (5
+ * characters) "dań". "-cie" nouns whose infinitive has the same form as the
+ * genitive plural (e.g. "-ycie", "-icie", "-ucie", "-ście": pokrycie/pokryć,
+ * zatrucie/zatruć, przejście/przejść, szycie/szyć) also match the infinitive,
+ * so "pokrycie" matches "pokryć (koszty)". For an include keyword this is a
+ * narrow, related over-match, accepted; for an exclude keyword ("pokrycie",
+ * "przejście") a description with "pokryć koszty" or "przejść weryfikację"
+ * silently removes a relevant offer, so use such words as excludes with care
+ * (D-023).
  */
 function keywordToken(token: string): KeywordToken {
   if (token.length < MIN_INFLECTED_TOKEN_LENGTH || !HAS_LETTER.test(token)) {
-    return { token, stem: null };
+    return { token, stem: null, genitivePlural: null };
   }
-  return { token, stem: FINAL_VOWEL.test(token) ? token.slice(0, -1) : token };
+  return {
+    token,
+    stem: FINAL_VOWEL.test(token) ? token.slice(0, -1) : token,
+    genitivePlural:
+      token.length >= MIN_GENITIVE_PLURAL_TOKEN_LENGTH && NIE_CIE_ENDING.test(token)
+        ? token.slice(0, -2)
+        : null,
+  };
 }
 
 function tokenMatches(keyword: KeywordToken, word: string): boolean {
-  return word === keyword.token || (keyword.stem !== null && word.startsWith(keyword.stem));
+  return (
+    word === keyword.token ||
+    (keyword.stem !== null && word.startsWith(keyword.stem)) ||
+    word === keyword.genitivePlural
+  );
 }
 
 /** A profile keyword (include or exclude) prepared once per match. */

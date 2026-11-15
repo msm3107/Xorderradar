@@ -292,25 +292,48 @@ node dist/main.js deliveries:pending | jq .
 2. E-mail doszedł — wiersze stają się `sent` (`sent_at` teraz, `attempts + 1`):
 
    ```sh
-   node dist/main.js deliveries:resolve <profileId> --sent --date <digestDate>
+   node dist/main.js deliveries:resolve <profileId> --sent --date <digestDate> --transport <transport>
    ```
 
-3. Nie doszedł — wiersze są usuwane, kolejny `digest` wyśle te oferty jak nowe (jeśli nadal
-   się kwalifikują):
+3. Nie doszedł — wiersze są usuwane:
 
    ```sh
-   node dist/main.js deliveries:resolve <profileId> --failed --date <digestDate>
+   node dist/main.js deliveries:resolve <profileId> --failed --date <digestDate> --transport <transport>
    ```
 
-Bez `--date` komenda obejmuje wszystkie wiersze `pending` profilu. Zmienia tylko wiersze
-`pending` tego profilu, w jednej transakcji, i wypisuje `{"status":"ok",…,"changed":N}`.
+   Oferta wraca dopiero w kolejnym `digest` tym samym transportem i tylko wtedy, gdy w chwili
+   tego przebiegu nadal spełnia warunki kandydata digestu:
+   - status inny niż `closed`/`cancelled` i termin składania ofert nieminiony (`deadline` ≥
+     chwila przebiegu; oferta bez terminu przechodzi);
+   - pierwszy zapis (`first_seen_at`) najwyżej 7 dni (`DIGEST_NEW_DAYS`) przed chwilą
+     przebiegu — starsza oferta nie jest już „nowa” i nie wróci, choć wiersz usunięto;
+   - profil jest aktywny, a oferta pasuje do niego w obecnym kształcie (wynik ≥ 50, żadne
+     słowo wykluczające, region nie jest niezgodny);
+   - mieści się w 50 ofertach na e-mail (`DIGEST_MAX_ITEMS`; najbliższy termin pierwszy,
+     nadmiar w kolejnych dniach, póki spełnia te warunki) i wśród 10 000 kandydatów przebiegu
+     (`DIGEST_CANDIDATE_LIMIT`).
+
+   Najwyżej jeden e-mail dziennie na profil i transport: gdy profil ma już tego dnia (w
+   Polsce) wiersz `sent` albo `pending` w tym transporcie, oferta czeka do następnego dnia.
+   W praktyce oferta wraca w najbliższym przebiegu `digest` z crona o 7:30 (jutro, gdy
+   rozstrzygasz po dzisiejszym przebiegu); wcześniej — tylko po ręcznym `digest` i tylko
+   wtedy, gdy profil nie ma już dziś żadnego innego wiersza `sent` ani `pending` w tym
+   transporcie.
+
+Bez `--date` komenda obejmuje wszystkie wiersze `pending` profilu w danym transporcie.
+Zmienia tylko wiersze `pending` tego profilu i transportu, w jednej transakcji, i wypisuje
+`{"status":"ok",…,"transport":…,"changed":N}`. Transport: `--transport test|smtp` (pole
+`transport` z `deliveries:pending`); bez niego — transport bieżącego `EMAIL_MODE`, jak w
+`digest` (czytane jest samo `EMAIL_MODE`, bez `EMAIL_FROM` i `SMTP_URL`; błędne
+`EMAIL_MODE` → kod `1`, baza nie jest otwierana).
 Odmawia (kod `1`, nic nie zmienia), gdy właśnie trwa `digest` albo inne `deliveries:resolve`
 (ta sama blokada; „a digest run or another deliveries:resolve holds the lock”) — spróbuj
 ponownie po ich końcu — albo gdy profil nie ma pasujących wierszy `pending`. Nie uruchamiaj
 `deliveries:resolve` o minucie crona `digest` (7:30): przy zajętej blokadzie odmawia, a gdy
 sam ją weźmie pierwszy, poranny `digest` jest pominięty (`skipped`) i trzeba go uruchomić
-ręcznie (`node dist/main.js digest`). Brak lub oba przełączniki `--sent`/`--failed` albo zła
-data → kod `2` z opisem użycia, baza nie jest otwierana.
+ręcznie (`node dist/main.js digest`). Brak lub oba przełączniki `--sent`/`--failed`, zła
+data albo `--transport` podany dwa razy, bez wartości lub inny niż `test`/`smtp` → kod `2` z
+opisem użycia, baza nie jest otwierana.
 
 Wysyłki `failed` z wyczerpanymi próbami (`attempts` = 3) nie są już ponawiane. Po usunięciu
 przyczyny (np. poprawiony adres profilu) można je wysłać ponownie, usuwając te wiersze:
@@ -422,25 +445,47 @@ node dist/main.js feedback:report --since 2026-11-02   # zmienione od tego dnia 
 Wypisuje jedną linię JSON: `total`, `profiles` (id profilu) i `categories` (kategoria MVP z
 kodów CPV oferty; oferta w dwóch kategoriach liczy się w obu, bez kategorii — `null`) — każda z
 `ratings`, `relevant`, `notRelevant` i `precision` (trafne / wszystkie, 3 miejsca po przecinku).
-**`precision: null` znaczy brak ocen, nie zero trafnych.** Bez adresów i tytułów — wynik można
-wkleić do notatek z pilotażu. Kody: `0` raport, `1` baza niedostępna albo schemat nieaktualny
-(`migrate`), `2` zły argument (`--since` musi być datą `YYYY-MM-DD`). Raport liczy oceny wg
-ostatniej zmiany: ocena zmieniona po `--since` liczy się z nowym werdyktem.
+**`precision: null` znaczy brak ocen, nie zero trafnych.** `total` i każdy profil mają też
+pokrycie: `delivered` (ile różnych zamówień firmie wysłano — tylko dostawy `sent`; `pending` i
+`failed` się nie liczą; z `--since` — wysłane od tego dnia), `ratedDelivered` (ile z nich firma
+oceniła — dowolnie i kiedykolwiek) i `coverage` (`ratedDelivered / delivered`, 3 miejsca po
+przecinku; **`null`, gdy nic nie wysłano**, nigdy `0`). W profilu `delivered` liczy różne
+zamówienia; `total.delivered` i `total.ratedDelivered` to sumy po profilach, czyli pary (firma,
+zamówienie) — zamówienie wysłane dwóm firmom liczy się dwa razy. `ratings` liczy oceny
+ustawione od `--since`, a `ratedDelivered` — zamówienia wysłane w tym okresie i ocenione
+kiedykolwiek, więc `ratedDelivered` może być większe niż `ratings`, a pokrycie danego tygodnia
+rośnie, gdy raport uruchomisz później (firmy oceniają z opóźnieniem). Pokrycie ma sens tylko
+dla e-maili wysłanych przy `EMAIL_MODE=smtp`: dostawy z trybu `test` (`sent` w outboxie, do
+klienta nic nie trafia) też się liczą, więc po przejściu na `smtp` uruchamiaj raport z
+`--since` od dnia po przełączeniu. Na liście `profiles` są też firmy, które nic nie oceniły
+(`ratings: 0`, `precision: null`), oraz firmy, którym w tym okresie nic nie wysłano (np. oceniły
+starsze zamówienia albo oceniały tylko na `/dopasowania`) — `delivered: 0`, `coverage: null`.
+Kategorie mają tylko oceny. Bez adresów i tytułów — wynik można wkleić do notatek z pilotażu.
+Kody: `0` raport, `1` baza niedostępna albo schemat nieaktualny (`migrate`), `2` zły argument
+(`--since` musi być datą `YYYY-MM-DD`). Raport liczy oceny wg ostatniej zmiany: ocena
+zmieniona po `--since` liczy się z nowym werdyktem.
 
-Tydzień pilotażu (etap 4): `feedback:report --since <poniedziałek>`; trafność to
-`total.precision`. `total.precision` liczy wszystkie oceny razem, więc firma, która ocenia
-dużo, waży w nim najwięcej — do decyzji go/no-go patrz też na `precision` poszczególnych
-profili (`profiles[]`) albo ich medianę. Firma z wieloma „nietrafne” w jednej kategorii —
-sprawdź jej profil (`match:preview <profileId>`) i słowa wykluczające razem z firmą.
+Pilotaż (etap 4): **decyzję go/no-go podejmuj na raporcie z całego pilotażu** —
+`feedback:report --since <dzień po przejściu na smtp>`; trafność to `total.precision`.
+Cotygodniowy `feedback:report --since <poniedziałek>` służy tylko do śledzenia postępu —
+raportów tygodniowych nie sumuj, bo `ratedDelivered` liczy oceny z dowolnego czasu.
+`total.precision` liczy wszystkie oceny razem, więc firma, która ocenia dużo, waży w nim
+najwięcej — do decyzji go/no-go patrz też na `precision` poszczególnych profili (`profiles[]`)
+albo ich medianę. Precyzję czytaj zawsze razem z `coverage`: oceniają nieliczni i częściej te
+nietrafione, więc precyzja przy niskim pokryciu bywa myląca. **Z profilu z mniej niż ok. 20
+ocenami (`ratings`) w raporcie z całego pilotażu nie wyciągaj wniosków** — to reguła czytania,
+raport jej nie oznacza. Firma z wieloma „nietrafne” w jednej kategorii — sprawdź jej profil
+(`match:preview <profileId>`) i słowa wykluczające razem z firmą.
 
 Przy wdrażaniu firmy w pilotaż poleć ocenianie hurtem na `/dopasowania` (jedno kliknięcie na
 zamówienie, 50 zamówień na stronę, kolejne strony linkiem „Następna strona”, od PR-13) zamiast
 pojedynczych linków z e-maili — więcej ocen w krótszym czasie.
 
-Klient może też pobrać swoją listę dopasowań jako CSV („Pobierz listę jako plik CSV” na
-`/dopasowania`, przy kilku stronach „Pobierz tę stronę jako plik CSV” — zamówienia oglądanej
-strony, pozostałe strony z ich stron; CSV całej listy czeka na decyzję właściciela; separator `;`, UTF-8 z BOM — otwiera się w Excelu i Arkuszach Google). Lista kończy
-się na 20 stronach (1000 zamówień); większy nadmiar to sygnał do zawężenia profilu.
+Klient może też pobrać swoją listę dopasowań jako CSV („Pobierz listę jako CSV” na
+`/dopasowania`, przy kilku stronach „Ta strona jako CSV” — zamówienia oglądanej strony,
+pozostałe strony z ich stron; CSV całej listy czeka na decyzję właściciela; separator `;`, UTF-8
+z BOM — otwiera się w Excelu i Arkuszach Google). Lista kończy się na 20 stronach (1000
+zamówień); większy nadmiar to sygnał do zawężenia profilu.
 
 ## E-maile dostępu i kontakt (`serve`, D-031)
 

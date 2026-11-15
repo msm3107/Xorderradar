@@ -833,7 +833,12 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     token tekstu pasuje do tokenu
     słowa kluczowego, gdy jest równy albo — dla tokenu słowa kluczowego o długości ≥ 4 —
     zaczyna się od tematu = token bez jednej końcowej samogłoski (`aeiouy`, po
-    `comparableText`). Tokeny krótsze niż 4 („bhp”, „it”, „gaz”) i tokeny bez litery
+    `comparableText`). Token słowa kluczowego o długości ≥ 6 kończący się na „nie”/„cie” (po
+    `comparableText`) pasuje też do tokenu tekstu równego mu bez końcowego „ie” — dopełniacz
+    liczby mnogiej „-eń”/„-ęć”, w którym znika ostatnia samogłoska tematu: „szkolenie” →
+    „szkoleń”, „oświetlenie” → „oświetleń”, „sprzątanie” → „sprzątań”, „zajęcie” → „zajęć”.
+    Tylko równość, nigdy prefiks: jako prefiks „malowan” łapałby też imiesłów „malowane”, a
+    „zarzadzan” — „zarządzanego”. Tokeny krótsze niż 4 („bhp”, „it”, „gaz”) i tokeny bez litery
     (liczby: „2024” ≠ „20245”) — tylko równe. Wykluczenia — ta sama reguła. Słowa o tym samym
     ciągu tokenów („Oświetlenie”, „oswietlenie”) liczą się raz, w kolejności profilu; tak
     samo słowo bez własnego dowodu: każde liczone słowo dostaje trafienie (ciąg tokenów tekstu),
@@ -849,7 +854,16 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     rozpoznawany („kabel” ≠ „kable”/„kabli”, „żłobek” ≠ „żłobka”, „węgiel” ≠ „węgla”);
     temat może zaczynać inne słowo („sala” → „salon”, „lampa” → „lampart”) — dotyczy to też
     słów wykluczających, gdzie skutkiem jest cichy brak alertu (wykluczenie „auto” usuwa
-    też „Automatyka budynkowa”). **Koszt:** tokeny tekstu × tokeny słowa na każde słowo,
+    też „Automatyka budynkowa”); dopełniacz liczby mnogiej powstaje tylko z formy „-nie”/„-cie”
+    samego słowa kluczowego — słowo „szkolenia” nie pasuje do „szkoleń”, a „danie” (5 znaków)
+    do „dań”; rzeczowniki na „-cie”, których bezokolicznik ma tę samą postać co dopełniacz
+    liczby mnogiej (np. „-ycie”, „-icie”, „-ucie”, „-ście”: pokrycie/pokryć, zatrucie/zatruć,
+    przejście/przejść, szycie/szyć), pasują też do bezokolicznika — „pokrycie” do „pokryć
+    (koszty)”, „przejście” do „przejść (weryfikację)”. Dla słowa kluczowego to wąskie, pokrewne
+    nadmiarowe dopasowanie, akceptowane; dla słowa wykluczającego (np. „pokrycie”,
+    „przejście”) opis z „pokryć koszty” albo „przejść weryfikację” po cichu usuwa trafną
+    ofertę — ten sam cichy brak alertu co przy tematach wyżej — więc takich słów jako
+    wykluczeń używać ostrożnie. **Koszt:** tokeny tekstu × tokeny słowa na każde słowo,
     ograniczone schematami (tytuł ≤ 1 000, opis ≤ 10 000 znaków, słowo ≤ 100 znaków i ≤ 10
     tokenów, ≤ 100 słów kluczowych i ≤ 100 wykluczających). Bez wzorców z nawrotami, więc
     tekst ze źródła sam niczego nie wydłuża; najgorszy przypadek wymaga też spreparowanego
@@ -1107,18 +1121,24 @@ failed`, tylko kod) i nie zastępuje gotowego wyniku; sesja kończy się, gdy pu
     identyfikatory, daty i liczby, bez adresów i tytułów; bez blokady (sam odczyt). Operator
     sprawdza log serwera SMTP / skrzynkę wysłanych (tryb `test`: `EMAIL_OUTBOX_DIR`) dla
     profilu i daty, potem `deliveries:resolve <profileId> --sent|--failed [--date
-YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
+YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
     `attempts + 1`, `error_code` pusty; `--failed` (nie doręczono) → wiersze usunięte, więc
-    kolejny digest wyśle te oferty jak nowe, jeśli nadal się kwalifikują (7 dni, termin).
-    Zmieniane są wyłącznie wiersze `pending` wskazanego profilu (wszystkich transportów, jak
-    dawny SQL) i — z `--date` — tego dnia; jedna transakcja, która najpierw bierze bez
+    kolejny digest tym samym transportem wyśle te oferty jak nowe, jeśli nadal się kwalifikują
+    (warunki kandydata: RUNBOOK → „Wysyłki niepewne”).
+    Zmieniane są wyłącznie wiersze `pending` wskazanego profilu w jednym transporcie i — z
+    `--date` — tego dnia. Transport: `--transport`, domyślnie transport bieżącego `EMAIL_MODE`
+    (jak `digest`); czytane jest samo `EMAIL_MODE` (`loadEmailMode`, ten sam schemat), bez
+    `EMAIL_FROM`/`SMTP_URL`, błędne → kod 1 przed otwarciem bazy. (Przegląd właściciela PR-09:
+    wcześniej wszystkich transportów, jak dawny SQL — wiersze innego transportu to osobne
+    doręczenia, a decyzja dotyczy jednego z nich.) Jedna transakcja, która najpierw bierze bez
     czekania blokadę digestu (`pg_try_advisory_xact_lock(DIGEST_LOCK_KEY)`, zwalniana przy
     zatwierdzeniu): trwający `digest` (jego zarezerwowane wiersze są `pending` do zapisu
     wyniku) albo inne `deliveries:resolve` → odmowa, kod 1, nic nie zmienione („a digest run
     or another deliveries:resolve holds the lock”); `digest` startujący w tej chwili jest
-    pomijany (`skipped`) — RUNBOOK: nie uruchamiać o minucie crona `digest`. Brak pasujących wierszy `pending` → kod 1, nic nie zmienione.
-    Wynik: `{"status":"ok","outcome",…,"digestDate",…,"changed":N}`. Oba przełączniki, żaden,
-    powtórzony, zły uuid lub data → kod 2 (błąd wywołania jak w pozostałych komendach,
+    pomijany (`skipped`) — RUNBOOK: nie uruchamiać o minucie crona `digest`. Brak pasujących wierszy `pending` → kod 1, nic nie zmienione; komunikat podaje transport (wiersze drugiego mogą nadal czekać, np. po zmianie `EMAIL_MODE`).
+    Wynik: `{"status":"ok","outcome",…,"transport",…,"digestDate",…,"changed":N}`. Oba
+    przełączniki, żaden, powtórzony, zły uuid lub data, `--transport` powtórzony, bez wartości
+    lub inny niż `test`/`smtp` → kod 2 (błąd wywołania jak w pozostałych komendach,
     sprawdzany przed konfiguracją i bez otwierania bazy). Bez decyzji operatora oferty nie
     trafią do tego profilu, a profil z dzisiejszym `pending` nic dziś nie dostanie.
   - **Treść** (`buildDigest`, czyste, `src/notifications/digest.ts`; D-013 — po polsku;
@@ -1525,10 +1545,14 @@ YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
     formularz oceny z 5 lub więcej parami nadal daje 403 (pomocniczy odczyt CSRF z wadliwej
     treści zostaje ograniczony do 4 par, jak przed PR-13).
   - **CSV na stronę:** `/dopasowania.csv?strona=N` to pozycje strony, te same reguły i ten sam
-    slot; nazwa pliku `dopasowania-RRRR-MM-DD-strona-N.csv` dla N > 1. Link na stronie: „Pobierz
-    tę stronę jako plik CSV (zamówienia a–b…)” z dopiskiem, że plik obejmuje tylko tę stronę,
-    a pozostałe pobiera się z ich stron; przy jednej stronie jak dotąd. Dawna notka
-    „(pierwsze 50 z N…)” usunięta. CSV całej listy — do decyzji właściciela (STATE).
+    slot; nazwa pliku `dopasowania-RRRR-MM-DD-strona-N.csv` dla N > 1. Link nad listą, jedna
+    linia na telefonie 390 px (D-030: przycisk pierwszej karty na pierwszym ekranie): przy
+    kilku stronach „Ta strona jako CSV (Excel, Arkusze Google).” — zakres strony podaje wiersz
+    „Strona X z Y: zamówienia a–b z N.” tuż nad nim; przy jednej stronie „Pobierz listę jako
+    CSV (Excel, Arkusze Google).” (PR-12). Notka PR-12 „(…; pierwsze 50 z N — zawęź profil, aby
+    mieć wszystkie)” usunięta: z PR-13 pozostałe pozycje są na kolejnych stronach. Pod listą
+    kolejno: notka o nadmiarze (ostatnia strona), linki stron, objaśnienie ocen (PR-12), „Dane
+    pochodzą…”. CSV całej listy — do decyzji właściciela (STATE).
   - **503 i 429 po ludzku:** 503 (kolejka pełna / upływ czasu) zostaje 503 z `Retry-After: 5`,
     a strona „Liczymy listę… strona odświeży się sama za kilka sekund.” ma
     `<meta http-equiv="refresh" content="3; url=…">` na ten sam adres (ta sama strona i rodzaj,
@@ -1642,8 +1666,13 @@ YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
     (znana podatność zależności produkcyjnej = błąd; zależności tylko deweloperskie nie
     blokują CI — obejmuje je dalej pełny `pnpm audit` w Code & Safety Review,
     `docs/SECURITY.md` §13), wersja pnpm z `packageManager`. Klient `pg_dump`/`pg_restore`
-    z `postgresql-client`, z kontrolą wersji ≥ 16 — test backup/restore nie może się po cichu
-    pominąć w CI. Ten test działa w osobnym projekcie Vitest po wszystkich pozostałych
+    przypięty do wersji głównej serwera: `postgresql-client-16` z repozytorium PGDG
+    (apt.postgresql.org, dodanego skryptem z `postgresql-common`, bo Ubuntu 26.04 ma tylko
+    klienta 18; nie meta-pakiet `postgresql-client`, który daje najnowszego klienta),
+    `/usr/lib/postgresql/16/bin` na początku `PATH` i kontrola, że wersja główna to dokładnie
+    16 — `pg_dump` ≥ 17 zapisuje `SET transaction_timeout`, którego serwer 16 nie zna, więc
+    `pg_restore --exit-on-error --single-transaction` kończy się błędem; test backup/restore
+    nie może się też po cichu pominąć w CI. Ten test działa w osobnym projekcie Vitest po wszystkich pozostałych
     (`groupOrder`), bo introspekcja katalogu przez Migrator Kysely w innych plikach ściga się
     z relacjami usuwanymi przez restore w tej samej bazie.
 - **Odrzucone alternatywy:** alert z procesu `ingest`/`digest` (każda komenda musiałaby znać
@@ -2086,6 +2115,23 @@ YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
     każdej wartości — także BZP, bo ani BZP, ani Baza tego nie podaje (gdy źródło kiedyś
     poda, dopisek trzeba zastąpić tą informacją). Brak wartości → „Wartość szacunkowa: nie
     podano”, nigdy 0. Atrybucja „Źródło:” (dzień `fetched_at` RRRR-MM-DD) bez zmian.
+  - **Kolejność karty oferty (PR-11, decyzja właściciela po przeglądzie PR #17):** cel to
+    ocena w 20 sekund na telefonie 390 px — pierwszy ekran ma odpowiedzieć „ile, do kiedy,
+    dlaczego ja”. `offerCard` (`src/notifications/card.ts`) dzieli wiersze na grupy, a
+    wszystkie widoki (tekst i HTML e-maila, `/dopasowania`, `/przyklad`) pokazują je w tej
+    samej kolejności: tytuł → `lead` (wartość, termin, „Dlaczego pasuje”) → przycisk
+    „Otwórz ogłoszenie” (tekst e-maila: linia „Otwórz ogłoszenie: …”; bez linku `http(s)`
+    w tym miejscu „Link: nie podano”) → `body` (zamawiający, lokalizacja, wyciąg opisu i na
+    stronach „Pełny opis”, atrybucja „Źródło:” Bazy) → `more` (data publikacji, kontakt,
+    gdy jest) → „Szczegóły dopasowania”. Atrybucja zostaje **widoczna** (regulamin, pkt
+    5.1–5.3), nigdy pod `<details>`. Na stronach `more` i „Szczegóły dopasowania” są w jednym
+    natywnym `<details>` „Więcej szczegółów (data publikacji, kontakt, szczegóły
+    dopasowania)” — podsumowanie wymienia tylko to, co jest w środku; bez skryptu i bez
+    zagnieżdżania `<details>`. W e-mailu wszystko jest widoczne (programy pocztowe nie
+    wszystkie obsługują `<details>`), `more` i szczegóły mniejszym drukiem na końcu karty.
+    Brakujące wartości bez zmian: „nie podano”, nigdy zgadywane. Przykład `/przyklad` ma
+    kontakt tylko z e-mailem i telefonem, jak prawdziwe karty (D-022: adaptery nie
+    zapisują imion i nazwisk).
 
 ## D-031 — Samoobsługowe wejście („Wyślij mi link”) i potwierdzanie zmiany adresu
 
@@ -2237,9 +2283,10 @@ YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
     `INSERT … ON CONFLICT (profile_id, opportunity_id) DO UPDATE`: powtórzony lub równoległy
     POST zostawia jeden wiersz z ostatnim werdyktem; `updated_at` zmienia się tylko przy
     zmianie werdyktu.
-  - **Linki w e-mailu:** pod każdą kartą digestu dwa zwykłe linki (bez formularza — klienci
-    poczty je blokują) „Trafne”/„Nietrafne” z `aria-label` „Trafne: <tytuł>”, a w części
-    tekstowej linie „Oceń jako trafne/nietrafne: <URL>”. Adres
+  - **Linki w e-mailu:** na końcu każdej karty digestu — po „Szczegółach dopasowania”, które
+    w kolejności karty z D-030 („Kolejność karty oferty”) są jej ostatnią linią — dwa zwykłe
+    linki (bez formularza — klienci poczty je blokują) „Trafne”/„Nietrafne” z `aria-label`
+    „Trafne: <tytuł>”, a w części tekstowej linie „Oceń jako trafne/nietrafne: <URL>”. Adres
     `/ocena/<token>/<id oferty>/<trafne|nietrafne>`. Token: cel `feedback`, jeden na e-mail
     (wydawany w `issueDigestTokens` razem z linkiem logowania i wypisu), wielokrotnego użytku,
     ważny 60 dni (gałąź `ELSE` istniejącego `access_tokens_expiry_check`), w bazie tylko
@@ -2259,7 +2306,8 @@ YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
     werdyktów, wzorzec uuid, kształt tokenu). Strona 404 na trasie `/ocena/…` ma jedno
     dodatkowe zdanie („Zamówienia ocenisz też na stronie „Pasujące zamówienia” po
     zalogowaniu.”) — zależne tylko od trasy, identyczne dla każdej odmowy.
-  - **`/dopasowania`:** pod każdą kartą formularz POST `/dopasowania/ocena` (sesja + CSRF,
+  - **`/dopasowania`:** na końcu każdej karty, po `<details>` „Więcej szczegółów (…)” z
+    D-030, formularz POST `/dopasowania/ocena` (sesja + CSRF,
     pola `csrf`, `oferta`, `werdykt` i opcjonalne `nastepna`) z dwoma przyciskami o etykietach
     dostępnych; po ocenie przycisk bieżącej oceny ma `aria-pressed="true"` i pogrubienie. Kolejność
     sprawdzeń: brak sesji 401 → zły CSRF 403 → zły formularz, werdykt lub id 400 → oferta
@@ -2275,7 +2323,7 @@ YYYY-MM-DD]`: `--sent` (doręczono) → wiersze `sent`, `sent_at = now()`,
     dodaje szum tylko do własnego wiersza (i do sum, w które ten wiersz wchodzi). Oceny wczytywane jednym zapytaniem
     (`= ANY(uuid[])`) dla całej listy. Oceny „nietrafne” są wyszarzone i przesunięte na
     koniec (kolejność digestu zachowana w obu częściach) przed obcięciem do
-    `MATCHES_SHOWN`.
+    `MATCHES_SHOWN` (od PR-13: przed podziałem na strony, D-027).
   - **`GET /dopasowania.csv`** (sesja, ten sam slot dopasowań co strona): te same wiersze,
     kolejność i limit co `/dopasowania` (zmienione w PR-13, D-027: CSV obejmuje bieżącą stronę
     `?strona=N`, nazwa pliku z `-strona-N` dla N > 1); UTF-8 z BOM, separator `;`, wiersze CRLF, cudzysłowy
@@ -2290,6 +2338,17 @@ filename="dopasowania-YYYY-MM-DD.csv"`, `Cache-Control: no-store`.
     zaokrąglona do 3 miejsc, **`null` przy zerze ocen** (nigdy 0). `--since` to dzień w
     Polsce (oceny z `updated_at` od północy czasu polskiego). Oba odczyty w jednej migawce
     (`REPEATABLE READ`). Bez adresów i tytułów. Kody wyjścia jak inne komendy (0/1/2).
+  - **Pokrycie w `feedback:report` (decyzja właściciela po review, 2026-11-12):** `total` i
+    każdy profil mają `delivered` (różne zamówienia z dostawą `sent`; od `--since` wg
+    `sent_at`), `ratedDelivered` (z nich ocenione, dowolnym werdyktem i kiedykolwiek) i
+    `coverage` = ocenione / wysłane (3 miejsca, `null` przy zerze wysłanych); profile bez ocen,
+    ale z wysłanymi ofertami, są na liście. `total.delivered`/`total.ratedDelivered` to sumy
+    po profilach, więc liczą pary (profil, oferta). Liczą się też dostawy transportu `test`,
+    więc pokrycie ma sens tylko dla e-maili z `EMAIL_MODE=smtp` (`--since` od dnia po
+    przełączeniu). Oceniają nieliczni i częściej te nietrafione, więc sama precyzja bez
+    pokrycia myli przy go/no-go; decyzja go/no-go opiera się na raporcie z całego pilotażu,
+    a z profilu z mniej niż ok. 20 ocenami w nim nie wyciąga się wniosków (reguła czytania w
+    RUNBOOK, bez flagi w raporcie).
   - **Logi i Caddy:** log żądania zawiera tylko trasę `feedback`, status i czas; Caddy
     pomija i redaguje `/ocena/…` jak `/dostep/…`. Strony z tokenem mają `no-store` i
     `Referrer-Policy: strict-origin`.

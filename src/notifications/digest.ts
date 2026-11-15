@@ -3,7 +3,6 @@ import type { FeedbackVerdict } from "../infrastructure/db/schema.js";
 import { escapeHtml } from "../infrastructure/html.js";
 import { formatWarsawMinute } from "../sources/normalize/warsaw-time.js";
 import {
-  LINK_LABEL,
   MATCH_DETAILS_LABEL,
   OPEN_LABEL,
   URGENT_WORD,
@@ -263,14 +262,20 @@ function rowText(row: CardRow): string {
 }
 
 /**
- * One card as text: the title, the labelled rows, the link (the excerpt only,
- * never the full description) and the match details as the last line.
+ * One card as text, in the card's order: the title, the lead rows, the
+ * "Otwórz ogłoszenie" line, the body rows (the excerpt only, never the full
+ * description), the more rows, the match details and — when the digest
+ * carries them (PR-12) — the two rating links last.
  */
 function cardText({ card, feedback }: DigestCard, index: number): string[] {
+  const rows = (group: readonly CardRow[]) =>
+    group.map((row) => `   ${row.label}: ${rowText(row)}`);
   return [
     `${String(index + 1)}. ${card.title}`,
-    ...card.rows.map((row) => `   ${row.label}: ${rowText(row)}`),
-    ...(card.url === null ? [] : [`   ${LINK_LABEL}: ${card.url}`]),
+    ...rows(card.lead),
+    ...(card.url === null ? [] : [`   ${OPEN_LABEL}: ${card.url}`]),
+    ...rows(card.body),
+    ...rows(card.more),
     ...(card.matchDetails.length === 0
       ? []
       : [`   ${MATCH_DETAILS_LABEL}: ${card.matchDetails.join(" · ")}`]),
@@ -308,16 +313,25 @@ function rowHtml(row: CardRow): string {
   return `<b>${escapeHtml(row.label)}:</b> ${urgent}${escapeHtml(row.value)}`;
 }
 
+/** A group of rows as one paragraph, a line each; `style` is the paragraph's inline style. */
+function rowsHtml(rows: readonly CardRow[], style: string): string {
+  return rows.length === 0 ? "" : `<p style="${style}">${rows.map(rowHtml).join("<br>")}</p>`;
+}
+
 /**
  * One card as HTML, inline-styled (mail clients drop <style>): a bordered
- * box in the accent colour, the rows, one "Otwórz ogłoszenie" button and the
- * match details as a small last line. No colour on text, no images or fonts.
+ * box in the accent colour, in the card's order — the lead rows, one
+ * "Otwórz ogłoszenie" button, the body rows, then the more rows and the
+ * match details, smaller, and — when the digest carries them (PR-12) — the
+ * rating links last. All visible: mail clients do not all support <details>.
+ * No colour on text, no images or fonts.
  */
 function cardHtml({ card, feedback }: DigestCard): string {
   const button =
     card.url === null
       ? ""
-      : `<p><a href="${escapeHtml(card.url)}" style="display:inline-block;padding:6px 14px;` +
+      : `<p style="margin:8px 0"><a href="${escapeHtml(card.url)}" ` +
+        `style="display:inline-block;padding:6px 14px;` +
         `background:${ACCENT};color:#fff;text-decoration:none"><b>${OPEN_LABEL}</b></a></p>`;
   const details =
     card.matchDetails.length === 0
@@ -333,8 +347,12 @@ function cardHtml({ card, feedback }: DigestCard): string {
   return (
     `<div style="border:1px solid ${ACCENT};padding:0 12px 10px;margin:12px 0">` +
     `<h2 style="font-size:1.05em;margin:10px 0 6px">${escapeHtml(card.title)}</h2>` +
-    `<p style="margin:0">${card.rows.map(rowHtml).join("<br>")}</p>` +
-    `${button}${details}${rate}</div>`
+    rowsHtml(card.lead, "margin:0") +
+    button +
+    // Without a button, the lead's last line ("Link: nie podano") needs the gap instead.
+    rowsHtml(card.body, card.url === null ? "margin:8px 0 0" : "margin:0") +
+    rowsHtml(card.more, "margin:8px 0 4px;font-size:0.9em") +
+    `${details}${rate}</div>`
   );
 }
 

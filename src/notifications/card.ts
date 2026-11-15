@@ -35,20 +35,31 @@ export interface CardRow {
   readonly urgent: boolean;
 }
 
+/**
+ * The card in the order every renderer shows it, so the four views cannot
+ * differ (PR-11 AC3) and the first screen of a 390 px phone answers "how
+ * much, until when, why me" (owner's review of PR #17, D-030):
+ *
+ * 1. `title`;
+ * 2. `lead`: value, deadline, "Dlaczego pasuje" and — only without a usable
+ *    link — "Link: nie podano", where the button would be;
+ * 3. the "Otwórz ogłoszenie" button (e-mail text: line) to `url`;
+ * 4. `body`: buyer, location, the description excerpt (when given; the web
+ *    unfolds `fullDescription` under it) and the source attribution (Baza
+ *    Konkurencyjności only) — always visible, as its terms require;
+ * 5. `more`: the publication date and the contact (when given), then
+ *    `matchDetails` — folded into one <details> on the web, the small last
+ *    lines of the e-mail (mail clients do not all support <details>).
+ */
 export interface OfferCard {
   readonly title: string;
-  /**
-   * The labelled lines, in the order every renderer shows them: value,
-   * deadline, buyer, location, publication date, contact (when given), why it
-   * matches, the description excerpt (when given), the source attribution
-   * (Baza Konkurencyjności) and — only without a usable link — "Link: nie
-   * podano", so the absence is visible.
-   */
-  readonly rows: readonly CardRow[];
-  /** The whole description, only when the excerpt had to cut it (web only; the e-mail keeps the excerpt). */
-  readonly fullDescription: string | null;
+  readonly lead: readonly CardRow[];
   /** The source link, http(s) only; null when the stored URL is anything else. */
   readonly url: string | null;
+  readonly body: readonly CardRow[];
+  /** The whole description, only when the excerpt had to cut it (web only; the e-mail keeps the excerpt). */
+  readonly fullDescription: string | null;
+  readonly more: readonly CardRow[];
   /** CPV codes and the technical reasons ("Szczegóły dopasowania"), each one item. */
   readonly matchDetails: readonly string[];
 }
@@ -63,6 +74,8 @@ export const LINK_LABEL = "Link";
 export const OPEN_LABEL = "Otwórz ogłoszenie";
 export const FULL_DESCRIPTION_LABEL = "Pełny opis";
 export const MATCH_DETAILS_LABEL = "Szczegóły dopasowania";
+/** The web's one disclosure: the `more` rows and the match details. */
+export const MORE_LABEL = "Więcej szczegółów";
 /** Before a deadline 0–2 days away, so it is seen without reading the date. */
 export const URGENT_WORD = "PILNE";
 /** Days (Polish calendar) up to which a deadline is URGENT_WORD. */
@@ -336,34 +349,40 @@ function row(label: string, value: string, urgent = false): CardRow {
 /** One matched offer as a card, its deadline counted from `now` (the render time). */
 export function offerCard({ offer, reasons }: MatchedOffer, now: Date): OfferCard {
   const deadline = formatDeadline(offer.deadline, now);
+  const url = safeLink(offer.sourceUrl);
   // Stored text is clean already; cleaning again keeps a line break or a
   // control character out of the e-mail whatever the row holds.
-  const rows: CardRow[] = [
+  const lead: CardRow[] = [
     // Built from validated digits and a currency code; holds a no-break space on purpose.
     row(VALUE_LABEL, formatValue(offer.estimatedValue, offer.currency)),
     row(DEADLINE_LABEL, deadline.text, deadline.urgent),
+    row(WHY_LABEL, cleanText(whySentence(reasons))),
+  ];
+  if (url === null) lead.push(row(LINK_LABEL, NOT_GIVEN));
+  const body: CardRow[] = [
     row("Zamawiający", cleanText(offer.issuerName)),
     row("Lokalizacja", cleanText(formatLocation(offer.location))),
+  ];
+  const description = offer.description === null ? "" : cleanText(offer.description);
+  const excerpt = snippet(description);
+  if (excerpt !== "") body.push(row(DESCRIPTION_LABEL, excerpt));
+  const attribution = sourceAttribution(offer);
+  if (attribution !== null) body.push(row(ATTRIBUTION_LABEL, attribution));
+  const more: CardRow[] = [
     row(
       "Data publikacji",
       offer.publishedAt === null ? NOT_GIVEN : formatPolishDay(offer.publishedAt),
     ),
   ];
   const contact = formatContact(offer.contact);
-  if (contact !== null) rows.push(row("Kontakt", cleanText(contact)));
-  rows.push(row(WHY_LABEL, cleanText(whySentence(reasons))));
-  const description = offer.description === null ? "" : cleanText(offer.description);
-  const excerpt = snippet(description);
-  if (excerpt !== "") rows.push(row(DESCRIPTION_LABEL, excerpt));
-  const attribution = sourceAttribution(offer);
-  if (attribution !== null) rows.push(row(ATTRIBUTION_LABEL, attribution));
-  const url = safeLink(offer.sourceUrl);
-  if (url === null) rows.push(row(LINK_LABEL, NOT_GIVEN));
+  if (contact !== null) more.push(row("Kontakt", cleanText(contact)));
   return {
     title: cleanText(offer.title),
-    rows,
-    fullDescription: excerpt !== description ? description : null,
+    lead,
     url,
+    body,
+    fullDescription: excerpt !== description ? description : null,
+    more,
     matchDetails: matchDetails(offer, reasons),
   };
 }

@@ -12,9 +12,14 @@ import { createCompanyProfile } from "../../src/infrastructure/db/company-profil
 import { migrateToLatest } from "../../src/infrastructure/db/database.js";
 import { countFeedback, rateOffer } from "../../src/infrastructure/db/feedback-repository.js";
 import { upsertOpportunity } from "../../src/infrastructure/db/opportunities-repository.js";
-import type { DeliveryStatus, FeedbackVerdict } from "../../src/infrastructure/db/schema.js";
+import type {
+  DeliveryStatus,
+  DeliveryTransport,
+  FeedbackVerdict,
+} from "../../src/infrastructure/db/schema.js";
 import { upsertSource } from "../../src/infrastructure/db/sources-repository.js";
 import { createLogger } from "../../src/infrastructure/logger.js";
+import { MORE_LABEL } from "../../src/notifications/card.js";
 import { csrfTokenFor, SESSION_COOKIE } from "../../src/web/session.js";
 import { MATCHES_SHOWN, startWebServer, type WebServer } from "../../src/web/server.js";
 import { createTestSchema, skipWithoutDatabase, type TestSchema } from "./test-database.js";
@@ -119,18 +124,26 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
     return result.opportunity.id;
   }
 
-  async function deliver(profileId: string, opportunityId: string, status: DeliveryStatus) {
+  async function deliver(
+    profileId: string,
+    opportunityId: string,
+    status: DeliveryStatus,
+    {
+      transport = "test",
+      sentAt = new Date(),
+    }: { transport?: DeliveryTransport; sentAt?: Date } = {},
+  ) {
     await schema.db
       .insertInto("deliveries")
       .values({
         profile_id: profileId,
         opportunity_id: opportunityId,
-        transport: "test",
+        transport,
         digest_date: "2026-11-02",
         status,
         attempts: 1,
         error_code: status === "failed" ? "smtp_transient" : null,
-        sent_at: status === "sent" ? new Date() : null,
+        sent_at: status === "sent" ? sentAt : null,
       })
       .execute();
   }
@@ -662,6 +675,62 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
         { profile_id: jan.id, opportunity_id: onSecond, verdict: "relevant" },
       ]);
     });
+
+    // PR-12 × PR-13: the Location of a „Nietrafne” on page 2 opens page 2 with
+    // the next card on it, each card in the D-030 order with the form last.
+    it("after „Nietrafne” on page 2, opens page 2 at the next card (D-030 card order)", async () => {
+      const ids: string[] = [];
+      for (let i = 0; i < MATCHES_SHOWN + 3; i++) ids.push(await offer());
+      const [rated, next, after] = ids.slice(MATCHES_SHOWN);
+      if (rated === undefined || next === undefined || after === undefined) {
+        throw new Error("no offers");
+      }
+      const { cookie, csrf } = await login(jan.id);
+      const response = await rate(cookie, {
+        csrf,
+        oferta: rated,
+        werdykt: "nietrafne",
+        nastepna: next,
+        strona: "2",
+      });
+      expect(response.status).toBe(303);
+      expect(response.headers.get("location")).toBe(`/dopasowania?strona=2#oferta-${next}`);
+      const html = await (
+        await fetch(`${url}/dopasowania?strona=2`, { headers: { cookie } })
+      ).text();
+      // The rated card went last in the whole list; the next one took its place.
+      const order = [...html.matchAll(/<li id="oferta-([0-9a-f-]{36})">/g)].map(
+        (match) => match[1] ?? "",
+      );
+      expect(order).toEqual([next, after, rated]);
+      for (const id of order) {
+        const start = html.indexOf(`<li id="oferta-${id}">`);
+        const card = html.slice(start, html.indexOf("</article>", start) + "</article>".length);
+        const at = [
+          card.indexOf("<h2>"),
+          card.indexOf('class="button"'),
+          card.indexOf(`<summary>${MORE_LABEL} (`),
+          card.lastIndexOf("</details>"),
+          card.indexOf('<form method="post" action="/dopasowania/ocena"'),
+          card.indexOf('<input type="hidden" name="strona" value="2">'),
+          card.indexOf("</form></article>"),
+        ];
+        expect(at.every((index) => index >= 0)).toBe(true);
+        expect(at).toEqual([...at].sort((a, b) => a - b));
+      }
+      // The page line, the window, this page's CSV, the cards, the pager, the rating note.
+      const layout = [
+        html.indexOf("<p><strong>Strona 2 z 2</strong>: zamówienia 51–53 z 53.</p>"),
+        html.indexOf("<p>Pokazujemy zamówienia dodane do Radaru"),
+        html.indexOf('<a href="/dopasowania.csv?strona=2">Ta strona jako CSV</a>'),
+        html.indexOf('<ol class="matches" start="51">'),
+        html.indexOf("</ol>"),
+        html.indexOf('<nav aria-label="Strony listy">'),
+        html.indexOf("<p>Oceń zamówienia przyciskami"),
+      ];
+      expect(layout.every((index) => index >= 0)).toBe(true);
+      expect(layout).toEqual([...layout].sort((a, b) => a - b));
+    });
   });
 
   describe("GET /dopasowania.csv", () => {
@@ -811,7 +880,15 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
       expect(JSON.parse(result.stdout)).toEqual({
         status: "ok",
         since: null,
-        total: { ratings: 0, relevant: 0, notRelevant: 0, precision: null },
+        total: {
+          ratings: 0,
+          relevant: 0,
+          notRelevant: 0,
+          precision: null,
+          delivered: 0,
+          ratedDelivered: 0,
+          coverage: null,
+        },
         profiles: [],
         categories: [],
       });
@@ -836,13 +913,24 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
       expect(parsed).toEqual({
         status: "ok",
         since: null,
-        total: { ratings: 4, relevant: 2, notRelevant: 2, precision: 0.5 },
+        total: {
+          ratings: 4,
+          relevant: 2,
+          notRelevant: 2,
+          precision: 0.5,
+          delivered: 0,
+          ratedDelivered: 0,
+          coverage: null,
+        },
         profiles: [first, second].map((profileId) => ({
           profileId,
           ratings: 2,
           relevant: 1,
           notRelevant: 1,
           precision: 0.5,
+          delivered: 0,
+          ratedDelivered: 0,
+          coverage: null,
         })),
         categories: [
           { category: "elektryka", ratings: 3, relevant: 2, notRelevant: 1, precision: 0.667 },
@@ -864,7 +952,97 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
       });
       // countFeedback agrees with the command.
       expect((await countFeedback(schema.db, "2020-02-02")).profiles).toHaveLength(2);
-      expect(await countFeedback(schema.db, "2099-01-01")).toEqual({ profiles: [], offers: [] });
+      expect(await countFeedback(schema.db, "2099-01-01")).toEqual({
+        profiles: [],
+        offers: [],
+        deliveries: [],
+      });
+    });
+
+    it("reports coverage: offers sent once each, from --since on (Poland's day), per profile only", async () => {
+      const twice = await offer();
+      const early = await offer();
+      const pending = await offer();
+      const failed = await offer();
+      const annas = await offer();
+      // Sent over both transports (the unique key allows it): one offer delivered.
+      // 23:30 UTC on 31 January is 1 February in Poland, from --since on.
+      const firstOfFebruary = new Date("2020-01-31T23:30:00.000Z");
+      await deliver(jan.id, twice, "sent", { sentAt: firstOfFebruary });
+      await deliver(jan.id, twice, "sent", { transport: "smtp", sentAt: firstOfFebruary });
+      // 22:30 UTC is 23:30 on 31 January in Poland, before --since.
+      await deliver(jan.id, early, "sent", { sentAt: new Date("2020-01-31T22:30:00.000Z") });
+      // Claimed or failed: never received, so not delivered — even when rated on the web.
+      await deliver(jan.id, pending, "pending");
+      await deliver(jan.id, failed, "failed");
+      await deliver(anna.id, annas, "sent");
+      await rateOffer(schema.db, jan.id, twice, "relevant");
+      await rateOffer(schema.db, jan.id, pending, "relevant");
+      await rateOffer(schema.db, jan.id, failed, "not_relevant");
+      // Another profile's ratings never cover an offer sent to this one.
+      await rateOffer(schema.db, jan.id, annas, "relevant");
+      await rateOffer(schema.db, anna.id, early, "not_relevant");
+
+      const byId = <T extends { profileId: string }>(rows: T[]) =>
+        rows.sort((a, b) => a.profileId.localeCompare(b.profileId));
+      const all = await report();
+      expect(all.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(all.stdout)).toMatchObject({
+        total: {
+          ratings: 5,
+          relevant: 3,
+          notRelevant: 2,
+          precision: 0.6,
+          delivered: 3,
+          ratedDelivered: 1,
+          coverage: 0.333,
+        },
+        profiles: byId([
+          {
+            profileId: jan.id,
+            ratings: 4,
+            relevant: 3,
+            notRelevant: 1,
+            precision: 0.75,
+            delivered: 2,
+            ratedDelivered: 1,
+            coverage: 0.5,
+          },
+          {
+            profileId: anna.id,
+            ratings: 1,
+            relevant: 0,
+            notRelevant: 1,
+            precision: 0,
+            delivered: 1,
+            ratedDelivered: 0,
+            coverage: 0,
+          },
+        ]),
+      });
+
+      const since = await report(["--since", "2020-02-01"]);
+      expect(since.code).toBe(ExitCode.Ok);
+      expect(JSON.parse(since.stdout)).toMatchObject({
+        since: "2020-02-01",
+        total: { delivered: 2, ratedDelivered: 1, coverage: 0.5 },
+        profiles: byId([
+          { profileId: jan.id, delivered: 1, ratedDelivered: 1, coverage: 1 },
+          { profileId: anna.id, delivered: 1, ratedDelivered: 0, coverage: 0 },
+        ]),
+      });
+
+      // A profile that only has offers sent is listed by countFeedback too.
+      await sql`DELETE FROM match_feedback`.execute(schema.db);
+      expect(await countFeedback(schema.db, null)).toEqual({
+        profiles: [],
+        offers: [],
+        deliveries: byId([
+          { profileId: jan.id, delivered: 2, ratedDelivered: 0 },
+          { profileId: anna.id, delivered: 1, ratedDelivered: 0 },
+        ]),
+      });
+      expect((await countFeedback(schema.db, "2099-01-01")).deliveries).toEqual([]);
     });
 
     it("refuses a bad --since (exit 2)", async () => {

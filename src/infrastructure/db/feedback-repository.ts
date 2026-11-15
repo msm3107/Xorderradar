@@ -195,15 +195,28 @@ export interface CpvVerdictCounts extends VerdictCounts {
   readonly cpvCodes: readonly string[];
 }
 
+/** The offers sent to one profile and how many of them it rated (the report's coverage). */
+export interface ProfileDeliveryCounts {
+  readonly profileId: string;
+  /** Distinct offers with a `sent` delivery to the profile. */
+  readonly delivered: number;
+  /** Of those, the offers the profile rated (any verdict, any time). */
+  readonly ratedDelivered: number;
+}
+
 export interface FeedbackCounts {
   readonly profiles: readonly ProfileVerdictCounts[];
   readonly offers: readonly CpvVerdictCounts[];
+  /** Profiles with at least one offer sent (from `since` on), by id. */
+  readonly deliveries: readonly ProfileDeliveryCounts[];
 }
 
 /**
  * The ratings last set on or after `since` (a calendar day in Poland, the
  * start of that day; null: all), counted per profile and per the rated
- * offers' CPV codes (`feedback:report`). Ids, codes and counts only.
+ * offers' CPV codes, and per profile the offers sent on or after `since`
+ * with how many of them were rated (`feedback:report`). Ids, codes and
+ * counts only.
  */
 export async function countFeedback(
   db: Kysely<Database>,
@@ -216,7 +229,7 @@ export async function countFeedback(
     since === null
       ? sql<Date>`'-infinity'::timestamptz`
       : sql<Date>`(${since}::date)::timestamp AT TIME ZONE 'Europe/Warsaw'`;
-  // One snapshot for both lists, so their totals agree.
+  // One snapshot for all three lists, so their totals agree.
   return db
     .transaction()
     .setIsolationLevel("repeatable read")
@@ -236,6 +249,29 @@ export async function countFeedback(
         .groupBy("o.categories")
         .orderBy("o.categories")
         .execute();
+      // Coverage (D-032): only `sent` counts as delivered — a `pending` row
+      // is a claim whose e-mail may never have left, a `failed` one never
+      // reached the customer, so neither could have been rated from the
+      // e-mail. DISTINCT: the unique key is per transport, so one offer can
+      // have two rows for a profile. A rating counts whatever its verdict and
+      // date: the question is whether the delivered offer was rated at all.
+      const deliveryRows = await trx
+        .selectFrom("deliveries as d")
+        .leftJoin("match_feedback as f", (join) =>
+          join
+            .onRef("f.profile_id", "=", "d.profile_id")
+            .onRef("f.opportunity_id", "=", "d.opportunity_id"),
+        )
+        .select([
+          "d.profile_id",
+          sql<string>`count(DISTINCT d.opportunity_id)`.as("delivered"),
+          sql<string>`count(DISTINCT f.opportunity_id)`.as("rated_delivered"),
+        ])
+        .where("d.status", "=", "sent")
+        .where("d.sent_at", ">=", sinceStart)
+        .groupBy("d.profile_id")
+        .orderBy("d.profile_id")
+        .execute();
       return {
         // count(*) is bigint, which `pg` returns as text.
         profiles: profileRows.map((row) => ({
@@ -247,6 +283,11 @@ export async function countFeedback(
           cpvCodes: row.categories,
           relevant: Number(row.relevant),
           notRelevant: Number(row.not_relevant),
+        })),
+        deliveries: deliveryRows.map((row) => ({
+          profileId: row.profile_id,
+          delivered: Number(row.delivered),
+          ratedDelivered: Number(row.rated_delivered),
         })),
       };
     });

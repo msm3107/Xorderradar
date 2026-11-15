@@ -49,20 +49,30 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      # pg_dump/pg_restore for the backup/restore test: at least the server's major (16).
+      # pg_dump/pg_restore for the backup/restore test: the server's major (16) exactly, not
+      # the `postgresql-client` meta package (on the runner image it pulls the newest client).
+      # pg_dump >= 17 writes `SET transaction_timeout`, which a 16 server rejects, so
+      # `pg_restore --exit-on-error --single-transaction` fails. Ubuntu 26.04 ships only the
+      # 18 client, so the PGDG repository (apt.postgresql.org) is added first with the script
+      # and signing key shipped in postgresql-common (the script runs apt-get update itself).
+      # The versioned binaries go first on PATH for the later steps.
       - name: Install the PostgreSQL client
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          sudo apt-get install -y --no-install-recommends postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y --no-install-recommends postgresql-client-16
+          bindir=/usr/lib/postgresql/16/bin
           for tool in pg_dump pg_restore; do
-            version="$("$tool" --version)"
+            version="$("$bindir/$tool" --version)"
             echo "$version"
             major="$(echo "$version" | sed -E 's/.*\(PostgreSQL\) ([0-9]+).*/\1/')"
-            if [ "$major" -lt 16 ]; then
-              echo "::error::$tool $major is older than the PostgreSQL 16 server"
+            if [ "$major" != "16" ]; then
+              echo "::error::$tool major $major does not match the PostgreSQL 16 server"
               exit 1
             fi
           done
+          echo "$bindir" >> "$GITHUB_PATH"
 
       - run: pnpm install --frozen-lockfile
 
