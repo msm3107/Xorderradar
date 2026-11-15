@@ -525,7 +525,7 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       expect(page).not.toContain('name="counties"');
       expect(page).toContain("Powiaty (ustawia obsługa): warszawski zachodni, piaseczyński.");
       // Without CONTACT_EMAIL: the way to the operator is our e-mail (PR-14: shorter).
-      expect(page).toContain("Zmiana: odpowiedz na nasz e-mail.</p>");
+      expect(page).toContain("Zmiana powiatów: odpowiedz na nasz e-mail.</p>");
       expect(page).toContain('<fieldset aria-describedby="powiaty-uwaga"><legend>');
 
       const saved = await post("/profil/ustawienia", settingsForm(csrf, { name: "Nowa nazwa" }), {
@@ -564,7 +564,7 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       try {
         const contactUrl = `http://127.0.0.1:${String(withContact.port)}/profil/ustawienia`;
         const contactNote =
-          'Zmiana: <a href="mailto:pomoc@example.invalid">pomoc@example.invalid</a>.</p>';
+          'Zmiana powiatów: <a href="mailto:pomoc@example.invalid">pomoc@example.invalid</a>.</p>';
         const form = await (await fetch(contactUrl, { headers: { cookie } })).text();
         expect(form).toContain(contactNote);
         expect(form).not.toContain("odpowiedz na nasz e-mail");

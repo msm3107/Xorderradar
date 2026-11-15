@@ -723,10 +723,12 @@ function regionGroup(
       extra,
     ) +
     "</div>";
-  // Short (PR-14): about five lines at 390 px with three counties, in the group's hint
-  // style — the warning box took nine. The same substance: the counties, their effect
-  // on „Cała Polska” and who changes them. Form 1473 px; the planned ~3 lines did not
-  // fit (the form without the note is 1355 px) and the owner accepted this (D-027).
+  // Short (PR-14): six lines at 390 px with three counties, in the group's hint style —
+  // the warning box took nine. The same substance: the counties, their effect on „Cała
+  // Polska” and who changes them. Form 1494 px; the planned ~3 lines did not fit (the
+  // form without the note is 1355 px) and the owner accepted this (D-027). „Zmiana
+  // powiatów” (owner's review of PR #20, not to be read as the e-mail change) costs the
+  // sixth line: 1473 → 1494 px.
   const change = contactEmail === null ? "odpowiedz na nasz e-mail" : mailLink(contactEmail);
   const countiesNote =
     counties.length === 0
@@ -734,7 +736,7 @@ function regionGroup(
       : `<p class="hint" id="${COUNTIES_NOTE_ID}">Powiaty (ustawia obsługa): ` +
         `${escapeHtml(counties.join(", "))}. Ogłoszenia nie podają powiatu, więc przy ` +
         "„Cała Polska” tylko zamówienia z pasującą kategorią i słowem kluczowym. " +
-        `Zmiana: ${change}.</p>`;
+        `Zmiana powiatów: ${change}.</p>`;
   // No hint: the two radio labels say it (PR-13, a shorter form). The note describes the group.
   return group(
     "voivodeships",

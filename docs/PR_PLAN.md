@@ -854,13 +854,16 @@ ustawień także w profilu z powiatami od obsługi (review właściciela PR #19)
 1. **`GET /dopasowania.csv` bez `strona`** → cała lista: te same wiersze co wszystkie strony
    razem (≤ `MATCHES_MAX_PAGES × MATCHES_SHOWN` = 1000), ta sama kolejność („Nietrafne” na
    końcu), ta sama neutralizacja formuł. Plik `dopasowania-RRRR-MM-DD.csv`.
+   _Poprawka z review właściciela PR #20:_ ucięta lista (> 1000) ma plik
+   `dopasowania-RRRR-MM-DD-pierwsze-1000.csv` (treść bez zmian).
 2. **`?strona=N` na CSV** działa jak dotąd (jedna strona) — stare linki nie psują się; strona
    listy już go nie linkuje.
 3. **Strona `/dopasowania`:** na każdej stronie jeden link do CSV całej listy; jedna linia na
    390 px.
 4. **Notka o powiatach tylko do odczytu** w `/profil/ustawienia`: krótsza (cel ~3 linie na
-   390 px; przyjęte 5 — patrz kryterium 3), ta sama treść merytoryczna (powiaty, wpływ na
-   „Cała Polska”, kontakt do obsługi).
+   390 px; przyjęte 5, po review PR #20 6 — patrz kryterium 3), ta sama treść merytoryczna (powiaty, wpływ na
+   „Cała Polska”, kontakt do obsługi). _Poprawka z review właściciela PR #20:_ „Zmiana powiatów:”
+   zamiast „Zmiana:” (formularz 1494 px).
 
 **Kryteria akceptacji:**
 
@@ -870,7 +873,8 @@ ustawień także w profilu z powiatami od obsługi (review właściciela PR #19)
 3. Formularz na 390 px z 3 powiatami od obsługi i zmianą e-maila w toku jest niższy niż w PR-13
    (1619 px); zrzuty przed i po. _Zmienione decyzją właściciela 2026-11-15:_ pierwotny cel
    −40% (≤ 1379 px) jest nieosiągalny — formularz bez notki ma 1355 px, więc na notkę zostaje
-   jedna linia; przyjęte 1473 px (−36%), notka w 5 liniach w stylu podpowiedzi.
+   jedna linia; przyjęte 1473 px (−36%), notka w 5 liniach w stylu podpowiedzi. Po review PR #20
+   („Zmiana powiatów:”): 1494 px (−35%), notka w 6 liniach.
 4. D-032 zaktualizowana (CSV całej listy).
 
 **Poza zakresem:**

@@ -1125,12 +1125,12 @@ describe("copy", () => {
       false,
       ["warszawski zachodni", "<b>piaseczyński</b>"],
     );
-    // PR-14: shorter, in the group's hint style (≈ 5 lines at 390 px, the box took 9).
+    // PR-14: shorter, in the group's hint style (6 lines at 390 px, the box took 9).
     expect(html).toContain(
       '<p class="hint" id="powiaty-uwaga">Powiaty (ustawia obsługa): warszawski zachodni, ' +
         "&lt;b&gt;piaseczyński&lt;/b&gt;. Ogłoszenia nie podają powiatu, więc przy " +
         "„Cała Polska” tylko zamówienia z pasującą kategorią i słowem kluczowym. " +
-        "Zmiana: odpowiedz na nasz e-mail.</p>",
+        "Zmiana powiatów: odpowiedz na nasz e-mail.</p>",
     );
     expect(html).not.toContain("mailto:");
     expect(html).not.toContain('name="counties"');
@@ -1151,7 +1151,7 @@ describe("copy", () => {
     expect(html).toContain(
       '<p class="hint" id="powiaty-uwaga">Powiaty (ustawia obsługa): warszawski zachodni. ' +
         "Ogłoszenia nie podają powiatu, więc przy „Cała Polska” tylko zamówienia z pasującą " +
-        "kategorią i słowem kluczowym. Zmiana: " +
+        "kategorią i słowem kluczowym. Zmiana powiatów: " +
         '<a href="mailto:pomoc&quot;@example.invalid">pomoc&quot;@example.invalid</a>.</p>',
     );
     expect(html).not.toContain("odpowiedz na");

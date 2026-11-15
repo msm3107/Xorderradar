@@ -483,7 +483,8 @@ zamówienie, 50 zamówień na stronę, kolejne strony linkiem „Następna stron
 pojedynczych linków z e-maili — więcej ocen w krótszym czasie.
 
 Klient może też pobrać swoją listę dopasowań jako CSV („Pobierz listę jako CSV” na każdej
-stronie `/dopasowania` — od PR-14 jeden plik z całą listą, najwyżej 1000 zamówień; separator
+stronie `/dopasowania` — od PR-14 jeden plik z całą listą, najwyżej 1000 zamówień; ucięta lista
+ma w nazwie pliku `-pierwsze-1000`; separator
 `;`, UTF-8 z BOM — otwiera się w Excelu i Arkuszach Google). Lista kończy się na 20 stronach (1000
 zamówień); większy nadmiar to sygnał do zawężenia profilu.
 

@@ -867,7 +867,12 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
     it("ends the whole list's CSV at the list's limit of 1000 rows", async () => {
       await offers(1003);
       const { cookie } = await login(jan.id);
-      const file = await (await fetch(`${url}/dopasowania.csv`, { headers: { cookie } })).text();
+      const response = await fetch(`${url}/dopasowania.csv`, { headers: { cookie } });
+      // Owner's review of PR #20: the name says the list was cut (the file has no marker).
+      expect(response.headers.get("content-disposition")).toMatch(
+        /^attachment; filename="dopasowania-\d{4}-\d{2}-\d{2}-pierwsze-1000\.csv"$/,
+      );
+      const file = await response.text();
       const titles = titlesOf(file);
       expect(titles).toHaveLength(1000);
       expect(titles).toEqual(numbered(1, 1000));
@@ -877,6 +882,16 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
         await fetch(`${url}/dopasowania.csv?strona=20`, { headers: { cookie } })
       ).text();
       expect(titlesOf(last)).toEqual(numbered(951, 1000));
+    });
+
+    it("names a whole list of exactly 1000 rows without the cut's suffix", async () => {
+      await offers(1000);
+      const { cookie } = await login(jan.id);
+      const response = await fetch(`${url}/dopasowania.csv`, { headers: { cookie } });
+      expect(response.headers.get("content-disposition")).toMatch(
+        /^attachment; filename="dopasowania-\d{4}-\d{2}-\d{2}\.csv"$/,
+      );
+      expect(titlesOf(await response.text())).toEqual(numbered(1, 1000));
     });
 
     // PR-13: the CSV is the page shown, with the page's number in its name.

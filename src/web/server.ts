@@ -817,11 +817,14 @@ async function handle(
               );
             case "csv_page": {
               const { shown, pagination } = listPage(list.ordered, request.page, maxPages);
-              return matchesCsvReply(shown, now, pagination.page);
+              return matchesCsvReply(shown, now, { page: pagination.page });
             }
-            case "csv_all":
+            case "csv_all": {
               // The rows of all pages together, in the list's order: the same cut at the limit.
-              return matchesCsvReply(list.ordered.slice(0, maxPages * MATCHES_SHOWN), now, null);
+              const limit = maxPages * MATCHES_SHOWN;
+              const cutAt = list.ordered.length > limit ? limit : null;
+              return matchesCsvReply(list.ordered.slice(0, limit), now, { cutAt });
+            }
           }
         });
       }
@@ -1307,12 +1310,23 @@ function matchesReply(list: MatchesList, cut: MatchesListPage, now: Date, csrf: 
 
 /**
  * GET /dopasowania.csv (PR-12, D-032): `rows` in the list's order. Since
- * PR-14 without `strona` the whole list (`page` null, file
- * `dopasowania-RRRR-MM-DD.csv`); with it (PR-13, old links) that page, file
- * name `…-strona-N.csv` — page 1 too, so it never takes the whole list's name.
+ * PR-14 without `strona` the whole list, file `dopasowania-RRRR-MM-DD.csv`;
+ * cut at the limit (`cutAt`, the owner's review of PR #20) the name says so,
+ * `…-pierwsze-1000.csv`, as the file itself carries no marker. With `strona`
+ * (PR-13, old links) that page, file name `…-strona-N.csv` — page 1 too, so
+ * it never takes the whole list's name.
  */
-function matchesCsvReply(rows: readonly RatedItem[], now: Date, page: number | null): Reply {
-  const suffix = page === null ? "" : `-strona-${String(page)}`;
+function matchesCsvReply(
+  rows: readonly RatedItem[],
+  now: Date,
+  file: { readonly page: number } | { readonly cutAt: number | null },
+): Reply {
+  const suffix =
+    "page" in file
+      ? `-strona-${String(file.page)}`
+      : file.cutAt === null
+        ? ""
+        : `-pierwsze-${String(file.cutAt)}`;
   const name = `dopasowania-${warsawDay(now)}${suffix}.csv`;
   return {
     status: 200,

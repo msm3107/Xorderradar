@@ -757,7 +757,8 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   D-032); inna → 404. `GET /dopasowania.csv` liczy tę
   samą listę w tym samym slocie (`withMatchesSlot`) i bez `strona` zwraca całą listę — pierwsze
   `MATCHES_MAX_PAGES × MATCHES_SHOWN` (1000) pozycji, jedno obliczenie (PR-14, plik
-  `dopasowania-RRRR-MM-DD.csv`); z `?strona=N` jedną stronę (PR-13, dla starych linków; nazwa
+  `dopasowania-RRRR-MM-DD.csv`, a gdy lista jest dłuższa i ucięta —
+  `dopasowania-RRRR-MM-DD-pierwsze-1000.csv`, liczba z limitu); z `?strona=N` jedną stronę (PR-13, dla starych linków; nazwa
   pliku z `-strona-N` dla każdej strony, także `-strona-1`, żeby nie brała nazwy pliku całej
   listy). Żądanie to unia `MatchesRequest` (`page` / `csv_page` /
   `csv_all`, `matchesRequestFromUrl`). Plik przez czyste `csv.ts` (BOM,

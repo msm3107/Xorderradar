@@ -1529,11 +1529,14 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     operator); z 3 powiatami ustawionymi przez operatora 2299 → 1619 px (70,4%) — dochodzi
     notka o powiatach tylko do odczytu. PR-14 skraca notkę (krótszy tekst w stylu podpowiedzi
     grupy zamiast ramki ostrzeżenia, ok. 5 linii zamiast 9): 1619 → 1473 px (64,1% z 2299,
-    −36%; z kontaktem i bez — tyle samo). Cel z PR_PLAN (≤ 1379 px, −40%, notka ok. 3 linie)
-    okazał się nieosiągalny: sam formularz bez notki ma 1355 px, więc na notkę z jej odstępem
+    −36%; z kontaktem i bez — tyle samo); po review właściciela PR #20 „Zmiana powiatów:”
+    zamiast „Zmiana:” (nie myli się ze zmianą e-maila w toku) dokłada szóstą linię: 1494 px
+    (65,0% z 2299, −35%; z kontaktem i bez — tyle samo). Cel z PR_PLAN (≤ 1379 px, −40%,
+    notka ok. 3 linie) okazał się nieosiągalny: sam formularz bez notki ma 1355 px, więc na notkę z jej odstępem
     zostawałoby 24 px — mniej niż jedna linia z trzema powiatami, wyjaśnieniem wpływu na „Cała
     Polska” i kontaktem do obsługi. Właściciel zaakceptował (2026-11-15) 1473 px: notka 5 linii
-    w stylu podpowiedzi zamiast żółtej ramki (z ramką i krótszym tekstem byłoby 1571 px).
+    w stylu podpowiedzi zamiast żółtej ramki (z ramką i krótszym tekstem byłoby 1571 px); po review
+    PR #20 („Zmiana powiatów:”) — 1494 px, notka 6 linii.
   - **Po zapisie:** komunikat „Lista dopasowań pokazuje zmiany od razu, e-mail — od jutra.” z
     linkiem „Zobacz pasujące zamówienia” (`/dopasowania`), także przy zmianie adresu.
     Uproszczenie: zapis przed porannym digestem działa już w tym digeście.
@@ -2343,7 +2346,10 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     kolejność i limit co `/dopasowania`. **Od PR-14 bez `strona` — cała lista** (decyzja
     właściciela po review PR #19: jeden plik zamiast składania plików ze stron): wiersze
     wszystkich stron razem, najwyżej `MATCHES_MAX_PAGES × MATCHES_SHOWN` = 1000, w kolejności
-    listy („Nietrafne” na końcu), plik `dopasowania-RRRR-MM-DD.csv`. Jedno obliczenie listy
+    listy („Nietrafne” na końcu), plik `dopasowania-RRRR-MM-DD.csv`; gdy lista jest dłuższa i
+    plik ją ucina — `dopasowania-RRRR-MM-DD-pierwsze-1000.csv` (liczba to limit
+    `MATCHES_MAX_PAGES × MATCHES_SHOWN`, nie stała; review właściciela PR #20: nazwa mówi o
+    ucięciu, treść pliku bez zmian, bez wiersza-znacznika). Jedno obliczenie listy
     (`matchesList`, ta sama, którą tnie strona), bez dodatkowych zapytań, w tym samym slocie
     (`withMatchesSlot`; 503/429 wskazują `/dopasowania.csv`). Żądanie jest jawną unią
     (`MatchesRequest`: strona listy / strona CSV / CSV całej listy), nie umownym numerem strony.
@@ -2353,7 +2359,8 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     jednej strony nie może wyglądać jak cała lista), błędny numer → 404; strona listy go już nie linkuje (na każdej
     stronie jeden link do CSV całej listy, jedna linia na 390 px). Odświeżenie 503 dla
     `?strona=1` zostaje przy `?strona=1` (bez parametru pobrałoby całą listę). Informacji o
-    zamówieniach ponad limit w pliku nie ma (notka na ostatniej stronie listy). UTF-8 z BOM, separator `;`, wiersze CRLF, cudzysłowy
+    zamówieniach ponad limit w pliku nie ma (notka na ostatniej stronie listy, w nazwie
+    pliku `-pierwsze-1000`). UTF-8 z BOM, separator `;`, wiersze CRLF, cudzysłowy
     RFC 4180; komórka zaczynająca się od `= + - @`, tabulatora albo CR dostaje wiodący `'`
     (neutralizacja formuł, OWASP CSV injection). Brakujące wartości to puste komórki (nigdy
     0). Kwota z przecinkiem dziesiętnym bez zaokrąglania; w kolumnie „Źródło” atrybucja BK
