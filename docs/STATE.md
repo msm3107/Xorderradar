@@ -1,21 +1,19 @@
 # Current State
 
 Current phase: PHASE 4 — PILOT
-Current PR: PR-12 — Ocena trafności i eksport (UX/QOL series PR-10 – PR-13)
+Current PR: PR-13 — Ustawienia bez pułapek (UX/QOL series PR-10 – PR-13)
 Status: PR-08 **MERGED in PR #14 (366618e)**. PR-09 **MERGED in PR #15 (42dd008)**. PR-10
-(first PR of the UX/QOL series from the independent UX audit of 2026-11-06; plan in
-`docs/PR_PLAN.md` → PR-10 – PR-13, `docs/LAUNCH_ROADMAP.md` → 3d) **MERGED in PR #16
-(3b70f94)**. PR-11 **MERGED in PR #17 (b974984)** after the owner's review 2026-11-12 (card
-order for the phone — D-030 „Kolejność karty oferty”; a name-free `/przyklad` contact). PR-12
-**READY locally for review** (branch `pr-12-local`; Code & Safety Review PASS round 2, Quality
-Review ACCEPT); the base branch with PR #17 merged in 2026-11-12 (the rating links/buttons end
-the D-030 card): C&S PASS (merge) and re-check PASS after M1; Quality Review ACCEPT (merge) and re-check
-ACCEPT with its M1 implemented (a shorter `/dopasowania` intro); opened as PR #18. Owner review
-of PR #18 (2026-11-12): PASS; the owner-review round (delivery coverage in `feedback:report`,
-decision 1) is implemented: Code & Safety Review PASS (its L1/L2 doc notes done), Quality
-Review ACCEPT (its M1–M3 and O2 doc notes done, O1 left to the owner), `pnpm check` green
-(2274 tests); pushed to PR #18. Owner steps on the
-VPS for PR-08 (AC1, `bk` backfill, DEPLOY §6) remain in Blockers.
+**MERGED in PR #16 (3b70f94)**. PR-11 **MERGED in PR #17 (b974984)**. PR-12 **MERGED in PR #18
+(b4c7e4c)** after the owner's review 2026-11-12 (delivery coverage in `feedback:report`; the
+`transport = 'smtp'` filter not taken — the documented `--since` reading rule stays). PR-13
+(implemented earlier on top of an early PR-12 commit; C&S PASS round 3, Quality ACCEPT then):
+base branch (b4c7e4c, PR-11 + PR-12) merged in 2026-11-15 — conflicts resolved keeping the
+D-030 card, the rating at the card's end and the short intro from the base, and PR-13's pages
+of 50, region radio, read-only powiaty and 503/429/409 pages; `pnpm check` green (2332 tests);
+Code & Safety Review PASS (05dc031, f98c90c), Quality Review ACCEPT WITH NOTES (88e0964) → PR
+open for owner review (not merged by the agents). Owner review of PR #19: PASS with one Medium
+(`region=all` with ticks → 400) fixed — `all` now ignores the ticks and saves `[]` (2335 tests). Owner steps on the VPS for PR-08 (AC1,
+`bk` backfill, DEPLOY §6) remain in Blockers.
 
 ## Completed
 
@@ -692,8 +690,197 @@ Round-1 fixes:
 
 ## In progress
 
-**PR-12 — Ocena trafności i eksport** (`docs/PR_PLAN.md` → PR-12) — implemented locally on top
-of PR-11 (`pr-12-local`), `pnpm check` green (2274 tests in 65 files after the owner-review
+**PR-13 — Ustawienia bez pułapek** (`docs/PR_PLAN.md` → PR-13) — base branch (b4c7e4c, PR-11 +
+PR-12 merged) merged in 2026-11-15 (05dc031); `pnpm check` green (2332 tests in 65 files, DB
+tests required). Code & Safety Review PASS on the merge (05dc031) and on its follow-up
+(f98c90c, last-page order test); Quality Review ACCEPT WITH NOTES after the docs fix (88e0964). Before
+the merge (on top of an early PR-12 commit): 2279 tests (2224 before PR-13, 2269 before the
+round 1 fixes, 2274 before the minors and nits), Code & Safety Review PASS round 3, Quality
+Review ACCEPT.
+D-027 amended (PR-13 section);
+README, ARCHITECTURE, SECURITY, RUNBOOK („Powiaty profilu (tylko operator)”) updated. No new
+dependency, no migration.
+
+- Region radio `region` („Cała Polska” `all` / „Wybrane województwa” `selected`), pre-selected
+  from the profile, no JS, CSP unchanged. `selected` without a voivodeship → field error (400,
+  form re-rendered, nothing written); `all` ignores the submitted voivodeships and saves `[]`
+  (owner's review of PR #19: the page has no JS, so ticks stay after switching the radio; the
+  earlier 400 for `all` with ticks was a trap); an unknown value → field error; `region`
+  missing or repeated → malformed form (400 error page). AC1.
+- Counties left the form: `companyProfileSettingsSchema` omits `counties`, so the `UPDATE` of a
+  save has no `counties` column — stored counties stay byte-identical (integration test compares
+  `counties::text`). A stray `counties`/`powiaty` field (old cached form) → 400, nothing
+  written. Stored counties are shown read-only (escaped) with their effect and „Powiaty zmienia
+  obsługa”. No page text asks the customer to edit counties any more (matches-page notes and
+  the empty-list hint reworded). `PROFILE_FORM_MAX_FIELDS` comment fixed (6 single fields). AC2.
+- Layout (CSS only): options in a 3-column grid (2 on narrow screens), every checkbox/radio
+  label a ≥ 44 px touch target, shorter hints, `<textarea rows="2">`, the one-field e-mail
+  fieldset removed, a prominent „Zapisz” (`.primary`, ≥ 44 px). **AC3** at 390 px (Playwright,
+  DSF 1 for the numbers; PNGs at DSF 2 in the session scratchpad, not in the repo): form
+  2299 px → **1355 px (58.9%; limit 60% = 1379 px)**, page 2724 → 1713 px, `scrollWidth` 390
+  both (re-measured after the region line of the minors round; 1344 px / 1703 px before it);
+  before, 26 option labels were < 44 px, after none (only the 4 text-field labels, which are
+  not targets).
+- After a save: „Zapisano zmiany profilu. Lista dopasowań pokazuje zmiany od razu, e-mail — od
+  jutra.” + link „Zobacz pasujące zamówienia” (`/dopasowania`), also with the e-mail-change
+  notice. Simplification: a save before the morning digest already shows in that digest.
+- `/dopasowania`: `?strona=N`, 50 a page, at most 20 pages (`MATCHES_MAX_PAGES`, list ends at
+  1000, the rest counted on the last page). Strict parser (`parsePageNumber`:
+  `[1-9][0-9]{0,5}` ≤ 20 after URL decoding; `matchesPageFromUrl`: exactly one `strona`);
+  malformed (empty, 0, sign, leading zero, `1e1`, `2.0`, repeated, > 20, 400 digits) → 404
+  after the session check, before the slot; a valid number past the last page → the last page
+  (200, its real number). Prev/next links with `rel`, „Strona X z Y”, „zamówienia a–b z N”,
+  `<ol start>`. „Nietrafne” last across the whole list (each request computes the whole list
+  and slices). The rating form carries hidden `strona` (> 1), parsed the same way; invalid →
+  page 1, never reflected. The malformed rating body's CSRF fallback keeps its pre-PR-13 bound
+  (4 pairs) so a 5-pair malformed body stays 403 (pre-existing test unchanged).
+- CSV per page (`/dopasowania.csv?strona=N`, filename `dopasowania-YYYY-MM-DD-strona-N.csv` for
+  N > 1). Link label after the base merge: „Ta strona jako CSV (Excel, Arkusze Google).” with
+  more than one page (the range is on the page line above), „Pobierz listę jako CSV (Excel,
+  Arkusze Google).” with one; the „pierwsze 50 z N” note is gone.
+- 503 stays 503 + `Retry-After: 5`; its page („Liczymy listę… strona odświeży się sama za kilka
+  sekund.”, link „Odśwież teraz”) has `<meta http-equiv="refresh" content="3; url=…">` to the
+  same URL (page and kind, built from the parsed number, escaped). 429: „Ta lista właśnie się
+  przygotowuje w innej karcie lub oknie. Poczekaj chwilę i otwórz ją ponownie.” + link „Otwórz
+  listę ponownie”, no self-refresh. The 3 s refresh next to `Retry-After: 5` is deliberate
+  (plan's 3 s for the browser, `Retry-After` for other clients; D-027).
+- Code & Safety round 1 fixes. Medium 1: invalid counties set by SQL (empty, more than 100
+  characters, more than 100 entries) used to make every save a 500 (`invalid_stored_row` after
+  the `UPDATE`) while `/dopasowania` pointed at settings without a counties field. Now the save
+  catches exactly `invalid_stored_row` → 409 `profileSaveBlockedPage` „Nie zapisano zmian” with
+  the support contact (`CONTACT_EMAIL`, else „odpowiedz na ostatnią wiadomość”), nothing
+  written (row identical, no pending address, no token), no e-mail, a `warn` log with the
+  profile id, the code and field paths only. `/dopasowania` and its CSV send to support instead
+  of settings when a refused path is not rewritten by the form (`correctableInForm`: not
+  `counties`, `email`, `active`, `(root)`); a form-editable refusal keeps the link to settings.
+  RUNBOOK: the consequence of a bad entry and a `BEGIN; UPDATE; check; COMMIT` recipe (ROLLBACK
+  on doubt, old value noted first, `match:preview` after COMMIT). Lows: comments in
+  `company-profile.ts` (no `profile:update`) and `PROFILE_FORM_MAX_BYTES`; D-027 sentence on
+  3 s vs `Retry-After: 5`; README line rewrapped. Optional: `%EF%BC%92` and `%2B1` added to the
+  refused `matchesPageFromUrl` queries. Tests added: 2 integration (`web-profile`: the 409 save
+  over 3 invalid county shapes × unchanged/new address, with and without `CONTACT_EMAIL`, then
+  a save after the correction; `/dopasowania` and CSV copy pointing to support), 2 unit in
+  `web-pages` (support variant of the unavailable page; 409 page), 1 in `web-profile-form`
+  (`correctableInForm`). No pre-existing assertion changed in this round; the unavailable page
+  also gained the back links (no assertion was about their absence).
+- Code & Safety round 2 (PASS, one Low) and Quality Review (ACCEPT, minors and nits) fixes:
+  - C&S Low: the RUNBOOK `ok` check also refuses a `NULL` element (`c IS NULL OR …`); run on
+    PostgreSQL 16: valid list t, `''` f, 101 characters f, `{}` t, 101 entries f,
+    `ARRAY[NULL]::text[]` f, `ARRAY['a', NULL]` f.
+  - MINOR-1 (option B, owner's call): with more than one page the CSV link says the file has
+    this page only and the others are downloaded from their pages; D-032 points to the PR-13
+    change (D-027). Superseded in the base merge (2026-11-15): the label is the shorter
+    „Ta strona jako CSV (Excel, Arkusze Google).” under the page line with the range. A CSV of the whole list is left to the owner (below).
+  - MINOR-2: under the list „Strona X z Y” on its own line (`.pages-status`), then the
+    prev/next links as ≥ 44 px targets (`.pages a`: min-height 44px, padding, border; 46 px
+    measured at 390 px); the line above the list gets a plain „Następna strona →” link when a
+    next page exists — `rel="prev"`/`rel="next"` only on the pager under the list.
+  - MINOR-3: the region radio row is set apart from the voivodeship boxes by a line
+    (`.options.region`, CSS only); AC3 re-measured (above): 1355 px, 58.9%.
+  - MINOR-4: with `CONTACT_EMAIL` the counties note on the settings page ends „Powiaty zmienia
+    obsługa. Napisz do obsługi serwisu: (adres).” (the wording of `supportContact`, now the
+    shared `SUPPORT_MAIL_TEXT`); without it unchanged. The GET and both POST re-renders pass it.
+  - NIT-1: the CSV kind of the 503 page says „Przygotowujemy plik… pobierze się sam za kilka
+    sekund.” with „Pobierz teraz” (same refresh; the page kind unchanged).
+  - NIT-2: 429 „Ta lista już się przygotowuje (np. w innej karcie albo po odświeżeniu).
+    Poczekaj chwilę i otwórz ją ponownie.”
+  - NIT-3: 409 „Profil zawiera ustawienie, które może poprawić tylko obsługa serwisu (na
+    przykład powiaty). Dopóki go nie poprawi, zmian w formularzu nie da się zapisać.” + the
+    contact line (the h1 „Nie zapisano zmian” says what happened).
+  - NIT-6: the counties note has `id="powiaty-uwaga"`, listed in the region fieldset's
+    `aria-describedby` before the error id (`powiaty-uwaga wojewodztwo-blad`).
+  - Not changed, as asked: NIT-4 („e-mail — od jutra”), NIT-5 (`rows="2"`).
+  - Docs: README, ARCHITECTURE (pager, 503 CSV copy, 429 copy), RUNBOOK (NULL check, per-page
+    CSV), D-027, D-032.
+  - Tests added: 5 unit in `web-pages` (pager status line and 44 px CSS with the last page;
+    one-page CSV link without the per-page note; counties note with `CONTACT_EMAIL`, escaped,
+    and none without counties; `aria-describedby` with the note, with note + error, with the
+    error only; the `.region` row and its CSS); assertions added to existing tests: the CSV 503
+    variant (unit and integration), exactly one `rel="next"`/`rel="prev"` on a middle page, the
+    counties note without and with `CONTACT_EMAIL` on GET and on a 400 re-render, with
+    `aria-describedby="powiaty-uwaga wojewodztwo-blad"` (integration `web-profile`).
+  - Pre-existing assertions changed in this round (before → after; none weakened):
+    - `tests/web-pages.test.ts` 409: „<p>Nie zapisaliśmy zmian. Profil zawiera ustawienie, …
+      (na przykład powiaty); do tego czasu formularz nie zapisze zmian.</p>” → „<h1>Nie
+      zapisano zmian</h1>\n<p>Profil zawiera ustawienie, … (na przykład powiaty). Dopóki go nie
+      poprawi, zmian w formularzu nie da się zapisać.</p>” (the h1 is now part of the match);
+    - `tests/web-pages.test.ts` 429: „Ta lista właśnie się przygotowuje w innej karcie lub
+      oknie. …” → „Ta lista już się przygotowuje (np. w innej karcie albo po odświeżeniu). …”;
+    - `tests/web-pages.test.ts` page 2 of 3: top line „…zamówienia 51–100 z 123.</p>” → „…z 123. <a href="/dopasowania?strona=3">Następna strona →</a></p>”; pager
+      `<nav …><p class="pages"><a … rel="prev">…</a><span>Strona 2 z 3</span><a … rel="next">…</a></p></nav>`
+      → `<nav …><p class="pages-status">Strona 2 z 3</p><p class="pages"><a … rel="prev">…</a><a … rel="next">…</a></p></nav>`;
+    - `tests/web-pages.test.ts` page 1 of 3: top line „…zamówienia 1–50 z 123.</p>” → „…z 123. <a href="/dopasowania?strona=2">Następna strona →</a></p>”;
+    - `tests/web-pages.test.ts` CSV of page 2: „…(zamówienia 51–100; Excel, Arkusze
+      Google).</p>” → the same + „ Plik obejmuje tylko tę stronę — pozostałe pobierzesz z ich
+      stron (linki stron pod listą).</p>”;
+    - `tests/web-pages.test.ts` counties note `<p class="note">Obsługa…` →
+      `<p class="note" id="powiaty-uwaga">Obsługa…` (rest of the string unchanged);
+    - `tests/integration/web-profile.test.ts`: the 409 text and the 429 text as above; the
+      top lines of page 1 of 2 („…z 53.</p>”, „…z 104.</p>”) → with the plain „Następna strona
+      →” link before `</p>`.
+
+Pre-existing assertions changed (before → after; none weakened without a reason given):
+
+- `tests/web-pages.test.ts`:
+  - `<button type="submit">Zapisz</button>` → `<button type="submit" class="primary">Zapisz</button>`;
+  - labelled controls `5 + MVP + VOIV` → `4 + 2 + MVP + VOIV` (counties textarea gone, 2 region
+    radios added; each still has exactly one label);
+  - legends `["Adres e-mail do powiadomień", "Kategorie", "Województwa"]` → `["Kategorie",
+"Województwa"]` plus exactly 2 fieldsets and `<label for="email">Adres e-mail</label>` (the
+    one-field fieldset was removed by design);
+  - `tagWithId(html, "powiaty")` has no `aria-invalid` → no `id="powiaty"` at all and the region
+    radio has no `aria-invalid` (the field is gone);
+  - hostile values: `counties: </textarea>…` moved to `includeKeywords`, `region` hostile added;
+    `</textarea>` count 3 → 2 (one textarea fewer; the escaping assertion is unchanged);
+  - empty-list hint „(albo odznacz wszystkie województwa, aby szukać w całej Polsce)” →
+    „(albo wybierz „Cała Polska”)”;
+  - county notes „Wpisane powiaty nie zawężają listy…” / „…same powiaty nie wystarczą: zaznacz
+    województwo w ustawieniach…” → „Powiaty zapisane w profilu nie zawężają listy…” / „Profil ma
+    zapisane powiaty… Wybierz w ustawieniach „Wybrane województwa” i zaznacz województwo.”; the
+    two mutual-exclusion assertions kept with the new texts; added: no text asks to enter counties;
+  - overflow „I 3 kolejne…” / „I 1 kolejne…” / „I 12 kolejnych…” → „Lista kończy się na 1000
+    zamówieniach. Nie pokazujemy 3 kolejnych…” / „…1 kolejnego pasującego zamówienia… ocenionego…”
+    / „…12 kolejnych pasujących zamówień… ocenionych…” (same counts and plural forms);
+  - 503: `matchesBusyPage()` „Trwa przygotowanie listy dopasowań — spróbuj za kilka sekund.” +
+    „Spróbuj ponownie” → `matchesBusyPage(href)` „Liczymy listę… strona odświeży się sama za
+    kilka sekund.” + „Odśwież teraz” + the meta refresh (status, back link, no-script kept);
+  - CSV note „(pierwsze 50 z 57 — zawęź profil, aby mieć wszystkie)” → one-page list: plain link,
+    no „pierwsze 50” (the CSV is the page now; the multi-page link is a new test);
+  - profile notice „Zapisano zmiany profilu.” → the same + „Lista dopasowań pokazuje zmiany od
+    razu, e-mail — od jutra.” + link;
+  - „copy”: the counties hint next to the field → no counties field, no „powiat” on a profile
+    without counties, the operator note (escaped) when counties are stored.
+- `tests/web-profile-form.test.ts`: counties inputs/expectations removed from the normalized
+  settings, the line-number, the 100-entries, the control-character and the error-order tests
+  (line-number cases moved to keyword lists with the same messages; error order now
+  `[name, categories, voivodeships, excludeKeywords]` with an unknown voivodeship); the test
+  „refuses a county entry that is no county name” removed (no field; `profile:create` keeps and
+  tests the check); form values: `counties` → `region`.
+- `tests/integration/web-profile.test.ts`: the save test's stored `counties:
+["warszawski zachodni"]` → `counties: []` (the form no longer writes counties; preservation of
+  non-empty counties is the new AC2 test); notice text as above; the test „refuses a county
+  entry…” replaced by the AC1 and AC2 tests; „shows at most 50 and counts the rest” („I 3
+  kolejne…”) → page 1 has 50 and links page 2, page 2 has the 3 (same 53 offers); 503 texts →
+  the new text + meta refresh; 429 text → the new text + link.
+- `tests/integration/digest.test.ts`, `web-self-service.test.ts`: `counties` dropped from the
+  settings input / `region: "selected"` in the form body (fixtures, no assertion changed).
+- `tests/card.test.ts`: the matches view gains `pagination` (fixture only).
+
+Do decyzji właściciela (PR-13, notes only, no code):
+
+1. CSV of the whole list vs one file per page (now per page, with the note on the link). The
+   Quality Review recommends a whole-list CSV for Agnieszka (one file for her spreadsheet).
+2. Operator counties with „Cała Polska” mean category AND keyword (no county in the notices
+   yet), explained by the note on the settings page: keep it, or relabel/warn more strongly.
+3. „e-mail — od jutra” vs „codzienna wiadomość — od jutra” in the after-save notice.
+4. Accepted pilot limitations: the 409 page drops the submitted values (the form has to be
+   filled again after the operator's correction); invalid stored counties are not flagged on
+   the settings page (only on save, 409, and on `/dopasowania`); each page of `/dopasowania`
+   (and its CSV) computes the whole list and slices it.
+
+**PR-12 — Ocena trafności i eksport** (`docs/PR_PLAN.md` → PR-12) — **MERGED in PR #18
+(b4c7e4c)** after the owner's review 2026-11-12; before that implemented locally on top of PR-11
+(`pr-12-local`), `pnpm check` green (2274 tests in 65 files after the owner-review
 round; 2268 after the base merge of 2026-11-12; 2224 before). Code & Safety Review
 PASS (round 2, after the minors and nits fix below), Quality Review ACCEPT. Follow-up (C&S
 round 2, optional): pin the `nastepna` CR/LF rejection with an integration test (the uuid
@@ -913,7 +1100,8 @@ and SECURITY updated.
   covered by `tests/card.test.ts`); D-024/D-027 keep their PR-05 – PR-10 wording as history,
   with a pointer to the PR-11 card.
 
-**PR-10 — Wejście bez pułapek** (`docs/PR_PLAN.md` → PR-10) — READY locally: Code & Safety
+**PR-10 — Wejście bez pułapek** (`docs/PR_PLAN.md` → PR-10) — **MERGED in PR #16 (3b70f94)**;
+before that READY locally: Code & Safety
 Review PASS (re-checked after every fix round; the last round without findings), Quality
 Review ACCEPT (all 6 ACs met). D-031 new; D-026 and D-027 changed. Migration
 `0008_self_service_access`.
@@ -1201,30 +1389,49 @@ control characters at input, CI). PR-07B: D-029 (VPS deployment: systemd + cron,
 token redaction, backup-age check in `status`, heartbeat). PR-08: D-030 (second source: Baza
 Konkurencyjności — listing and detail limits, skip limit, all-rejected guard, mapping,
 attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` catch-up).
+PR-13: D-027 amended (region radio, counties operator-only, `/dopasowania` pages and per-page
+CSV, self-refreshing 503 and plain 429 pages; the 429 text of D-028 replaced; a save over
+invalid operator counties → 409 with the support contact, not 500).
 
 ## Next action
 
-0. PR-12: PR #18, owner review PASS (2026-11-12); the owner-review round (coverage in
-   `feedback:report`) is reviewed (C&S PASS, Quality ACCEPT) and pushed to PR #18 → owner's
-   review and merge (not merged by the agents). Owner's call (Quality O1): filter the coverage
-   query on `transport = 'smtp'` instead of the documented `--since` caveat. Out of scope there and left for later: scoring that learns
-   from ratings, ratings in `match:preview`, XLSX. Then PR-13 (`docs/PR_PLAN.md`). Each PR
-   opens only when ready for owner review.
-   PR-10: MERGED in PR #16 (3b70f94). PR-11: MERGED in PR #17 (b974984). Follow-ups from
-   PR-11 (later PR, not PR-12 scope): the phone number in a card wraps mid-number at 390 px —
-   format `contact.phone` with no-break spaces (Quality Review nit 2); optional desktop
-   alignment of the two card `<dl>` grids (`minmax(11.5rem,max-content) 1fr`, nit 1);
-   `tests/email-sender.test.ts` fixture subject still uses the old company-name format
-   (pass-through only, nothing asserts it; C&S round 3 L-a). PR-12 changes neither
-   `contact.phone` formatting, the card `<dl>` grid rules nor that fixture subject (its one addition
-   to `tests/email-sender.test.ts` is the `/ocena/` redaction case), so all three stay open.
-   Also later, not PR-12 scope: the e-mail footer's „Stan na …” date is ISO
-   („2026-11-09 15:38”) while the page says „12.11.2026 07:00” (deferred from PR-11, Quality
-   N3). After the pilot (Quality N5 of PR-12): a card rated „nietrafne” has no label at its
-   top (only greyed and moved last), and the chosen rating button is only bold
-   (`aria-pressed` for screen readers).
-1. PR-09: MERGED in PR #15 (42dd008). On the VPS
-   (PR-08 is merged, 366618e): PR-07B checklist (`docs/DEPLOY.md` §13) if not done yet, then
+0. PR-13: owner review of PR #19 (2026-11-15) — PASS with one Medium fixed in this PR:
+   `region=all` with ticked voivodeships no longer gives 400; the server ignores them and saves
+   `[]` (D-027 updated; Code & Safety PASS, Quality ACCEPT WITH NOTES; 2335 tests). Not merged by
+   the agents. QR note: no extra form text (AC3 margin); if the pilot shows lost selections, a
+   `/profil` notice variant „zaznaczone województwa usunięte”. Owner decisions:
+   - **Next PR (PR-14, small):** whole-list CSV (≤ 1000 rows) and, with it, a shorter
+     read-only counties note (about 3 lines) so a profile with operator counties also gets
+     ≥ 40% lower.
+   - „Trafne” on a greyed card on page 2+ (card moves back to its deadline position, maybe an
+     earlier page; redirect opens the same page at the top): **stays as is** — data correct,
+     a redirect to page 1 would lose context.
+   - Page 2+, notifications off, three-line title, first „Otwórz ogłoszenie” at ~849 px of
+     844 px: **negligible, no change**.
+
+   PR-12: MERGED in PR #18 (b4c7e4c). Out of scope and left for later: scoring that learns
+   from ratings, ratings in `match:preview`, XLSX.
+
+   AC3 (390 px, `<form>` height, base b4c7e4c → PR-13): typical profile 2299 → 1355 px
+   (−41%); worst case (16 voivodeships, 3 counties, pending e-mail change) 2299 → 1619 px
+   (−30%).
+
+   Follow-ups from PR-11 and PR-12 (later PRs):
+   - The phone number in a card wraps mid-number at 390 px; format `contact.phone` with
+     no-break spaces (PR-11 Quality nit 2).
+   - Optional desktop alignment of the two card `<dl>` grids
+     (`minmax(11.5rem,max-content) 1fr`, PR-11 Quality nit 1).
+   - `tests/email-sender.test.ts` fixture subject still uses the old company-name format
+     (pass-through only, nothing asserts it; PR-11 C&S round 3 L-a).
+   - The e-mail footer's „Stan na …” date is ISO („2026-11-09 15:38”) while the page says
+     „12.11.2026 07:00” (PR-11 Quality N3).
+   - After the pilot (PR-12 Quality N5): a card rated „nietrafne” has no label at its top
+     (only greyed and moved last), and the chosen rating button is only bold (`aria-pressed`
+     for screen readers).
+
+1. PR-09: MERGED in PR #15 (42dd008).
+2. PR-10 – PR-12: merged (PR #16 – #18); their open follow-ups are listed under item 0.
+3. On the VPS (PR-08 is merged, 366618e): PR-07B checklist (`docs/DEPLOY.md` §13) if not done yet, then
    PR-08 AC1 and the `bk` backfill (Blockers). Follow-ups from the PR-08 reviews (owner to
    choose the PR):
    - Backup client version (found by the PR-09 CI fix, later PR): README/D-028/RUNBOOK
@@ -1252,7 +1459,7 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
      `/dopasowania` slot. Still open from PR-06A: TTLs (7/60/30 days; kept by the owner's
      decision of 2026-11-06), §8.3 leniency on `/wypis`, forwarded digests. (Done in PR-10:
      the self-service „Wyślij mi link” form, D-031.)
-2. Left after PR-07B (owner to choose the PR): rate limiting at the proxy (incl.
+4. Left after PR-07B (owner to choose the PR): rate limiting at the proxy (incl.
    `/dopasowania` across sessions, PR-06B C&S L-2); `serve` uptime is covered only by the
    external uptime check recommended in DEPLOY §10 (the heartbeat covers the cron commands).
    Follow-ups from the PR-06B reviews (owner to choose the PR):
@@ -1292,11 +1499,11 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
      per call, README); cosmetic nits from Part B (over-wide `ingest` help lines in
      `src/cli.ts`; two test titles still say "200 000"); watch live runs for `too_large` on update
      pages (`BZP_PAGE_SIZE` 25 kept).
-3. Owner verifies PR-02 AC1 outside the container (command and checklist under Blockers); a
+5. Owner verifies PR-02 AC1 outside the container (command and checklist under Blockers); a
    first live `ingest bzp --date <past weekday>` on the same machine is a useful follow-up
    check (exit 0, `inserted` > 0, a second run all `unchanged`; `skipped` > 0 and some
    `updated` from `NoticeUpdateNotice` when originals of that day's updates are stored).
-4. PR-06 (Minimal User Interface, `docs/ROADMAP.md`): token unsubscribe link done in PR-06A. Notes carried from the PR-04 reviews (PR-05 status marked):
+6. PR-06 (Minimal User Interface, `docs/ROADMAP.md`): token unsubscribe link done in PR-06A. Notes carried from the PR-04 reviews (PR-05 status marked):
    - Matching cost: ~10–60 ms per offer × profile pair in the worst case (100 ten-token
      keywords, 10 000-char description); fine for 10–100 profiles × ≤ 1000 offers, measure
      before optimising (D-023).
@@ -1342,16 +1549,16 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
    - D-016 "Konsekwencje" still describes the pre-D-021 cron ("tylko wczorajszy dzień") as a
      historical record; optionally add a pointer to D-021 in a later docs pass.
 
-5. Open points carried from D-015/PR-02 for PR-03: whether the API's publication-day boundary
+7. Open points carried from D-015/PR-02 for PR-03: whether the API's publication-day boundary
    is UTC or Polish time (cron at ~06:00 Europe/Warsaw ingests yesterday UTC; overlapping days
    are harmless thanks to dedup) — verify on the first live runs.
-6. Open question for PR-03C/PR-05 (Quality Review N6): BZP cancellation notices (a tender
+8. Open question for PR-03C/PR-05 (Quality Review N6): BZP cancellation notices (a tender
    withdrawn → status `cancelled`) have no plan item yet and are not handled by PR-03B
    (recorded in D-015). Without one the digest may show cancelled tenders as open; decide
    whether to fetch and apply them like `NoticeUpdateNotice` (by `tenderId`). PR-05 records
    the limitation (D-024, README) and the e-mail footer says the procedure may have been
    cancelled; since the digest now reaches customers, decide before the pilot.
-7. Open item from the PR-03B reviews (C&S L5, Quality Review): deadline changes of small
+9. Open item from the PR-03B reviews (C&S L5, Quality Review): deadline changes of small
    contracts are effectively not applied. Both captured `SmallContractNotice` originals
    (fixture 2026-10-29) have `tenderId` = `null`, and updates are linked only by `tenderId`, so
    no update can reach them whatever section 3.1 says. Verify on live data both questions:
@@ -1362,9 +1569,9 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
    on a few weekdays — `SmallContractNotice` records in the list and `updates[].skipReason`
    (`no_original`/`not_contract_notice_change`) of their updates. Until then the stored
    deadline of a small contract may be outdated (recorded in D-015).
-8. Deferred in Part A: fingerprint variant for sources with neither an external id nor a
-   stable URL (D-016; with the first such source); `last_seen_at` (D-017; when a feature needs
-   it, e.g. detecting withdrawn notices).
+10. Deferred in Part A: fingerprint variant for sources with neither an external id nor a
+    stable URL (D-016; with the first such source); `last_seen_at` (D-017; when a feature needs
+    it, e.g. detecting withdrawn notices).
 
 Notes from the Part A Code & Safety Review (for the Quality Review and later):
 
@@ -1480,6 +1687,14 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
 
 ## Last verification
 
+- 2026-11-15, PR-13 base merge: `origin/ccr-919f3e62-g6j3w9` (b4c7e4c, PR #17 + PR #18)
+  merged into PR-13. Conflicts in `src/web/pages.ts`, tests and docs resolved: base keeps the
+  D-030 card, the short intro and the rating paragraph under the list; PR-13 keeps pages of 50
+  (`?strona=N`, max 20), the pager under the list, `<ol start>`, the hidden `strona` field in
+  the feedback form and per-page CSV (`/dopasowania.csv?strona=N`). The base assertion
+  „pierwsze 50 z 57” is superseded by pagination. `pnpm check` with PostgreSQL 16
+  (`REQUIRE_DB_TESTS=1`): format, lint, typecheck PASS; 2332 tests PASS.
+
 2026-11-12, PR-12 owner-review round (coverage in `feedback:report`; Node 22, pnpm 10.28.0,
 PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
 REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2274 tests passed in 65 files,
@@ -1526,6 +1741,16 @@ PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_t
 REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2133 tests passed in 61 files,
 none skipped (2094 PR-10 + 39 from the PR-09 owner-review round). Conflicts only in README,
 STATE and one `src/cli.ts` config block (both sides kept).
+
+2026-11-09, PR-13 after the Code & Safety round 2 Low and the Quality minors/nits (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2279 tests passed in 65 files,
+none skipped (run by the coder; 2274 before this round). No dependency changes; no network
+requests to live sources; no e-mail sent.
+
+2026-11-09, PR-13 after the Code & Safety round 1 fixes (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2274 tests passed in 65 files,
+none skipped (run by the coder; 2269 before the fixes, 2224 before PR-13). No dependency changes; no network requests to
+live sources; no e-mail sent.
 
 2026-11-09, PR-12 after the review fixes (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
 REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2224 tests passed in 65 files,

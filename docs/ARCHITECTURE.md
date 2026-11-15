@@ -636,8 +636,8 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   | `/profil/wypisz` (`profile_unsubscribe`)               | POST            | `active = false` (sesja + CSRF) → 303 `/profil`      |
   | `/profil/wlacz` (`profile_resubscribe`)                | POST            | `active = true` (sesja + CSRF) → 303 `/profil`       |
   | `/profil/anuluj-email` (`profile_cancel_email`)        | POST            | anuluje zmianę adresu (sesja + CSRF) → 303 `/profil` |
-  | `/dopasowania` (`matches`)                             | GET, HEAD       | pasujące oferty profilu z ocenami (sesja)            |
-  | `/dopasowania.csv` (`matches_csv`)                     | GET, HEAD       | ta sama lista jako CSV do pobrania (sesja)           |
+  | `/dopasowania` (`matches`)                             | GET, HEAD       | pasujące oferty profilu z ocenami (sesja; `?strona`) |
+  | `/dopasowania.csv` (`matches_csv`)                     | GET, HEAD       | ta sama strona listy jako CSV (sesja; `?strona`)     |
   | `/dopasowania/ocena` (`matches_feedback`)              | POST            | ocena oferty (sesja + CSRF) → 303 do karty           |
   | `/wyloguj` (`logout`)                                  | POST            | usuwa sesję i ciasteczko (sesja + CSRF) → 303 `/`    |
   | `/wypis/<token>` (`unsubscribe`)                       | GET, HEAD, POST | GET: strona z nazwą firmy i przyciskiem; POST: wypis |
@@ -655,11 +655,24 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   przez kontrolę `Origin`; `Referer` niesie tylko origin, nigdy ścieżkę z tokenem).
 
 - Formularz profilu (`profile-form.ts`, `settingsPage`): pola nazwy, e-maila (bez powtórzenia od
-  PR-10: nowy adres i tak wymaga potwierdzenia), kategorii i województw (pola wyboru), powiatów i
-  słów (pola tekstowe, jeden wpis w wierszu). Walidacja wyłącznie schematem domeny
-  (`companyProfileSettingsSchema` = schemat profilu bez `active`), błędy po polsku przy polach
-  (numer wiersza dla list) i w podsumowaniu z odnośnikami; `label`, `fieldset`/`legend`,
-  `aria-describedby`, `aria-invalid`. Błąd → 400 z wysłanymi wartościami; zapis → 303 `/profil`.
+  PR-10: nowy adres i tak wymaga potwierdzenia), kategorii (pola wyboru), regionu (od PR-13 radio
+  `region`: „Cała Polska” `all` / „Wybrane województwa” `selected`, i pola wyboru województw) i
+  słów (pola tekstowe, jeden wpis w wierszu). Pola wyboru w siatce (3 kolumny, 2 przy wąskim
+  ekranie), etykiety jako cele dotyku ≥ 44 px, wyróżniony przycisk „Zapisz” — tylko CSS.
+  Powiatów formularz nie ma (PR-13, D-027): ustawia je operator, zapis ich nie dotyka
+  (`companyProfileSettingsSchema` = schemat profilu bez `active` i `counties`, więc `UPDATE`
+  nie zawiera tej kolumny), a pole `counties` ze starego formularza to nieznane pole → 400.
+  Zapisane powiaty strona pokazuje tylko do odczytu. Powiaty odrzucane przez schemat (wpisane
+  SQL-em) wycofują każdy zapis (`invalid_stored_row` po `UPDATE`, w transakcji): zapis łapie
+  tylko ten kod → 409 `profileSaveBlockedPage` z kontaktem do obsługi, log `warn` z id
+  profilu i ścieżkami pól; `/dopasowania` przy profilu odrzucanym na polach spoza formularza
+  (`correctableInForm`) odsyła do obsługi, nie do ustawień. Walidacja schematem domeny plus spójność
+  regionu (`selected` bez województwa, inna wartość → błąd przy polu; przy `all` przesłane
+  województwa są pomijane i zapisuje się pusta lista),
+  błędy po polsku przy polach (numer wiersza dla list) i w podsumowaniu z odnośnikami; `label`,
+  `fieldset`/`legend`, `aria-describedby`, `aria-invalid`. Błąd → 400 z wysłanymi wartościami;
+  zapis → 303 `/profil` z komunikatem „… Lista dopasowań pokazuje zmiany od razu, e-mail — od
+  jutra.” i linkiem do `/dopasowania`.
   Komunikat po przekierowaniu niesie ciasteczko `__Host-radar_komunikat` (jedno słowo z zamkniętej
   listy, 60 s), które `/profil` pokazuje raz i usuwa. Równoczesne zapisy: wygrywa ostatni.
 - „Wyślij mi link” (`POST /wyslij-link`, D-031): najpierw limit na IP (`rate-limit.ts`,
@@ -699,33 +712,49 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   adresu, inaczej status `address_changed`); po 40P01 (np. z godzinnym sprzątaniem) zapis i
   potwierdzenie próbują jeszcze raz. Inne zmiany niczego nie unieważniają.
 - Strona dopasowań (`/dopasowania`): `readDigestCandidates` + `matchingItems` (jak digest),
-  kolejność `digestOrder` (najbliższy termin), najwyżej 50 (`MATCHES_SHOWN`) + „I N
-  kolejnych…”, ta sama karta co e-mail (`offerCard`, §4.5), przycisk „Otwórz ogłoszenie”
-  tylko dla `http(s)` z `rel="noopener noreferrer"`, zaraz po `lead`. Grupy wierszy w `<dl>`
-  (siatka dwóch kolumn, przy wąskim ekranie jedna); pełny opis w `<details>` „Pełny opis”
-  tylko, gdy wyciąg jest ucięty; data publikacji, kontakt, CPV i powody techniczne w jednym
-  `<details>` „Więcej szczegółów (…)” — podsumowanie wymienia, co jest w środku (bez JS,
-  bez zagnieżdżania). Pusty
+  kolejność `digestOrder` (najbliższy termin), strony po 50 (`MATCHES_SHOWN`, `?strona=N`,
+  najwyżej `MATCHES_MAX_PAGES` = 20; od PR-13 — wcześniej 50 + „I N kolejnych…”). Numer strony
+  czyta `matchesPageFromUrl`/`parsePageNumber` (`[1-9][0-9]{0,5}`, ≤ 20, jeden `strona`) po
+  sprawdzeniu sesji, przed slotem — zły → 404 bez liczenia; numer za ostatnią stroną →
+  ostatnia strona. Każde żądanie liczy całą listę i wycina stronę (`matchesList`), więc
+  kolejność i „nietrafne” na końcu dotyczą całej listy; nadmiar ponad 1000 jest liczony na
+  ostatniej stronie. Nad listą (krótko, żeby przycisk pierwszej karty był na pierwszym
+  ekranie telefonu 390 × 844): przy kilku stronach „Strona X z Y: zamówienia a–b z N.” ze
+  zwykłym linkiem „Następna strona →”, jeden akapit o oknie 7 dni i jedna linia CSV. Pod
+  listą (przy kilku stronach) wiersz „Strona X z Y” i linki poprzednia/następna (`rel`, cele
+  dotyku ≥ 44 px), potem objaśnienie ocen. `<ol start>`, ta sama karta co e-mail
+  (`offerCard`, §4.5), przycisk „Otwórz ogłoszenie” tylko dla `http(s)` z
+  `rel="noopener noreferrer"`, zaraz po `lead`. Grupy wierszy w `<dl>` (siatka dwóch kolumn,
+  przy wąskim ekranie jedna); pełny opis w `<details>` „Pełny opis” tylko, gdy wyciąg jest
+  ucięty; data publikacji, kontakt, CPV i powody techniczne w jednym `<details>` „Więcej
+  szczegółów (…)” — podsumowanie wymienia, co jest w środku (bez JS, bez zagnieżdżania). Pusty
   stan objaśnia okno 7 dni; profil nieaktywny dostaje notkę; wiersz profilu odrzucany przez
-  schemat → prośba o poprawkę w ustawieniach. Koszt: liczone na żądanie w procesie `serve`;
+  schemat → prośba o poprawkę w ustawieniach (od PR-13 przy polach spoza formularza — kontakt
+  do obsługi). Koszt: liczone na żądanie w procesie `serve`;
   `matchingItems` oddaje pętlę zdarzeń po ok. 20 ms pracy (`MATCH_YIELD_AFTER_MS`), a serwer liczy
   najwyżej jedną listę naraz (`MatchesSlot` z `matches-slot.ts` w `ServerState`): kolejne żądanie
   czeka w kolejce FIFO (najwyżej 8 żądań, najwyżej 3 s; po zwolnieniu miejsce przechodzi wprost na
-  najstarsze), pełna kolejka albo upływ czasu → 503 `matchesBusyPage` z `Retry-After: 5`; rozłączony
+  najstarsze), pełna kolejka albo upływ czasu → 503 `matchesBusyPage` z `Retry-After: 5` (od PR-13
+  strona z `<meta http-equiv="refresh" content="3; url=…">` na ten sam adres, zbudowany z
+  odczytanego numeru strony; bez skryptu; dla CSV tekst o pliku i „Pobierz teraz”); rozłączony
   czekający wypada z kolejki bez liczenia; zwolnienie w `finally` (D-027). Jedna sesja ma naraz
   najwyżej 2 żądania `/dopasowania` w toku albo w kolejce (`MATCHES_MAX_PER_SESSION`, licznik po
   id sesji w `ServerState`, nigdy po tokenie z ciasteczka); trzecie → od razu 429
-  `matchesTooManyPage` z `Retry-After: 5`, bez kolejki (PR-07A, D-028).
+  `matchesTooManyPage` z `Retry-After: 5`, bez kolejki (PR-07A, D-028; od PR-13 tekst „Ta lista
+  już się przygotowuje (np. w innej karcie albo po odświeżeniu)…” i link do tej samej strony,
+  bez samoodświeżania).
 - Oceny i eksport (PR-12, D-032): `/dopasowania` czyta oceny profilu dla całej listy jednym
   zapytaniem (`feedbackVerdicts`, `= ANY(uuid[])`), przesuwa „nietrafne” na koniec (kolejność
-  digestu w obu częściach) przed obcięciem do `MATCHES_SHOWN` i na końcu każdej karty (po
+  digestu w obu częściach) przed podziałem na strony i na końcu każdej karty (po
   `<details>` „Więcej szczegółów”) pokazuje formularz `POST /dopasowania/ocena` (sesja + CSRF; karta „nietrafne” wyszarzona, kotwica
   `#oferta-<id>`; przycisk bieżącej oceny `aria-pressed="true"`; ukryte `nastepna` — id
   następnej karty, kotwica powrotu po „Nietrafne”, sprawdzane wzorcem uuid, nigdy nie wybiera
-  ocenianej oferty). Ocenić z listy można ofertę wysłaną profilowi (`wasDelivered`) albo
+  ocenianej oferty; od PR-13 także ukryte `strona` > 1, czytane tym samym parserem — zły numer →
+  powrót na stronę 1). Ocenić z listy można ofertę wysłaną profilowi (`wasDelivered`) albo
   pasującą do niego teraz (`matchOpportunity`, regułami profilu niezależnie od wieku oferty,
   D-032); inna → 404. `GET /dopasowania.csv` liczy tę
-  samą listę w tym samym slocie (`withMatchesSlot`) i zwraca ją przez czyste `csv.ts` (BOM,
+  samą listę w tym samym slocie (`withMatchesSlot`) i zwraca stronę `?strona=N` (PR-13; nazwa
+  pliku z `-strona-N` dla N > 1) przez czyste `csv.ts` (BOM,
   `;`, CRLF, neutralizacja formuł, `Content-Disposition: attachment`). Link z digestu
   `/ocena/<token>/<id>/<trafne|nietrafne>`: ścieżka sprawdzana przed bazą
   (`parseFeedbackPath`: 3 segmenty, werdykt z listy, uuid małymi literami); GET/HEAD tylko

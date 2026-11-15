@@ -24,8 +24,10 @@ import { createLogger } from "../../src/infrastructure/logger.js";
 import { formatDeadline, formatPolishDay } from "../../src/notifications/card.js";
 import type { EmailSender, OutgoingEmail } from "../../src/notifications/sender.js";
 import { formatWarsawMinute } from "../../src/sources/normalize/warsaw-time.js";
+import { REGION_ERRORS } from "../../src/web/profile-form.js";
 import { csrfTokenFor, NOTICE_COOKIE, SESSION_COOKIE } from "../../src/web/session.js";
 import {
+  MATCHES_MAX_PAGES,
   MATCHES_RETRY_AFTER_SECONDS,
   MATCHES_SHOWN,
   startWebServer,
@@ -71,7 +73,6 @@ const newEmailSettings = {
   includeKeywords: profileInput.includeKeywords,
   excludeKeywords: profileInput.excludeKeywords,
   voivodeships: profileInput.voivodeships,
-  counties: profileInput.counties,
 };
 
 /** The form as the settings page submits it; `extra` adds or replaces pairs. */
@@ -80,7 +81,7 @@ function settingsForm(csrf: string, overrides: Readonly<Record<string, string>> 
     csrf,
     name: "Jan Kowalski Elektryka",
     email: EMAIL,
-    counties: "warszawski zachodni",
+    region: "selected",
     include_keywords: "oświetlenie\r\nlatarnie",
     exclude_keywords: "",
     ...overrides,
@@ -259,7 +260,8 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
         email: EMAIL,
         categories: ["elektryka", "it"],
         voivodeships: ["mazowieckie"],
-        counties: ["warszawski zachodni"],
+        // PR-13: the form has no counties; the stored ones (none here) stay.
+        counties: [],
         includeKeywords: ["oświetlenie", "latarnie"],
         excludeKeywords: [],
         active: true,
@@ -270,7 +272,9 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       });
       expect(shown.status).toBe(200);
       expect(await shown.text()).toContain(
-        '<p class="notice" role="status">Zapisano zmiany profilu.</p>',
+        '<p class="notice" role="status">Zapisano zmiany profilu. Lista dopasowań pokazuje ' +
+          "zmiany od razu, e-mail — od jutra. " +
+          '<a href="/dopasowania">Zobacz pasujące zamówienia</a></p>',
       );
       expect(shown.headers.get("set-cookie")).toBe(
         `${NOTICE_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`,
@@ -406,19 +410,305 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       ]);
     });
 
-    it("refuses a county entry that is no county name, saving nothing", async () => {
+    // PR-13 (AC1): the region is an explicit choice; „Wybrane” without one or an unknown choice saves nothing.
+    it("refuses „Wybrane województwa” without one and an unknown choice, saving nothing", async () => {
       const { cookie, csrf } = await login();
       const before = await stored();
-      const response = await post(
+      const changed = { name: "Zmieniona nazwa", email: NEW_EMAIL };
+      const withoutVoivodeship = new URLSearchParams(settingsForm(csrf, changed));
+      withoutVoivodeship.delete("voivodeships");
+      const selected = await post("/profil/ustawienia", withoutVoivodeship.toString(), { cookie });
+      expect(selected.status).toBe(400);
+      const selectedHtml = await selected.text();
+      expect(selectedHtml).toContain(REGION_ERRORS.selectedWithout);
+      expect(selectedHtml).toContain('value="selected" checked required aria-invalid="true"');
+      expect(selectedHtml).toContain('value="Zmieniona nazwa"');
+
+      // An unknown value: the same form error; never echoed as a choice.
+      for (const region of ["", "ALL", "wszystkie", "selected "]) {
+        const unknown = await post(
+          "/profil/ustawienia",
+          settingsForm(csrf, { ...changed, region }),
+          { cookie },
+        );
+        expect(unknown.status).toBe(400);
+        const html = await unknown.text();
+        expect(html).toContain(REGION_ERRORS.unknown);
+        expect(html).not.toContain(" checked required");
+      }
+      // A missing or repeated choice: a malformed form (400 error page).
+      const missing = new URLSearchParams(settingsForm(csrf, changed));
+      missing.delete("region");
+      for (const body of [missing.toString(), `${settingsForm(csrf, changed)}&region=all`]) {
+        const response = await post("/profil/ustawienia", body, { cookie });
+        expect(response.status).toBe(400);
+        expect(await response.text()).not.toContain('name="region"');
+      }
+      expect(await stored()).toEqual(before);
+      expect(await pendingEmail()).toBeNull();
+      expect(mails).toHaveLength(0);
+
+      // „Cała Polska” with no box ticked is the whole country.
+      const country = new URLSearchParams(settingsForm(csrf, { region: "all" }));
+      country.delete("voivodeships");
+      expect((await post("/profil/ustawienia", country.toString(), { cookie })).status).toBe(303);
+      expect((await stored()).voivodeships).toEqual([]);
+      const reopened = await (
+        await fetch(`${url}/profil/ustawienia`, { headers: { cookie } })
+      ).text();
+      expect(reopened).toContain('id="region-polska" name="region" value="all" checked required>');
+    });
+
+    // PR-13, the owner's decision in the review of PR #19: the page has no script, so the
+    // boxes ticked before „Cała Polska” was chosen are still sent; the radio wins.
+    it("saves „Cała Polska” with voivodeships still ticked as the whole country", async () => {
+      await sql`UPDATE company_profiles SET counties = ARRAY['piaseczyński'] WHERE id = ${profile.id}`.execute(
+        schema.db,
+      );
+      const { cookie, csrf } = await login();
+      expect((await stored()).voivodeships).toEqual(["mazowieckie"]);
+      const checkedBox = /name="voivodeships" value="[^"]*" checked/;
+
+      // Another field's error first: the form comes back as sent, the region without an error.
+      const invalid = await post(
         "/profil/ustawienia",
-        settingsForm(csrf, { counties: "warszawski zachodni\r\npowiat" }),
+        settingsForm(csrf, { name: "", region: "all" }),
         { cookie },
       );
-      expect(response.status).toBe(400);
-      expect(await response.text()).toContain(
-        "Wiersz 2: wpisz nazwę powiatu, np. warszawski zachodni.",
+      expect(invalid.status).toBe(400);
+      const invalidHtml = await invalid.text();
+      expect(invalidHtml).toContain('value="all" checked required>');
+      expect(invalidHtml).toContain('value="mazowieckie" checked>');
+      expect(invalidHtml).not.toContain(REGION_ERRORS.selectedWithout);
+      expect(invalidHtml).not.toContain(REGION_ERRORS.unknown);
+      expect((await stored()).voivodeships).toEqual(["mazowieckie"]);
+
+      // Fixed and saved as sent again, with a tampered box too: no voivodeship is stored.
+      const body = new URLSearchParams(settingsForm(csrf, { region: "all" }));
+      body.append("voivodeships", "Nieznane");
+      const saved = await post("/profil/ustawienia", body.toString(), { cookie });
+      expect(saved.status).toBe(303);
+      expect(saved.headers.get("location")).toBe("/profil");
+      expect(await saved.text()).toBe("");
+      expect(await stored()).toMatchObject({
+        name: "Jan Kowalski Elektryka",
+        voivodeships: [],
+        counties: ["piaseczyński"],
+      });
+      expect(await pendingEmail()).toBeNull();
+
+      const reopened = await (
+        await fetch(`${url}/profil/ustawienia`, { headers: { cookie } })
+      ).text();
+      expect(reopened).toContain('id="region-polska" name="region" value="all" checked required>');
+      expect(reopened).toContain('id="region-wybrane" name="region" value="selected" required>');
+      expect(reopened).not.toMatch(checkedBox);
+      expect(reopened).toContain('name="voivodeships" value="mazowieckie">');
+    });
+
+    // PR-13 (AC2): counties are the operator's (CLI); a save never touches them.
+    it("keeps the stored counties byte for byte, also against an old form sending counties", async () => {
+      await sql`UPDATE company_profiles SET counties = ARRAY['warszawski zachodni', 'piaseczyński']`.execute(
+        schema.db,
       );
-      expect(await stored()).toEqual(before);
+      const countiesText = async () =>
+        (
+          await sql<{ counties: string }>`
+            SELECT counties::text AS counties FROM company_profiles WHERE id = ${profile.id}
+          `.execute(schema.db)
+        ).rows[0]?.counties;
+      const original = await countiesText();
+      expect(original).toBe('{"warszawski zachodni",piaseczyński}');
+      const { cookie, csrf } = await login();
+
+      const page = await (await fetch(`${url}/profil/ustawienia`, { headers: { cookie } })).text();
+      expect(page).not.toContain('name="counties"');
+      expect(page).toContain(
+        "Obsługa serwisu ustawiła w profilu powiaty: warszawski zachodni, piaseczyński.",
+      );
+      // Without CONTACT_EMAIL: the way to the operator is the last message.
+      expect(page).toContain(
+        "Powiaty zmienia obsługa — odpowiedz na ostatnią wiadomość od nas.</p>",
+      );
+      expect(page).toContain('<fieldset aria-describedby="powiaty-uwaga"><legend>');
+
+      const saved = await post("/profil/ustawienia", settingsForm(csrf, { name: "Nowa nazwa" }), {
+        cookie,
+      });
+      expect(saved.status).toBe(303);
+      expect(await stored()).toMatchObject({
+        name: "Nowa nazwa",
+        counties: ["warszawski zachodni", "piaseczyński"],
+      });
+      expect(await countiesText()).toBe(original);
+
+      // A form cached before PR-13 still sends the field: refused, nothing written.
+      const before = await stored();
+      for (const stray of ["counties", "powiaty"]) {
+        for (const value of ["grodziski", ""]) {
+          const body = `${settingsForm(csrf, { name: "Inna nazwa" })}&${stray}=${value}`;
+          const response = await post("/profil/ustawienia", body, { cookie });
+          expect(response.status).toBe(400);
+          expect(await stored()).toEqual(before);
+          expect(await countiesText()).toBe(original);
+        }
+      }
+
+      // PR-13 minors: with CONTACT_EMAIL, the note gives the address — on the form and
+      // on its re-render after an error, where the group is described by both.
+      const withContact = await startWebServer({
+        db: schema.db,
+        publicBaseUrl: BASE,
+        logger: createLogger("info", () => undefined),
+        host: "127.0.0.1",
+        port: 0,
+        cleanupIntervalMs: null,
+        contactEmail: "pomoc@example.invalid",
+      });
+      try {
+        const contactUrl = `http://127.0.0.1:${String(withContact.port)}/profil/ustawienia`;
+        const contactNote =
+          "Powiaty zmienia obsługa. Napisz do obsługi serwisu: " +
+          '<a href="mailto:pomoc@example.invalid">pomoc@example.invalid</a>.</p>';
+        const form = await (await fetch(contactUrl, { headers: { cookie } })).text();
+        expect(form).toContain(contactNote);
+        expect(form).not.toContain("odpowiedz na ostatnią wiadomość");
+        // A region error: „Wybrane województwa” with none ticked.
+        const withoutVoivodeship = new URLSearchParams(settingsForm(csrf, { name: "Inna nazwa" }));
+        withoutVoivodeship.delete("voivodeships");
+        const refused = await fetch(contactUrl, {
+          method: "POST",
+          redirect: "manual",
+          headers: { "content-type": FORM, origin: BASE, cookie },
+          body: withoutVoivodeship.toString(),
+        });
+        expect(refused.status).toBe(400);
+        const refusedHtml = await refused.text();
+        expect(refusedHtml).toContain(contactNote);
+        expect(refusedHtml).toContain(
+          '<fieldset aria-describedby="powiaty-uwaga wojewodztwo-blad"><legend>',
+        );
+        expect(await stored()).toEqual(before);
+      } finally {
+        await withContact.close();
+      }
+    });
+
+    // PR-13: counties are the one validated column the form no longer rewrites.
+    // Invalid ones (set by SQL) roll every save back: 409 with the operator's
+    // contact instead of a 500, nothing written, no e-mail.
+    it("refuses a save over invalid operator counties with a support page, writing nothing", async () => {
+      const rowText = async () =>
+        (
+          await sql<{ row: string }>`
+            SELECT row_to_json(c)::text AS row FROM company_profiles c WHERE id = ${profile.id}
+          `.execute(schema.db)
+        ).rows[0]?.row;
+      const tokenCount = async () =>
+        (
+          await schema.db
+            .selectFrom("access_tokens")
+            .select("id")
+            .where("profile_id", "=", profile.id)
+            .execute()
+        ).length;
+      const { cookie, csrf } = await login();
+      const long = "x".repeat(101);
+      const invalidCounties = [
+        sql`ARRAY['']::text[]`,
+        sql`ARRAY[${long}]::text[]`,
+        sql`ARRAY(SELECT 'powiat ' || n FROM generate_series(1, 101) AS n)`,
+      ];
+      for (const counties of invalidCounties) {
+        await sql`UPDATE company_profiles SET counties = ${counties} WHERE id = ${profile.id}`.execute(
+          schema.db,
+        );
+        const before = await rowText();
+        const tokens = await tokenCount();
+        logs.length = 0;
+        // An unchanged address and a new one (whose link would be issued in the same transaction).
+        for (const email of [EMAIL, NEW_EMAIL]) {
+          const response = await post(
+            "/profil/ustawienia",
+            settingsForm(csrf, { name: "Nowa nazwa", email }),
+            { cookie },
+          );
+          expect(response.status).toBe(409);
+          expect(response.headers.get("set-cookie")).toBeNull();
+          const html = await response.text();
+          expect(html).toContain("<title>Nie zapisano zmian");
+          expect(html).toContain(
+            "<h1>Nie zapisano zmian</h1>\n<p>Profil zawiera ustawienie, które może poprawić " +
+              "tylko obsługa serwisu (na przykład powiaty). Dopóki go nie poprawi, zmian w " +
+              "formularzu nie da się zapisać.</p>",
+          );
+          expect(html).toContain(
+            "Odpowiedz na ostatnią wiadomość od nas — obsługa serwisu poprawi profil.",
+          );
+          expect(html).not.toContain(long);
+          expect(html).not.toContain("invalid_stored_row");
+          expect(await rowText()).toBe(before);
+          expect(await pendingEmail()).toBeNull();
+          expect(await tokenCount()).toBe(tokens);
+        }
+        // The id and field paths only: no value, no address.
+        const refused = logs
+          .map((line) => JSON.parse(line) as Record<string, unknown>)
+          .filter((line) => line.message === "profile settings not saved");
+        expect(refused).toHaveLength(2);
+        for (const line of refused) {
+          expect(line).toMatchObject({
+            level: "warn",
+            errorCode: "invalid_stored_row",
+            profileId: profile.id,
+          });
+          expect(line.fields).toEqual(expect.arrayContaining([expect.stringMatching(/^counties/)]));
+        }
+        expect(logs.join("\n")).not.toContain(long);
+        expect(logs.join("\n")).not.toContain(NEW_EMAIL);
+        expect(logs.some((line) => line.includes('"status":500'))).toBe(false);
+      }
+      // Sent after the response, if at all: give it the time a send would take.
+      await delay(50);
+      expect(mails).toHaveLength(0);
+
+      // A server with CONTACT_EMAIL names it on the page.
+      const withContact = await startWebServer({
+        db: schema.db,
+        publicBaseUrl: BASE,
+        logger: createLogger("info", () => undefined),
+        host: "127.0.0.1",
+        port: 0,
+        cleanupIntervalMs: null,
+        contactEmail: "pomoc@example.invalid",
+      });
+      try {
+        const response = await fetch(
+          `http://127.0.0.1:${String(withContact.port)}/profil/ustawienia`,
+          {
+            method: "POST",
+            redirect: "manual",
+            headers: { "content-type": FORM, origin: BASE, cookie },
+            body: settingsForm(csrf, { name: "Nowa nazwa" }),
+          },
+        );
+        expect(response.status).toBe(409);
+        expect(await response.text()).toContain(
+          'Napisz do obsługi serwisu: <a href="mailto:pomoc@example.invalid">pomoc@example.invalid</a>.',
+        );
+      } finally {
+        await withContact.close();
+      }
+
+      // Once the operator corrects the counties, the same form saves.
+      await sql`UPDATE company_profiles SET counties = ARRAY['piaseczyński'] WHERE id = ${profile.id}`.execute(
+        schema.db,
+      );
+      const saved = await post("/profil/ustawienia", settingsForm(csrf, { name: "Nowa nazwa" }), {
+        cookie,
+      });
+      expect(saved.status).toBe(303);
+      expect(await stored()).toMatchObject({ name: "Nowa nazwa", counties: ["piaseczyński"] });
     });
 
     // PR-10 (D-031) replaced „type the new address twice”: it is confirmed by
@@ -914,19 +1204,140 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       }
     });
 
-    it(`shows at most ${String(MATCHES_SHOWN)} and counts the rest`, async () => {
+    // PR-13: the rest is on the next page, no longer only counted.
+    it(`shows at most ${String(MATCHES_SHOWN)} a page and the rest on the next one`, async () => {
+      const ids: string[] = [];
       for (let i = 0; i < MATCHES_SHOWN + 3; i++) {
+        const saved = await upsertOpportunity(
+          schema.db,
+          draft({ deadline: new Date(Date.now() + (i + 1) * 60 * 60 * 1000) }),
+        );
+        ids.push(saved.opportunity.id);
+      }
+      const { cookie } = await login();
+      const page = (query: string) => fetch(`${url}/dopasowania${query}`, { headers: { cookie } });
+      const order = (html: string) =>
+        [...html.matchAll(/<li id="oferta-([0-9a-f-]{36})">/g)].map((match) => match[1]);
+
+      const html = await (await page("")).text();
+      expect(html.match(/<article>/g)).toHaveLength(MATCHES_SHOWN);
+      expect(order(html)).toEqual(ids.slice(0, MATCHES_SHOWN));
+      expect(html).toContain(
+        "<p><strong>Strona 1 z 2</strong>: zamówienia 1–50 z 53. " +
+          '<a href="/dopasowania?strona=2">Następna strona →</a></p>',
+      );
+      expect(html).toContain('<a href="/dopasowania?strona=2" rel="next">Następna strona →</a>');
+      expect(html).not.toContain('rel="prev"');
+      expect(html).not.toContain("Lista kończy się");
+
+      const second = await page("?strona=2");
+      expect(second.status).toBe(200);
+      const secondHtml = await second.text();
+      expect(order(secondHtml)).toEqual(ids.slice(MATCHES_SHOWN));
+      expect(secondHtml).toContain('<ol class="matches" start="51">');
+      expect(secondHtml).toContain("<p><strong>Strona 2 z 2</strong>: zamówienia 51–53 z 53.</p>");
+      expect(secondHtml).toContain('<a href="/dopasowania" rel="prev">← Poprzednia strona</a>');
+      expect(secondHtml).not.toContain('rel="next"');
+      expect(secondHtml).toContain('<a href="/dopasowania.csv?strona=2">');
+
+      // A valid number past the last page shows the last page, with its own number.
+      for (const query of ["?strona=3", `?strona=${String(MATCHES_MAX_PAGES)}`]) {
+        const clamped = await page(query);
+        expect(clamped.status).toBe(200);
+        const clampedHtml = await clamped.text();
+        expect(order(clampedHtml)).toEqual(ids.slice(MATCHES_SHOWN));
+        expect(clampedHtml).toContain("<strong>Strona 2 z 2</strong>");
+      }
+      // Page 1 by its number; other parameters ignored; the number URL-decoded.
+      for (const [query, expected] of [
+        ["?strona=1", ids.slice(0, MATCHES_SHOWN)],
+        ["?x=1", ids.slice(0, MATCHES_SHOWN)],
+        ["?strona=%32&x=0", ids.slice(MATCHES_SHOWN)],
+      ] as const) {
+        const response = await page(query);
+        expect(response.status).toBe(200);
+        expect(order(await response.text())).toEqual(expected);
+      }
+    });
+
+    it("answers a malformed page number with 404 before computing anything", async () => {
+      await upsertOpportunity(schema.db, draft({ title: "Oświetlenie parku" }));
+      const { cookie } = await login();
+      const malformed = [
+        "?strona=",
+        "?strona",
+        "?strona=0",
+        "?strona=-1",
+        "?strona=+2",
+        "?strona=01",
+        "?strona=1e1",
+        "?strona=2.0",
+        "?strona=0x2",
+        "?strona=%20 2",
+        "?strona=2%00",
+        "?strona=ii",
+        `?strona=${String(MATCHES_MAX_PAGES + 1)}`,
+        "?strona=1000000",
+        `?strona=${"9".repeat(400)}`,
+        "?strona=1&strona=1",
+        "?strona=1&strona=2",
+      ];
+      for (const path of ["/dopasowania", "/dopasowania.csv"]) {
+        for (const query of malformed) {
+          const response = await fetch(`${url}${path}${query}`, { headers: { cookie } });
+          expect(response.status, `${path}${query}`).toBe(404);
+          const html = await response.text();
+          expect(html).not.toContain("Oświetlenie parku");
+          expect(html).not.toContain("strona=");
+        }
+      }
+      expect(server.matchesSessions).toBe(0);
+      expect(server.matchesWaiting).toBe(0);
+      // Without a session the page number is never read: the login page comes first.
+      expect((await fetch(`${url}/dopasowania?strona=0`)).status).toBe(401);
+    });
+
+    it("ends the list at the page limit and counts the offers past it", async () => {
+      for (let i = 0; i < 2 * MATCHES_SHOWN + 4; i++) {
         await upsertOpportunity(
           schema.db,
           draft({ deadline: new Date(Date.now() + (i + 1) * 60 * 60 * 1000) }),
         );
       }
-      const { cookie } = await login();
-      const html = await (await fetch(`${url}/dopasowania`, { headers: { cookie } })).text();
-      expect(html.match(/<article>/g)).toHaveLength(MATCHES_SHOWN);
-      expect(html).toContain(
-        "I 3 kolejne pasujące zamówienia z dalszym terminem lub ocenione jako nietrafne.",
-      );
+      const limited = await startWebServer({
+        db: schema.db,
+        publicBaseUrl: BASE,
+        logger: createLogger("info", () => undefined),
+        host: "127.0.0.1",
+        port: 0,
+        cleanupIntervalMs: null,
+        matchesMaxPages: 2,
+      });
+      try {
+        const { cookie } = await login();
+        const base = `http://127.0.0.1:${String(limited.port)}`;
+        const first = await (await fetch(`${base}/dopasowania`, { headers: { cookie } })).text();
+        expect(first).toContain(
+          "<p><strong>Strona 1 z 2</strong>: zamówienia 1–50 z 104. " +
+            '<a href="/dopasowania?strona=2">Następna strona →</a></p>',
+        );
+        expect(first).not.toContain("Lista kończy się");
+        const last = await (
+          await fetch(`${base}/dopasowania?strona=2`, { headers: { cookie } })
+        ).text();
+        expect(last.match(/<article>/g)).toHaveLength(MATCHES_SHOWN);
+        expect(last).toContain("<p><strong>Strona 2 z 2</strong>: zamówienia 51–100 z 104.</p>");
+        expect(last).toContain(
+          "Lista kończy się na 100 zamówieniach. Nie pokazujemy 4 kolejnych pasujących zamówień",
+        );
+        expect(last).not.toContain('rel="next"');
+        // Past the limit: not a page.
+        expect((await fetch(`${base}/dopasowania?strona=3`, { headers: { cookie } })).status).toBe(
+          404,
+        );
+      } finally {
+        await limited.close();
+      }
     });
 
     it("explains an empty list and notes an inactive profile", async () => {
@@ -948,6 +1359,37 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       const form = await fetch(`${url}/profil/ustawienia`, { headers: { cookie } });
       expect(form.status).toBe(200);
       expect(await form.text()).toContain("\n---</textarea>");
+    });
+
+    // PR-13: the form has no counties field, so invalid counties go to the operator.
+    it("sends the customer to support when only the operator can correct the stored profile", async () => {
+      await upsertOpportunity(schema.db, draft());
+      const long = "x".repeat(101);
+      const { cookie } = await login();
+      for (const counties of [sql`ARRAY['']::text[]`, sql`ARRAY[${long}]::text[]`]) {
+        await sql`UPDATE company_profiles SET counties = ${counties}`.execute(schema.db);
+        for (const path of ["/dopasowania", "/dopasowania.csv"]) {
+          const page = await fetch(`${url}${path}`, { headers: { cookie } });
+          expect(page.status).toBe(200);
+          const html = await page.text();
+          expect(html).toContain("nie możemy dobrać do niego zamówień.");
+          expect(html).toContain(
+            "<p>Profil zawiera ustawienie, które może poprawić tylko obsługa serwisu (na przykład " +
+              "powiaty).</p>",
+          );
+          expect(html).toContain(
+            "Odpowiedz na ostatnią wiadomość od nas — obsługa serwisu poprawi profil.",
+          );
+          expect(html).not.toContain("Popraw go w");
+          expect(html).not.toContain('href="/profil/ustawienia"');
+          expect(html).not.toContain(long);
+        }
+      }
+      // Invalid counties and an invalid editable field: the form alone cannot fix it either.
+      await sql`UPDATE company_profiles SET include_keywords = ARRAY['---']`.execute(schema.db);
+      const both = await (await fetch(`${url}/dopasowania`, { headers: { cookie } })).text();
+      expect(both).toContain("może poprawić tylko obsługa serwisu");
+      expect(both).not.toContain("Popraw go w");
     });
 
     it("matches each profile by its own preferences only", async () => {
@@ -1058,9 +1500,31 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
           expect(third.status).toBe(503);
           expect(third.headers.get("retry-after")).toBe(String(MATCHES_RETRY_AFTER_SECONDS));
           expect(third.headers.get("cache-control")).toBe("no-store");
-          expect(await third.text()).toContain(
-            "Trwa przygotowanie listy dopasowań — spróbuj za kilka sekund.",
+          // PR-13: a page that reloads itself after 3 s, to the same URL.
+          const busy = await third.text();
+          expect(busy).toContain("Liczymy listę… strona odświeży się sama za kilka sekund.");
+          expect(busy).toContain('<meta http-equiv="refresh" content="3; url=/dopasowania">');
+          // Another page of the list: the refresh keeps it (built from the parsed number).
+          const paged = await fetch(`${gated.url}/dopasowania?strona=2&x=%22%3E`, {
+            headers: { cookie: (await login()).cookie },
+          });
+          expect(paged.status).toBe(503);
+          expect(paged.headers.get("retry-after")).toBe(String(MATCHES_RETRY_AFTER_SECONDS));
+          const pagedHtml = await paged.text();
+          expect(pagedHtml).toContain(
+            '<meta http-equiv="refresh" content="3; url=/dopasowania?strona=2">',
           );
+          expect(pagedHtml).not.toContain("x=");
+          const csv = await fetch(`${gated.url}/dopasowania.csv?strona=2`, {
+            headers: { cookie: (await login()).cookie },
+          });
+          expect(csv.status).toBe(503);
+          const csvHtml = await csv.text();
+          expect(csvHtml).toContain('content="3; url=/dopasowania.csv?strona=2"');
+          // A file, not a page: download words and link (PR-13 nits).
+          expect(csvHtml).toContain("Przygotowujemy plik… pobierze się sam za kilka sekund.");
+          expect(csvHtml).toContain('<a href="/dopasowania.csv?strona=2">Pobierz teraz</a>');
+          expect(csvHtml).not.toContain("Liczymy listę");
           expect(await stillPending(second)).toBe(true);
 
           lock.resume();
@@ -1088,10 +1552,14 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
         expect(third.status).toBe(429);
         expect(third.headers.get("retry-after")).toBe(String(MATCHES_RETRY_AFTER_SECONDS));
         expect(third.headers.get("cache-control")).toBe("no-store");
-        expect(await third.text()).toContain(
-          "Lista dopasowań już się przygotowuje (np. w innej karcie albo po odświeżeniu strony) " +
-            "— poczekaj kilka sekund i spróbuj ponownie.",
+        // PR-13: plain words and the way back to the same list; no self-refresh.
+        const tooMany = await third.text();
+        expect(tooMany).toContain(
+          "Ta lista już się przygotowuje (np. w innej karcie albo po odświeżeniu). Poczekaj " +
+            "chwilę i otwórz ją ponownie.",
         );
+        expect(tooMany).toContain('<a href="/dopasowania">Otwórz listę ponownie</a>');
+        expect(tooMany).not.toContain("http-equiv");
         // Refused before the queue: the waiting request and the count are unchanged.
         expect(server.matchesWaiting).toBe(1);
         expect(await stillPending(second)).toBe(true);
@@ -1150,7 +1618,7 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
           expect(second.status).toBe(503);
           expect(second.headers.get("retry-after")).toBe(String(MATCHES_RETRY_AFTER_SECONDS));
           expect(second.headers.get("cache-control")).toBe("no-store");
-          expect(await second.text()).toContain("Trwa przygotowanie listy dopasowań");
+          expect(await second.text()).toContain("Liczymy listę… strona odświeży się sama");
           expect(gated.server.matchesWaiting).toBe(0);
 
           lock.resume();

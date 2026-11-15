@@ -7,6 +7,7 @@ import {
   homePage,
   invalidLinkPage,
   loginRequiredPage,
+  matchesHref,
   profilePage,
   STYLESHEET,
   unsubscribedPage,
@@ -16,9 +17,12 @@ import {
   PROFILE_FORM_SINGLE_FIELDS,
 } from "../src/web/profile-form.js";
 import {
+  MATCHES_MAX_PAGES,
   MAX_BODY_BYTES,
+  matchesPageFromUrl,
   parseForm,
   parseMultiValueForm,
+  parsePageNumber,
   PROFILE_FORM_MAX_BYTES,
   PROFILE_FORM_MAX_FIELDS,
   startWebServer,
@@ -58,6 +62,76 @@ describe("parseForm", () => {
 
   it("refuses invalid UTF-8", () => {
     expect(parseForm(Buffer.from([0x74, 0x3d, 0xff, 0xfe]), ["t"])).toBeNull();
+  });
+
+  // PR-13: the rating form's `nastepna` and `strona` may each come once, or not at all.
+  it("takes each optional field at most once, never in place of a required one", () => {
+    const optional = ["n", "s"];
+    expect(parseForm(body("a=1"), ["a"], optional)).toEqual({ a: "1" });
+    expect(parseForm(body("s=2&a=1&n=x"), ["a"], optional)).toEqual({ a: "1", n: "x", s: "2" });
+    for (const text of ["a=1&s=2&s=2", "a=1&n=&n=", "s=2", "n=x&s=2", "a=1&x=1"]) {
+      expect(parseForm(body(text), ["a"], optional)).toBeNull();
+    }
+  });
+});
+
+describe("page numbers of /dopasowania (PR-13)", () => {
+  it("is 20 pages", () => {
+    expect(MATCHES_MAX_PAGES).toBe(20);
+  });
+
+  it.each(["1", "2", "9", "10", "20"])("takes %j", (value) => {
+    expect(parsePageNumber(value, 20)).toBe(Number(value));
+  });
+
+  it.each([
+    "",
+    "0",
+    "00",
+    "01",
+    "-1",
+    "+1",
+    " 1",
+    "1 ",
+    "1\n",
+    "1.0",
+    "1e1",
+    "0x1",
+    "١",
+    "21",
+    "999999",
+    "1000000",
+    "9".repeat(400),
+  ])("refuses %j", (value) => {
+    expect(parsePageNumber(value, 20)).toBeNull();
+  });
+
+  it("reads `strona` once from the query, 1 without it, other parameters ignored", () => {
+    expect(matchesPageFromUrl("/dopasowania", 20)).toBe(1);
+    expect(matchesPageFromUrl("/dopasowania?", 20)).toBe(1);
+    expect(matchesPageFromUrl("/dopasowania?x=5", 20)).toBe(1);
+    expect(matchesPageFromUrl("/dopasowania?strona=3", 20)).toBe(3);
+    expect(matchesPageFromUrl("/dopasowania.csv?x=1&strona=%32", 20)).toBe(2);
+    expect(matchesPageFromUrl("/dopasowania?strona=3", 2)).toBeNull();
+    for (const query of [
+      "strona",
+      "strona=",
+      "strona=0",
+      "strona=1&strona=1",
+      "strona=2&strona=3",
+      // A fullwidth digit two and a sign, percent-encoded: decoded, then refused.
+      "strona=%EF%BC%92",
+      "strona=%2B1",
+    ]) {
+      expect(matchesPageFromUrl(`/dopasowania?${query}`, 20)).toBeNull();
+    }
+  });
+
+  it("links page 1 without the parameter and the CSV of a page", () => {
+    expect(matchesHref(1)).toBe("/dopasowania");
+    expect(matchesHref(2)).toBe("/dopasowania?strona=2");
+    expect(matchesHref(1, "csv")).toBe("/dopasowania.csv");
+    expect(matchesHref(20, "csv")).toBe("/dopasowania.csv?strona=20");
   });
 });
 

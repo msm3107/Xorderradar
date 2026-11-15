@@ -1359,7 +1359,8 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
 
 ## D-027 — Ekrany klienta: formularz profilu, zmiana e-maila, dopasowania, login-CSRF
 
-- **Status:** Accepted (PR-06B; rozwija D-025 i D-026; zmiana e-maila zastąpiona przez D-031)
+- **Status:** Accepted (PR-06B; rozwija D-025 i D-026; zmiana e-maila zastąpiona przez D-031;
+  formularz i `/dopasowania` zmienione w PR-13)
 - **Kontekst:** po PR-06A klient widzi tylko stan profilu i może się wypisać. PR-06B dodaje
   edycję profilu, podgląd dopasowań i ponowne włączenie powiadomień — nadal bez JavaScriptu,
   na `node:http` (D-025), z profilem wyłącznie z sesji (D-026). Przegląd PR-06A wskazał też
@@ -1486,6 +1487,93 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
   - konsekwencja „kto ma sesję, może przejąć powiadomienia” zostaje (sesja + nowa skrzynka
     wystarczą), ale stary adres dostaje powiadomienie i może anulować zmianę przed
     potwierdzeniem.
+- **Zmiana (PR-13, „Ustawienia bez pułapek”)** — formularz i `/dopasowania`:
+  - **Region jawnym wyborem:** pole radio `region` — „Cała Polska” (`all`) / „Wybrane
+    województwa” (`selected`), zaznaczone według zapisanego profilu (bez województw → „Cała
+    Polska”). Bez JavaScriptu; CSP bez zmian. Walidacja w `profile-form.ts`: radio to jawna
+    intencja — przy `all` serwer pomija przesłane województwa (bez walidacji, także wartości
+    spoza listy) i zapisuje pustą listę (decyzja właściciela z review PR #19: strona bez JS
+    zostawia zaznaczenia po zmianie radia; formularz pokazany ponownie po błędzie innego pola
+    zostawia je jak wysłane, a zapis z „Cała Polska” i tak zapisuje pustą listę);
+    `selected` bez województwa → błąd przy polu; inna wartość (także pusta, wielkie litery,
+    spacja) → błąd „Wybierz…”, 400 z formularzem. `region` brak albo dwa razy → wadliwy
+    formularz, 400 bez formularza. Przy każdym z tych błędów nic nie jest zapisane.
+  - **Powiaty poza formularzem:** ustawia je wyłącznie operator (`profile:create`, SQL —
+    `docs/RUNBOOK.md`). `companyProfileSettingsSchema` = schemat profilu bez `active` i bez
+    `counties`, więc `UPDATE` zapisu nie zawiera kolumny `counties` — zapisane powiaty zostają
+    bajt w bajt. Pole `counties` (lub `powiaty`) z formularza sprzed PR-13 (np. z pamięci
+    przeglądarki) to nieznane pole → 400, nic nie zapisane. Ustawienia pokazują zapisane
+    powiaty tylko do odczytu (zescapowane) z ich skutkiem i informacją, że zmienia je obsługa
+    (z adresem `CONTACT_EMAIL`, gdy jest ustawiony); notka ma `id` i opisuje fieldset regionu
+    (`aria-describedby`, obok błędu); żaden tekst strony nie każe ich wpisywać. Kontrola `countyKey` w formularzu znika razem z
+    polem (`profile:create` dalej ją ma). `PROFILE_FORM_MAX_FIELDS` (64 pary) bez zmian.
+  - **Złe powiaty z SQL nie dają 500:** powiaty to jedyna sprawdzana kolumna, której zapis
+    formularza nie nadpisuje, więc wpis odrzucany przez schemat (pusty, > 100 znaków, > 100
+    wpisów) zatrzymuje każdy zapis: wiersz po `UPDATE` jest sprawdzany w tej samej transakcji
+    (`invalid_stored_row`) i wycofany. Zapis łapie dokładnie ten kod (żadnego szerokiego
+    `catch`) i odpowiada **409** „Nie zapisano zmian” („Profil zawiera ustawienie, które może
+    poprawić tylko obsługa serwisu (na przykład powiaty). Dopóki go nie poprawi, zmian w
+    formularzu nie da się zapisać.”) z kontaktem do obsługi (`CONTACT_EMAIL`,
+    bez niego „odpowiedz na ostatnią wiadomość”); nic nie zapisane, bez e-maila, w logu `warn`
+    tylko id profilu, kod i ścieżki pól. 409, nie 500: żądanie jest poprawne, a konflikt jest
+    ze stanem zapisanego profilu (ponowienie da to samo, dopóki operator go nie poprawi); 500
+    zostaje dla awarii. `/dopasowania` (i CSV) przy profilu odrzucanym na polach, których
+    formularz nie nadpisuje (`counties`, `email`; `correctableInForm`), odsyła do obsługi, a
+    nie do ustawień; przy polach z formularza — jak dotąd do ustawień.
+  - **Układ formularza (tylko CSS):** pola wyboru w siatce 3 kolumn (2 przy wąskim ekranie),
+    etykieta pola wyboru i radia jako cel dotyku ≥ 44 px, krótsze podpowiedzi, `<textarea>`
+    na 2 wiersze, przycisk „Zapisz” wyróżniony (`.primary`, ≥ 44 px), wiersz radia regionu
+    oddzielony linią od pól województw (`.region`). Jednopolowy `fieldset`
+    adresu e-mail usunięty (pole ma swój `label`). Wysokość formularza przy 390 px: 2299 →
+    1355 px (58,9%; limit 60%) dla profilu bez powiatów (domyślny; powiaty ustawia tylko
+    operator); z 3 powiatami ustawionymi przez operatora 2299 → 1619 px (70,4%) — dochodzi
+    notka o powiatach tylko do odczytu.
+  - **Po zapisie:** komunikat „Lista dopasowań pokazuje zmiany od razu, e-mail — od jutra.” z
+    linkiem „Zobacz pasujące zamówienia” (`/dopasowania`), także przy zmianie adresu.
+    Uproszczenie: zapis przed porannym digestem działa już w tym digeście.
+  - **Strony `/dopasowania`:** `?strona=N`, 50 na stronę (`MATCHES_SHOWN`), najwyżej 20 stron
+    (`MATCHES_MAX_PAGES`; lista kończy się na 1000 pozycjach, nadmiar policzony na ostatniej
+    stronie). Strona 1 kanonicznie bez parametru. Parsowanie ścisłe (`parsePageNumber`): tylko
+    `[1-9][0-9]{0,5}` po dekodowaniu URL i ≤ 20; pusty, `0`, ujemny, zero wiodące, `1e2`, `2.0`,
+    znak, powtórzony `strona`, > 20 → 404 po sprawdzeniu sesji, **przed** slotem (nic nie jest
+    liczone). Poprawny numer za ostatnią stroną → ostatnia strona z jej prawdziwym numerem
+    (200; lista mogła się skrócić od kliknięcia). Inne parametry są ignorowane. Każde
+    żądanie liczy całą listę (koszt jak dotąd: jedna lista, potem wycinek), więc „nietrafne”
+    są na końcu całej listy, nie każdej strony. Linki „← Poprzednia strona” / „Następna strona
+    →” (`rel`) pod listą jako cele dotyku ≥ 44 px, nad nimi osobny wiersz „Strona X z Y”;
+    nad listą „Strona X z Y: zamówienia a–b z N.” ze zwykłym linkiem „Następna strona →” (bez
+    `rel` — `rel` mają tylko linki pod listą); numeracja `<ol start>` ciągła.
+    Formularz oceny niesie ukryte `strona` (tylko > 1), czytane tym samym parserem; wartość
+    zła → powrót na stronę 1, nigdy wpisana w `Location` (adres budowany z liczby). Ostatnia
+    karta strony wskazuje jako `nastepna` pierwszą kartę następnej strony: po „Nietrafne”
+    oceniona karta schodzi na koniec listy, więc ta karta przesuwa się na tę stronę. Wadliwy
+    formularz oceny z 5 lub więcej parami nadal daje 403 (pomocniczy odczyt CSRF z wadliwej
+    treści zostaje ograniczony do 4 par, jak przed PR-13).
+  - **CSV na stronę:** `/dopasowania.csv?strona=N` to pozycje strony, te same reguły i ten sam
+    slot; nazwa pliku `dopasowania-RRRR-MM-DD-strona-N.csv` dla N > 1. Link nad listą, jedna
+    linia na telefonie 390 px (D-030: przycisk pierwszej karty na pierwszym ekranie): przy
+    kilku stronach „Ta strona jako CSV (Excel, Arkusze Google).” — zakres strony podaje wiersz
+    „Strona X z Y: zamówienia a–b z N.” tuż nad nim; przy jednej stronie „Pobierz listę jako
+    CSV (Excel, Arkusze Google).” (PR-12). Notka PR-12 „(…; pierwsze 50 z N — zawęź profil, aby
+    mieć wszystkie)” usunięta: z PR-13 pozostałe pozycje są na kolejnych stronach. Pod listą
+    kolejno: notka o nadmiarze (ostatnia strona), linki stron, objaśnienie ocen (PR-12), „Dane
+    pochodzą…”. CSV całej listy — do decyzji właściciela (STATE).
+  - **503 i 429 po ludzku:** 503 (kolejka pełna / upływ czasu) zostaje 503 z `Retry-After: 5`,
+    a strona „Liczymy listę… strona odświeży się sama za kilka sekund.” ma
+    `<meta http-equiv="refresh" content="3; url=…">` na ten sam adres (ta sama strona i rodzaj,
+    zbudowany z odczytanego numeru, zescapowany; bez skryptu) i link „Odśwież teraz”; dla CSV
+    „Przygotowujemy plik… pobierze się sam za kilka sekund.” i „Pobierz teraz”. 429 (limit
+    sesji) — „Ta lista już się przygotowuje (np. w innej karcie albo po odświeżeniu). Poczekaj
+    chwilę i otwórz ją ponownie.” z linkiem „Otwórz listę ponownie”, bez samoodświeżania (lista liczy się
+    już gdzie indziej; automatyczne ponowienie by z nią konkurowało). Zastępuje teksty stron
+    503 (wyżej) i 429 (D-028). Odświeżenie po 3 s przy `Retry-After: 5` jest celowe: 3 s to
+    czas z planu dla przeglądarki (meta refresh), a `Retry-After` zostaje dla klientów innych
+    niż przeglądarka (czytniki, skrypty) i nie zmienia się z PR-13.
+  - **Odrzucone:** 400 przy `all` z zaznaczonymi województwami (pułapka: strona bez JS
+    zostawia zaznaczenia, klient musiał odznaczać do 16 pól); przycisk JS „zaznacz
+    wszystkie” (CSP bez skryptów); wynik listy w pamięci między stronami
+    (cache — unieważnianie, D-027); 400 dla złego numeru strony (404 = taka strona nie istnieje,
+    tak jak inne nieznane adresy); zostawienie pola powiatów z ostrzeżeniem (pułapka zostaje).
 
 ## D-028 — Gotowość operacyjna: `status`, alert operatora, backup/restore, CI, twardnienie web
 
@@ -2241,9 +2329,10 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     dodaje szum tylko do własnego wiersza (i do sum, w które ten wiersz wchodzi). Oceny wczytywane jednym zapytaniem
     (`= ANY(uuid[])`) dla całej listy. Oceny „nietrafne” są wyszarzone i przesunięte na
     koniec (kolejność digestu zachowana w obu częściach) przed obcięciem do
-    `MATCHES_SHOWN`.
+    `MATCHES_SHOWN` (od PR-13: przed podziałem na strony, D-027).
   - **`GET /dopasowania.csv`** (sesja, ten sam slot dopasowań co strona): te same wiersze,
-    kolejność i limit co `/dopasowania`; UTF-8 z BOM, separator `;`, wiersze CRLF, cudzysłowy
+    kolejność i limit co `/dopasowania` (zmienione w PR-13, D-027: CSV obejmuje bieżącą stronę
+    `?strona=N`, nazwa pliku z `-strona-N` dla N > 1); UTF-8 z BOM, separator `;`, wiersze CRLF, cudzysłowy
     RFC 4180; komórka zaczynająca się od `= + - @`, tabulatora albo CR dostaje wiodący `'`
     (neutralizacja formuł, OWASP CSV injection). Brakujące wartości to puste komórki (nigdy
     0). Kwota z przecinkiem dziesiętnym bez zaokrąglania; w kolumnie „Źródło” atrybucja BK

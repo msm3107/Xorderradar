@@ -390,23 +390,33 @@ PUBLIC_BASE_URL=https://radar.example.invalid node dist/main.js serve
     przyciski „Wypisz” / „Włącz ponownie powiadomienia” (`POST /profil/wlacz`, bez operatora)
     i „Wyloguj”; przy zmianie adresu w toku „Oczekuje na potwierdzenie: <adres>” (po
     wygaśnięciu linku: że link wygasł) i „Anuluj zmianę” (`POST /profil/anuluj-email`);
-  - `/profil/ustawienia` — formularz: nazwa, e-mail, kategorie, województwa, powiaty i słowa
-    kluczowe (wpis w wierszu); błędy po polsku przy polach, po zapisie powrót na `/profil` z
-    „Zapisano” (albo z prośbą o potwierdzenie nowego adresu);
+  - `/profil/ustawienia` — formularz: nazwa, e-mail, kategorie, region („Cała Polska” albo
+    „Wybrane województwa” i województwa) i słowa kluczowe (wpis w wierszu); błędy po polsku przy
+    polach, po zapisie powrót na `/profil` z „Zapisano… Lista dopasowań pokazuje zmiany od
+    razu, e-mail — od jutra” i linkiem do dopasowań (albo z prośbą o potwierdzenie nowego
+    adresu). Powiatów w formularzu nie ma (PR-13): ustawia je operator (`profile:create`, SQL
+    — `docs/RUNBOOK.md`), zapis formularza ich nie zmienia, a ustawienia pokazują je tylko do
+    odczytu (powiaty niezgodne ze schematem, wpisane SQL-em: zapis → 409 „Nie zapisano zmian”
+    z kontaktem do obsługi, `/dopasowania` też odsyła do obsługi);
   - `/dopasowania` — oferty, które pasują do profilu teraz, tymi samymi regułami co digest
     (pierwszy zapis w ostatnich 7 dniach, bez ofert po terminie), najbliższy termin pierwszy,
-    najwyżej 50, z powodami dopasowania i linkiem do źródła. Pokazuje też oferty już
-    wysłane e-mailem. Ta sama karta oferty co w e-mailu (niżej, „Karta oferty”); pełny opis
-    pod „Pełny opis”, gdy wyciąg jest skrócony, data publikacji, kontakt, kody CPV i powody
-    techniczne pod „Więcej szczegółów” (natywne `<details>`, bez JavaScriptu). Wygląd:
-    nagłówek i stopka serwisu, jeden kolor akcentu, schemat ciemny (`prefers-color-scheme`),
-    widoczny fokus, przy wąskim ekranie (np. 390 px) etykiety nad wartościami. Na końcu każdej
-    karty (po „Więcej szczegółów”) przyciski „Trafne” / „Nietrafne”
-    (`POST /dopasowania/ocena`, sesja + CSRF, powrót 303 do karty);
-    ocenę można zmienić, zostaje jedna na ofertę; oferty „nietrafne” są wyszarzone i na
-    końcu listy, objaśnienie ocen jest pod listą (PR-12, D-032);
-  - `/dopasowania.csv` — ta sama lista (te same oferty, kolejność i limit 50) jako plik CSV
-    do pobrania (link „Pobierz listę jako CSV” nad listą): separator `;`, UTF-8 z BOM, kwota z
+    50 na stronę (`?strona=N`, najwyżej 20 stron; linki „Poprzednia/Następna strona”, „Strona X
+    z Y”; zły numer strony → 404, numer za ostatnią stroną → ostatnia strona), z powodami
+    dopasowania i linkiem do źródła. Pokazuje też oferty już wysłane e-mailem. Ta sama karta
+    oferty co w e-mailu (niżej, „Karta oferty”); pełny opis pod „Pełny opis”, gdy wyciąg jest
+    skrócony, data publikacji, kontakt, kody CPV i powody techniczne pod „Więcej szczegółów”
+    (natywne `<details>`, bez JavaScriptu). Wygląd: nagłówek i stopka serwisu, jeden kolor
+    akcentu, schemat ciemny (`prefers-color-scheme`), widoczny fokus, przy wąskim ekranie
+    (np. 390 px) etykiety nad wartościami. Na końcu każdej karty (po „Więcej szczegółów”)
+    przyciski „Trafne” / „Nietrafne” (`POST /dopasowania/ocena`, sesja + CSRF, powrót 303 do
+    karty); ocenę można zmienić, zostaje jedna na ofertę; oferty „nietrafne” są wyszarzone i
+    na końcu całej listy, objaśnienie ocen jest pod listą i linkami stron (PR-12, D-032), a
+    ocena wraca na tę samą stronę. Gdy inna lista jest liczona, strona „Liczymy listę…” (503)
+    odświeża się sama po 3 s (bez JavaScriptu); trzecie równoczesne żądanie jednej sesji
+    dostaje stronę 429 z linkiem „Otwórz listę ponownie”;
+  - `/dopasowania.csv` — ta sama lista jako plik CSV, strona po stronie (`?strona=N`: te same
+    oferty, kolejność i 50 pozycji co strona; nad listą link „Pobierz listę jako CSV”, przy
+    kilku stronach „Ta strona jako CSV”): separator `;`, UTF-8 z BOM, kwota z
     przecinkiem dziesiętnym, brak wartości → pusta komórka, komórki zaczynające się od `=`,
     `+`, `-`, `@`, tabulatora lub CR poprzedzone `'` (Excel nie wykona ich jako formuły). Tylko
     z sesją.

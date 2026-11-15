@@ -13,13 +13,16 @@ import {
   loginRefusedPage,
   matchesBusyPage,
   matchesPage,
+  matchesTooManyPage,
   matchesUnavailablePage,
   profilePage,
+  profileSaveBlockedPage,
   settingsPage,
   unsubscribeConfirmPage,
   type MatchesView,
+  STYLESHEET,
 } from "../src/web/pages.js";
-import type { ProfileFormValues } from "../src/web/profile-form.js";
+import { REGION_ALL, REGION_SELECTED, type ProfileFormValues } from "../src/web/profile-form.js";
 
 /*
  * PR-06B: the customer pages as pure functions — the profile form's
@@ -36,8 +39,8 @@ const values: ProfileFormValues = {
   name: "Jan Kowalski",
   email: "kontakt@example.invalid",
   categories: ["elektryka", "it"],
+  region: REGION_SELECTED,
   voivodeships: ["mazowieckie"],
-  counties: "warszawski zachodni",
   includeKeywords: "oświetlenie\nlatarnie",
   excludeKeywords: "",
 };
@@ -57,7 +60,7 @@ describe("settingsPage", () => {
     expect(html).toContain("<title>Ustawienia profilu — Radar Zamówień</title>");
     expect(html).toContain('<form method="post" action="/profil/ustawienia">');
     expect(html).toContain('<input type="hidden" name="csrf" value="csrf-token">');
-    expect(html).toContain('<button type="submit">Zapisz</button>');
+    expect(html).toContain('<button type="submit" class="primary">Zapisz</button>');
     expect(html).not.toMatch(NO_SCRIPT);
     expect(html).not.toContain("error-summary");
     expect(html).not.toContain("aria-invalid");
@@ -68,13 +71,17 @@ describe("settingsPage", () => {
     ]
       .map((match) => match[1] ?? "")
       .filter((id) => id !== "");
-    expect(ids).toHaveLength(5 + MVP_CATEGORIES.length + VOIVODESHIPS.length);
+    // name, e-mail, 2 keyword lists, the 2 region radios (PR-13: no counties field).
+    expect(ids).toHaveLength(4 + 2 + MVP_CATEGORIES.length + VOIVODESHIPS.length);
     for (const id of ids) {
       expect(html.match(new RegExp(`<label for="${id}">`, "g"))).toHaveLength(1);
     }
-    for (const legend of ["Adres e-mail do powiadomień", "Kategorie", "Województwa"]) {
+    // PR-13: the one-field e-mail fieldset is gone; the address keeps its label.
+    expect(html.match(/<fieldset/g)).toHaveLength(2);
+    for (const legend of ["Kategorie", "Województwa"]) {
       expect(html).toContain(`<legend>${legend}</legend>`);
     }
+    expect(html).toContain('<label for="email">Adres e-mail</label>');
     expect(html).toContain(
       '<label for="kategoria-4">IT (usługi, oprogramowanie, sprzęt komputerowy)</label>',
     );
@@ -94,6 +101,8 @@ describe("settingsPage", () => {
     expect(html).toContain('value="it" checked>');
     expect(html).toContain('value="mazowieckie" checked>');
     expect(html).toContain('value="opolskie">');
+    expect(tagWithId(html, "region-wybrane")).toContain('value="selected" checked required>');
+    expect(tagWithId(html, "region-polska")).toContain('value="all" required>');
     // The parser drops the newline right after <textarea>: the value is intact.
     expect(html).toContain('aria-describedby="slowa-opis">\noświetlenie\nlatarnie</textarea>');
   });
@@ -128,7 +137,8 @@ describe("settingsPage", () => {
       'aria-describedby="email-opis email-blad" aria-invalid="true"',
     );
     expect(tagWithId(html, "slowa")).toContain('aria-invalid="true"');
-    expect(tagWithId(html, "powiaty")).not.toContain("aria-invalid");
+    expect(html).not.toContain('id="powiaty"');
+    expect(tagWithId(html, "region-polska")).not.toContain("aria-invalid");
     expect(tagWithId(html, "wykluczenia")).not.toContain("aria-invalid");
     expect(html).toContain(
       '<p class="error" id="slowa-blad"><span>Błąd: Wiersz 1: a</span><br><span>Błąd: Wiersz 2: b</span></p>',
@@ -145,17 +155,17 @@ describe("settingsPage", () => {
         name: hostile,
         email: hostile,
         categories: [hostile],
+        region: hostile,
         voivodeships: [hostile],
-        counties: `</textarea>${hostile}`,
-        includeKeywords: hostile,
+        includeKeywords: `</textarea>${hostile}`,
         excludeKeywords: hostile,
       },
       hostile,
       { name: [hostile] },
     );
     expect(html).not.toMatch(NO_SCRIPT);
-    // Only the three real closing tags: the value cannot end its textarea.
-    expect(html.match(/<\/textarea>/g)).toHaveLength(3);
+    // Only the two real closing tags (PR-13: no counties textarea): the value cannot end its textarea.
+    expect(html.match(/<\/textarea>/g)).toHaveLength(2);
     expect(html).toContain("&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;&amp;&#39;");
     expect(html).toContain("&lt;/textarea&gt;");
     expect(html).not.toContain(" checked");
@@ -212,6 +222,7 @@ describe("matchesPage", () => {
       stateAt: "2026-11-02 07:00",
       windowDays: 7,
       items: [cardOf(offer)],
+      pagination: { page: 1, pages: 1, offset: 0, listed: 1, limit: 1000 },
       more: 0,
       truncated: false,
       ...overrides,
@@ -402,9 +413,10 @@ describe("matchesPage", () => {
 
   it("advises widening the profile truthfully, with or without voivodeships", () => {
     const withRegions = matchesPage(view({ items: [] })).html;
+    // PR-13: the whole country is the „Cała Polska” radio, not unticking every box.
     expect(withRegions).toContain(
-      "dodaj kategorie, słowa kluczowe lub województwa (albo odznacz wszystkie województwa, " +
-        "aby szukać w całej Polsce) albo usuń część słów wykluczających.",
+      "dodaj kategorie, słowa kluczowe lub województwa (albo wybierz „Cała Polska”) albo usuń " +
+        "część słów wykluczających.",
     );
     // None ticked already means the whole country: no advice to add voivodeships.
     const wholeCountry = matchesPage(view({ items: [], hasVoivodeships: false })).html;
@@ -414,21 +426,25 @@ describe("matchesPage", () => {
     expect(wholeCountry).not.toContain("województwa (");
     expect(withRegions).not.toContain("powiat");
     const counties = matchesPage(view({ items: [], hasCounties: true })).html;
+    // PR-13: counties are the operator's; no note asks the customer to edit them.
     expect(counties).toContain(
-      "<p>Wpisane powiaty nie zawężają listy: ogłoszenia nie podają jeszcze powiatu, więc " +
-        "liczy się województwo. Powiat bez zaznaczonego województwa przepuszcza tylko " +
-        "zamówienia pasujące jednocześnie kategorią i słowem kluczowym.</p>",
+      "<p>Powiaty zapisane w profilu nie zawężają listy: ogłoszenia nie podają jeszcze " +
+        "powiatu, więc liczy się województwo.</p>",
     );
     const countiesOnly = matchesPage(
       view({ items: [], hasCounties: true, hasVoivodeships: false }),
     ).html;
     expect(countiesOnly).toContain(
-      "<p>Ogłoszenia nie podają jeszcze powiatu, więc same powiaty nie wystarczą: zaznacz " +
-        "województwo w ustawieniach. Bez województwa pokazujemy tylko zamówienia pasujące " +
-        "jednocześnie kategorią i słowem kluczowym.</p>",
+      "<p>Profil ma zapisane powiaty, a ogłoszenia nie podają jeszcze powiatu: bez " +
+        "zaznaczonego województwa pokazujemy tylko zamówienia pasujące jednocześnie kategorią " +
+        "i słowem kluczowym. Wybierz w ustawieniach „Wybrane województwa” i zaznacz " +
+        "województwo.</p>",
     );
-    expect(countiesOnly).not.toContain("Wpisane powiaty nie zawężają listy");
-    expect(counties).not.toContain("same powiaty nie wystarczą");
+    expect(countiesOnly).not.toContain("nie zawężają listy");
+    expect(counties).not.toContain("Profil ma zapisane powiaty");
+    for (const html of [counties, countiesOnly]) {
+      expect(html).not.toMatch(/(wpisz|wpisane|wpisan[ey]|dopisz|zmień)[^.]*powiat/i);
+    }
   });
 
   it("says the list includes offers already sent by e-mail", () => {
@@ -442,15 +458,20 @@ describe("matchesPage", () => {
     expect(html).toContain(
       '<p class="note">Powiadomienia e-mail są wyłączone: tej listy nie wysyłamy.',
     );
+    // PR-13: the overflow is what is beyond the page limit, on no page.
     expect(html).toContain(
-      "I 3 kolejne pasujące zamówienia z dalszym terminem lub ocenione jako nietrafne.",
+      "<p>Lista kończy się na 1000 zamówieniach. Nie pokazujemy 3 kolejnych pasujących " +
+        "zamówień z dalszym terminem lub ocenionych jako nietrafne. Aby lista była krótsza, " +
+        "zawęź profil, np. słowami wykluczającymi.</p>",
     );
     expect(html).toContain("Lista może być niepełna");
     expect(matchesPage(view({ more: 1 })).html).toContain(
-      "I 1 kolejne pasujące zamówienie z dalszym terminem lub ocenione jako nietrafne.",
+      "Nie pokazujemy 1 kolejnego pasującego zamówienia z dalszym terminem lub ocenionego " +
+        "jako nietrafne.",
     );
     expect(matchesPage(view({ more: 12 })).html).toContain(
-      "I 12 kolejnych pasujących zamówień z dalszym terminem lub ocenionych jako nietrafne.",
+      "Nie pokazujemy 12 kolejnych pasujących zamówień z dalszym terminem lub ocenionych " +
+        "jako nietrafne.",
     );
     expect(matchesPage(view()).html).not.toContain("z dalszym terminem");
   });
@@ -460,15 +481,251 @@ describe("matchesPage", () => {
     expect(html).toContain('<a href="/profil/ustawienia">ustawieniach profilu</a>');
   });
 
-  it("asks to retry when another list is being computed (503)", () => {
-    const page = matchesBusyPage();
+  // PR-13: counties are not on the form; their correction is the operator's.
+  it("sends to support, not to the form, when only the operator can correct the profile", () => {
+    for (const contact of [null, "pomoc@example.invalid"]) {
+      const page = matchesUnavailablePage(false, contact);
+      expect(page.status).toBe(200);
+      expect(page.html).toContain(
+        "<p>Profil zawiera ustawienie, które może poprawić tylko obsługa serwisu (na przykład " +
+          "powiaty).</p>",
+      );
+      expect(page.html).not.toContain("Popraw go w");
+      expect(page.html).not.toContain('href="/profil/ustawienia"');
+      expect(page.html).toContain(
+        contact === null
+          ? "<p>Odpowiedz na ostatnią wiadomość od nas — obsługa serwisu poprawi profil.</p>"
+          : '<p>Napisz do obsługi serwisu: <a href="mailto:pomoc@example.invalid">' +
+              "pomoc@example.invalid</a>.</p>",
+      );
+    }
+    // The correctable case keeps its link to the form, with or without a contact.
+    expect(matchesUnavailablePage(true, "pomoc@example.invalid").html).toContain(
+      '<a href="/profil/ustawienia">ustawieniach profilu</a>',
+    );
+  });
+
+  it("refuses a save blocked by an operator setting with 409 and support's contact", () => {
+    for (const contact of [null, "pomoc@example.invalid"]) {
+      const page = profileSaveBlockedPage(contact);
+      expect(page.status).toBe(409);
+      expect(page.html).toContain("<title>Nie zapisano zmian");
+      expect(page.html).toContain(
+        "<h1>Nie zapisano zmian</h1>\n<p>Profil zawiera ustawienie, które może poprawić tylko " +
+          "obsługa serwisu (na przykład powiaty). Dopóki go nie poprawi, zmian w formularzu nie " +
+          "da się zapisać.</p>",
+      );
+      expect(page.html).toContain(
+        contact === null
+          ? "Odpowiedz na ostatnią wiadomość od nas"
+          : 'href="mailto:pomoc@example.invalid"',
+      );
+      expect(page.html).toContain('<a href="/profil">Twój profil</a>');
+    }
+    // A hostile contact is escaped.
+    expect(profileSaveBlockedPage('a"b@example.invalid').html).toContain(
+      'href="mailto:a&quot;b@example.invalid"',
+    );
+  });
+
+  // PR-13: a waiting page that reloads itself (meta refresh, no script) to the same URL.
+  it("reloads the same page by itself while another list is being computed (503)", () => {
+    const page = matchesBusyPage("/dopasowania");
     expect(page.status).toBe(503);
     expect(page.html).toContain(
-      "<p>Trwa przygotowanie listy dopasowań — spróbuj za kilka sekund.</p>",
+      '<meta http-equiv="refresh" content="3; url=/dopasowania">\n</head>',
     );
-    expect(page.html).toContain('<p><a href="/dopasowania">Spróbuj ponownie</a></p>');
+    expect(page.html).toContain("<p>Liczymy listę… strona odświeży się sama za kilka sekund.</p>");
+    expect(page.html).toContain('<p><a href="/dopasowania">Odśwież teraz</a></p>');
     expect(page.html).toContain('<a href="/profil">Twój profil</a>');
     expect(page.html).not.toMatch(NO_SCRIPT);
+    const second = matchesBusyPage("/dopasowania.csv?strona=2").html;
+    expect(second).toContain(
+      '<meta http-equiv="refresh" content="3; url=/dopasowania.csv?strona=2">',
+    );
+    expect(second).toContain('<a href="/dopasowania.csv?strona=2">Odśwież teraz</a>');
+    // Escaped, should a URL ever carry markup (the server builds it from a number).
+    const hostile = matchesBusyPage('/dopasowania?x="><script>').html;
+    expect(hostile).toContain('url=/dopasowania?x=&quot;&gt;&lt;script&gt;">');
+    expect(hostile).not.toMatch(NO_SCRIPT);
+    // The CSV waits for a file, not a page: download words, the same refresh.
+    const csv = matchesBusyPage("/dopasowania.csv?strona=2", "csv").html;
+    expect(csv).toContain('<meta http-equiv="refresh" content="3; url=/dopasowania.csv?strona=2">');
+    expect(csv).toContain("<p>Przygotowujemy plik… pobierze się sam za kilka sekund.</p>");
+    expect(csv).toContain('<p><a href="/dopasowania.csv?strona=2">Pobierz teraz</a></p>');
+    expect(csv).not.toContain("Odśwież teraz");
+    expect(csv).not.toContain("strona odświeży się");
+    expect(csv).not.toMatch(NO_SCRIPT);
+    // Every other page has no refresh.
+    expect(matchesPage(view()).html).not.toContain("http-equiv");
+    expect(matchesTooManyPage("/dopasowania").html).not.toContain("http-equiv");
+  });
+
+  it("explains the per-session limit (429) in plain words, with the way back", () => {
+    const page = matchesTooManyPage("/dopasowania?strona=3");
+    expect(page.status).toBe(429);
+    expect(page.html).toContain(
+      "<p>Ta lista już się przygotowuje (np. w innej karcie albo po odświeżeniu). Poczekaj " +
+        "chwilę i otwórz ją ponownie.</p>",
+    );
+    expect(page.html).toContain('<p><a href="/dopasowania?strona=3">Otwórz listę ponownie</a></p>');
+    expect(page.html).toContain('<a href="/profil">Twój profil</a>');
+    expect(page.html).not.toMatch(/sesj|slot|żądań|429|limit/i);
+    expect(page.html).not.toMatch(NO_SCRIPT);
+  });
+
+  describe("pages (PR-13)", () => {
+    const many = (count: number) => Array.from({ length: count }, () => cardOf(offer));
+    const second = view({
+      items: many(50),
+      pagination: { page: 2, pages: 3, offset: 50, listed: 123, limit: 1000 },
+    });
+
+    it("says which page it is and links the previous and the next one", () => {
+      const { html } = matchesPage(second);
+      expect(html).toContain(
+        "<p><strong>Strona 2 z 3</strong>: zamówienia 51–100 z 123. " +
+          '<a href="/dopasowania?strona=3">Następna strona →</a></p>',
+      );
+      expect(html).toContain(
+        '<nav aria-label="Strony listy"><p class="pages-status">Strona 2 z 3</p>' +
+          '<p class="pages"><a href="/dopasowania" rel="prev">← Poprzednia strona</a>' +
+          '<a href="/dopasowania?strona=3" rel="next">Następna strona →</a></p></nav>',
+      );
+      // `rel` once each: on the pager under the list, not on the line above it.
+      expect(html.match(/rel="next"/g)).toHaveLength(1);
+      expect(html.match(/rel="prev"/g)).toHaveLength(1);
+      // The list numbering goes on from the previous page.
+      expect(html).toContain('<ol class="matches" start="51"><li>');
+      expect(html).not.toMatch(NO_SCRIPT);
+    });
+
+    it("has no previous link on the first page and no next link on the last", () => {
+      const first = matchesPage(
+        view({
+          items: many(50),
+          pagination: { page: 1, pages: 3, offset: 0, listed: 123, limit: 1000 },
+        }),
+      ).html;
+      expect(first).toContain(
+        "<p><strong>Strona 1 z 3</strong>: zamówienia 1–50 z 123. " +
+          '<a href="/dopasowania?strona=2">Następna strona →</a></p>',
+      );
+      expect(first).not.toContain('rel="prev"');
+      expect(first).toContain('<a href="/dopasowania?strona=2" rel="next">');
+      expect(first).toContain('<ol class="matches"><li>');
+      const last = matchesPage(
+        view({
+          items: many(23),
+          pagination: { page: 3, pages: 3, offset: 100, listed: 123, limit: 1000 },
+        }),
+      ).html;
+      expect(last).toContain("<p><strong>Strona 3 z 3</strong>: zamówienia 101–123 z 123.</p>");
+      expect(last).toContain('<a href="/dopasowania?strona=2" rel="prev">');
+      expect(last).not.toContain('rel="next"');
+    });
+
+    // PR-13 minors: the status on its own line, then the links, each a 44 px touch target.
+    it("puts the page status on its own line and makes the page links touch targets", () => {
+      const last = matchesPage(
+        view({
+          items: many(23),
+          pagination: { page: 3, pages: 3, offset: 100, listed: 123, limit: 1000 },
+        }),
+      ).html;
+      expect(last).toContain(
+        '<nav aria-label="Strony listy"><p class="pages-status">Strona 3 z 3</p>' +
+          '<p class="pages"><a href="/dopasowania?strona=2" rel="prev">← Poprzednia strona</a>' +
+          "</p></nav>",
+      );
+      // No „Następna” anywhere on the last page, above or under the list.
+      expect(last).not.toContain("Następna strona");
+      expect(STYLESHEET).toContain(".pages-status{");
+      expect(STYLESHEET).toMatch(/\.pages a\{[^}]*min-height:44px/);
+      expect(STYLESHEET).toMatch(/\.pages a\{[^}]*display:inline-flex/);
+    });
+
+    it("shows no page line or pager for a list of one page", () => {
+      const { html } = matchesPage(view());
+      expect(html).not.toContain("Strona 1 z 1");
+      expect(html).not.toContain("Strony listy");
+      expect(html).not.toContain('rel="next"');
+    });
+
+    // Merged with PR-12's short CSV line: one line on a 390 px phone, the range
+    // is in the page line just above it; no „pierwsze N z M — zawęź profil”.
+    it("links the CSV of the page shown, in one short line under the page line", () => {
+      const { html } = matchesPage(second);
+      const csv =
+        '<p><a href="/dopasowania.csv?strona=2">Ta strona jako CSV</a> ' +
+        "(Excel, Arkusze Google).</p>";
+      expect(html).toContain(csv);
+      expect(html).not.toContain("pierwsze");
+      expect(html).not.toContain("zawęź profil, aby mieć wszystkie");
+      // Above the list: the page line, the window paragraph, the CSV line, then the cards.
+      const at = [
+        html.indexOf("<p><strong>Strona 2 z 3</strong>"),
+        html.indexOf("<p>Pokazujemy zamówienia dodane do Radaru"),
+        html.indexOf(csv),
+        html.indexOf('<ol class="matches" start="51">'),
+      ];
+      expect(at.every((index) => index >= 0)).toBe(true);
+      expect(at).toEqual([...at].sort((a, b) => a - b));
+    });
+
+    it("says nothing of other pages on the CSV link of a one-page list", () => {
+      const { html } = matchesPage(view());
+      expect(html).toContain(
+        '<p><a href="/dopasowania.csv">Pobierz listę jako CSV</a> (Excel, Arkusze Google).</p>',
+      );
+      expect(html).not.toContain("Ta strona jako CSV");
+    });
+
+    it("puts the pager under the list, before the rating paragraph", () => {
+      const { html } = matchesPage(second);
+      const at = [
+        html.indexOf("</ol>"),
+        html.indexOf('<nav aria-label="Strony listy">'),
+        html.indexOf("<p>Oceń zamówienia przyciskami „Trafne” i „Nietrafne”"),
+        html.indexOf("<p>Dane pochodzą z publicznych ogłoszeń."),
+      ];
+      expect(at.every((index) => index >= 0)).toBe(true);
+      expect(at).toEqual([...at].sort((a, b) => a - b));
+    });
+
+    it("counts the offers beyond the page limit on the last page only", () => {
+      const lastPage = matchesPage(
+        view({
+          items: many(50),
+          pagination: { page: 2, pages: 2, offset: 50, listed: 100, limit: 100 },
+          more: 7,
+        }),
+      ).html;
+      expect(lastPage).toContain("<p><strong>Strona 2 z 2</strong>: zamówienia 51–100 z 107.</p>");
+      expect(lastPage).toContain(
+        "Lista kończy się na 100 zamówieniach. Nie pokazujemy 7 kolejnych pasujących zamówień",
+      );
+      // Under the list on the last page: the overflow note, then the pager, then
+      // the notes about the whole list.
+      const at = [
+        lastPage.indexOf("</ol>"),
+        lastPage.indexOf("<p>Lista kończy się na 100 zamówieniach."),
+        lastPage.indexOf('<nav aria-label="Strony listy">'),
+        lastPage.indexOf("<p>Oceń zamówienia przyciskami „Trafne” i „Nietrafne”"),
+        lastPage.indexOf("<p>Dane pochodzą z publicznych ogłoszeń."),
+      ];
+      expect(at.every((index) => index >= 0)).toBe(true);
+      expect(at).toEqual([...at].sort((a, b) => a - b));
+      const firstPage = matchesPage(
+        view({
+          items: many(50),
+          pagination: { page: 1, pages: 2, offset: 0, listed: 100, limit: 100 },
+          more: 7,
+        }),
+      ).html;
+      expect(firstPage).toContain("zamówienia 1–50 z 107.");
+      expect(firstPage).not.toContain("Lista kończy się");
+    });
   });
 
   describe("rating (PR-12)", () => {
@@ -587,13 +844,86 @@ describe("matchesPage", () => {
       );
     });
 
-    it("says the CSV holds only the shown offers when there are more", () => {
+    // PR-13: the CSV is the page shown; the old „pierwsze N z M” note is gone.
+    it("links the whole list's CSV when the list has one page", () => {
       const items = Array.from({ length: 50 }, () => rated(offer, null));
-      const { html } = matchesPage(view({ items, more: 7 }));
-      expect(html).toContain(
-        '<p><a href="/dopasowania.csv">Pobierz listę jako CSV</a> (Excel, Arkusze Google' +
-          "; pierwsze 50 z 57 — zawęź profil, aby mieć wszystkie).</p>",
+      const { html } = matchesPage(
+        view({
+          items,
+          pagination: { page: 1, pages: 1, offset: 0, listed: 50, limit: 50 },
+          more: 7,
+        }),
       );
+      expect(html).toContain(
+        '<p><a href="/dopasowania.csv">Pobierz listę jako CSV</a> (Excel, Arkusze Google).</p>',
+      );
+      expect(html).not.toContain("pierwsze 50");
+    });
+
+    it("sends the page back with the rating form, only past the first page", () => {
+      const onSecond = matchesPage(
+        view({
+          items: [
+            {
+              ...cardOf(offer),
+              feedback: { opportunityId: offer.id, verdict: null, csrf: CSRF, next: null, page: 2 },
+            },
+          ],
+          pagination: { page: 2, pages: 2, offset: 50, listed: 51, limit: 1000 },
+        }),
+      ).html;
+      expect(onSecond).toContain(
+        `<input type="hidden" name="oferta" value="${offer.id}">` +
+          '<input type="hidden" name="strona" value="2">',
+      );
+      const onFirst = matchesPage(
+        view({
+          items: [
+            {
+              ...cardOf(offer),
+              feedback: { opportunityId: offer.id, verdict: null, csrf: CSRF, next: null, page: 1 },
+            },
+          ],
+        }),
+      ).html;
+      expect(onFirst).not.toContain('name="strona"');
+      expect(matchesPage(view({ items: [rated(offer, null)] })).html).not.toContain(
+        'name="strona"',
+      );
+    });
+
+    // PR-12 × PR-13: a page-2 card keeps the D-030 order, its form (with `strona`) last.
+    it("ends a page-2 card with the form that returns to page 2, after „Więcej szczegółów”", () => {
+      const nextId = "00000000-0000-4000-8000-0000000000ff";
+      const cut = { ...offer, description: "Wymiana opraw. ".repeat(40) };
+      const { html } = matchesPage(
+        view({
+          items: [
+            {
+              ...cardOf(cut),
+              feedback: { opportunityId: cut.id, verdict: null, csrf: CSRF, next: nextId, page: 2 },
+            },
+          ],
+          pagination: { page: 2, pages: 2, offset: 50, listed: 51, limit: 1000 },
+        }),
+      );
+      const start = html.indexOf(`<li id="oferta-${cut.id}">`);
+      const card = html.slice(start, html.indexOf("</article>", start) + "</article>".length);
+      const at = [
+        card.indexOf('class="button"'),
+        card.indexOf(`<summary>${MORE_LABEL}`),
+        card.lastIndexOf("</details>"),
+        card.indexOf('<form method="post" action="/dopasowania/ocena"'),
+        card.indexOf(
+          `<input type="hidden" name="nastepna" value="${nextId}">` +
+            '<input type="hidden" name="strona" value="2">',
+        ),
+        card.indexOf("</form></article>"),
+      ];
+      expect(start).toBeGreaterThanOrEqual(0);
+      expect(at.every((index) => index >= 0)).toBe(true);
+      expect(at).toEqual([...at].sort((a, b) => a - b));
+      expect(html).toContain(`<ol class="matches" start="51"><li id="oferta-${cut.id}">`);
     });
   });
 });
@@ -698,7 +1028,22 @@ describe("profile page notices", () => {
       "c",
       "zapisano",
     ).html;
-    expect(saved).toContain('<p class="notice" role="status">Zapisano zmiany profilu.</p>');
+    // PR-13: when the change takes effect, and the link to see it.
+    expect(saved).toContain(
+      '<p class="notice" role="status">Zapisano zmiany profilu. Lista dopasowań pokazuje ' +
+        "zmiany od razu, e-mail — od jutra. " +
+        '<a href="/dopasowania">Zobacz pasujące zamówienia</a></p>',
+    );
+    const confirm = profilePage(
+      { name: "Jan Kowalski", email: "kontakt@example.invalid", active: true },
+      "c",
+      "wyslano_potwierdzenie",
+    ).html;
+    expect(confirm).toContain(
+      "Zapisano zmiany profilu. Lista dopasowań pokazuje zmiany od razu, e-mail — od jutra. " +
+        "Na nowy adres wysłaliśmy link",
+    );
+    expect(confirm).toContain('<a href="/dopasowania">Zobacz pasujące zamówienia</a></p>');
     const changed = profilePage(
       { name: "Jan Kowalski", email: "kontakt@example.invalid", active: true },
       "c",
@@ -748,13 +1093,83 @@ describe("profile page notices", () => {
 });
 
 describe("copy", () => {
-  it("tells the counties' real effect next to the field", () => {
-    const { html } = settingsPage(values, "c");
-    expect(html).toContain(
-      "Jeden powiat w wierszu, np. warszawski zachodni. Ogłoszenia nie podają jeszcze powiatu — " +
-        "zamówienia dobieramy po województwie, więc zaznacz województwo. Sam powiat bez " +
-        "województwa pokaże tylko zamówienia pasujące jednocześnie kategorią i słowem kluczowym.",
+  // PR-13: counties left the form; stored ones (the operator's) are shown, not editable.
+  it("has no counties field and tells the real effect of stored counties", () => {
+    const plain = settingsPage(values, "c").html;
+    expect(plain).not.toContain('name="counties"');
+    expect(plain).not.toMatch(/powiat/i);
+    const { html } = settingsPage(
+      { ...values, region: REGION_ALL, voivodeships: [] },
+      "c",
+      {},
+      null,
+      false,
+      ["warszawski zachodni", "<b>piaseczyński</b>"],
     );
+    expect(html).toContain(
+      '<p class="note" id="powiaty-uwaga">Obsługa serwisu ustawiła w profilu powiaty: ' +
+        "warszawski zachodni, " +
+        "&lt;b&gt;piaseczyński&lt;/b&gt;. Ogłoszenia nie podają jeszcze powiatu, więc przy " +
+        "„Cała Polska” pokazujemy tylko zamówienia pasujące jednocześnie kategorią i słowem " +
+        "kluczowym. Powiaty zmienia obsługa — odpowiedz na ostatnią wiadomość od nas.</p>",
+    );
+    expect(html).not.toContain('name="counties"');
+    expect(html).not.toMatch(NO_MARKUP_FROM_DATA);
+  });
+
+  // PR-13 minors: with CONTACT_EMAIL set, the note gives the address, in the shared words.
+  it("gives the support address in the counties note when CONTACT_EMAIL is set", () => {
+    const html = settingsPage(
+      values,
+      "c",
+      {},
+      null,
+      false,
+      ["warszawski zachodni"],
+      'pomoc"@example.invalid',
+    ).html;
+    expect(html).toContain(
+      "kluczowym. Powiaty zmienia obsługa. Napisz do obsługi serwisu: " +
+        '<a href="mailto:pomoc&quot;@example.invalid">pomoc&quot;@example.invalid</a>.</p>',
+    );
+    expect(html).not.toContain("odpowiedz na ostatnią wiadomość");
+    // No counties: no note and no address, CONTACT_EMAIL or not.
+    const plain = settingsPage(values, "c", {}, null, false, [], "pomoc@example.invalid").html;
+    expect(plain).not.toMatch(/powiat/i);
+    expect(plain).not.toContain("mailto:");
+  });
+
+  it("describes the region group by the counties note, next to its errors", () => {
+    const counties = ["warszawski zachodni"];
+    const noted = settingsPage(values, "c", {}, null, false, counties).html;
+    expect(noted).toContain('<fieldset aria-describedby="powiaty-uwaga"><legend>');
+    const failed = settingsPage(
+      values,
+      "c",
+      { voivodeships: ["Wybierz co najmniej jedno województwo."] },
+      null,
+      false,
+      counties,
+    ).html;
+    expect(failed).toContain(
+      '<fieldset aria-describedby="powiaty-uwaga wojewodztwo-blad"><legend>',
+    );
+    expect(failed).toContain('id="wojewodztwo-blad"');
+    // Without counties the note id is never referenced.
+    const plain = settingsPage(values, "c", {
+      voivodeships: ["Wybierz co najmniej jedno województwo."],
+    }).html;
+    expect(plain).toContain('<fieldset aria-describedby="wojewodztwo-blad"><legend>');
+    expect(plain).not.toContain("powiaty-uwaga");
+  });
+
+  it("sets the region radios apart from the voivodeship boxes", () => {
+    const { html } = settingsPage(values, "c");
+    expect(html).toContain('<div class="options region"><div class="option"><input type="radio"');
+    expect(html.indexOf('class="options region"')).toBeLessThan(
+      html.indexOf('name="voivodeships"'),
+    );
+    expect(STYLESHEET).toMatch(/\.region\{[^}]*border-bottom:1px solid var\(--line\)/);
   });
 
   it("suggests another browser when a login POST is refused", () => {

@@ -383,13 +383,16 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
 - **Oceny trafności i eksport (PR-12, D-032):** `POST /dopasowania/ocena` — sesja + CSRF +
   `Origin`, pola `csrf`, `oferta` (UUID), `werdykt` (`trafne`/`nietrafne`) i opcjonalne
   `nastepna` (wybiera tylko kotwicę przekierowania; do `Location` trafia tylko po sprawdzeniu
-  wzorca uuid, inaczej jest ignorowane), nic więcej (400);
+  wzorca uuid, inaczej jest ignorowane) i od PR-13 opcjonalne `strona` (numer strony powrotu,
+  ścisły parser jak w URL; zły → strona 1; w `Location` tylko liczba, nigdy wysłany tekst),
+  nic więcej (400);
   ocenić można tylko ofertę wysłaną do profilu sesji albo pasującą do niego teraz (regułami profilu,
   niezależnie od wieku oferty — D-032) — inna
   (także cudza) → 404. Zapis to jeden atomowy upsert (`match_feedback`, para profil–oferta
   unikalna, `ON DELETE CASCADE` z obu stron); w bazie tylko id, werdykt i czasy. Oceny są
   czytane wyłącznie dla profilu sesji. `GET /dopasowania.csv`: tylko z sesją, ta sama lista,
-  ten sam limit wierszy (`MATCHES_SHOWN`) i ten sam slot co `/dopasowania`,
+  ten sam podział na strony (`MATCHES_SHOWN` na stronę, najwyżej 20 stron; od PR-13) i ten sam
+  slot co `/dopasowania`,
   `Content-Disposition: attachment`, `Cache-Control: no-store`; komórka zaczynająca się od
   `=`, `+`, `-`, `@`, tabulatora lub CR dostaje prefiks `'` (OWASP CSV injection — `=1+1`
   zostaje tekstem), cudzysłowy według RFC 4180, brak wartości → pusta komórka (nigdy `0`),
@@ -415,8 +418,11 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   produkcją) nagłówka nie ma. Proxy nie powinno dodawać drugiego nagłówka HSTS.
 - **Znaki sterujące na wejściu (PR-07A, D-028):** nazwa firmy i wpisy list (powiaty, słowa)
   ze znakiem sterującym `\p{Cc}` wewnątrz (np. wklejony tabulator) są odrzucane — w formularzu
-  (błąd przy polu) i w `profile:create` (ścieżka pola, bez wartości); znaki na brzegach są
-  przycinane jak dotąd. Schematy wierszy zapisanych w bazie się nie zmieniają (stary wiersz
+  (błąd przy polu; od PR-13 formularz nie ma powiatów — ustawia je operator, a pole `counties`
+  ze starego formularza → 400 bez zapisu) i w `profile:create` (ścieżka pola, bez wartości);
+  znaki na brzegach są przycinane jak dotąd. Powiaty wpisane SQL-em, których schemat nie
+  przyjmuje, wycofują zapis formularza (409 z kontaktem do obsługi, nie 500; łapany jest
+  tylko `invalid_stored_row`, log: id profilu i ścieżki pól, bez wartości). Schematy wierszy zapisanych w bazie się nie zmieniają (stary wiersz
   dalej się wczytuje); wyjście i tak przechodzi przez `escapeHtml`/`cleanText`.
 - **Bez ogólnego limitu żądań w aplikacji:** tokenów 256-bitowych nie da się zgadnąć, a każde
   żądanie jest ograniczone rozmiarem i czasem; zalew żądań zatrzymuje reverse proxy (PR-07).
@@ -431,7 +437,13 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   ponawiający żądania może je zajmować i inni klienci czekają wtedy albo dostają 503 (reszta stron
   działa). Od PR-07A jedna sesja ma naraz najwyżej 2 żądania `/dopasowania` w toku lub w kolejce;
   trzecie → od razu 429 z `Retry-After` (licznik po id sesji z bazy, nigdy po wartości ciasteczka;
-  D-028) — jeden klient nie zajmie całej kolejki, ale wiele sesji nadal może. Dostępne tylko z
+  D-028) — jeden klient nie zajmie całej kolejki, ale wiele sesji nadal może. Od PR-13 strona
+  503 odświeża się sama po 3 s (`<meta http-equiv="refresh">`, bez skryptu, CSP bez zmian; adres
+  zbudowany z odczytanego numeru strony, nigdy z wysłanego tekstu) — jak dotychczasowe ręczne
+  ponowienie po `Retry-After: 5`, więc obciążenie rośnie najwyżej o jedno żądanie na 3 s na
+  otwartą kartę; strona 429 nie odświeża się sama. Numer strony (`?strona`, ≤ 20, ścisły
+  parser) sprawdzany jest przed slotem: zły → 404 bez liczenia; każda strona liczy całą
+  listę, więc koszt żądania się nie zmienia. Dostępne tylko z
   sesją. Limitu na proxy pilot nie ma (Caddy wymaga do tego zewnętrznego modułu — poza zakresem
   PR-07B, D-029).
 - **Reverse proxy (PR-07):** `serve` słucha domyślnie na `127.0.0.1:3000` czystym HTTP; TLS, HSTS i

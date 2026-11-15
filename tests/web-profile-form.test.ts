@@ -1,16 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { CATEGORY_LABELS, MVP_CATEGORIES } from "../src/domain/vocabulary.js";
+import { CATEGORY_LABELS, MVP_CATEGORIES, VOIVODESHIPS } from "../src/domain/vocabulary.js";
 import {
+  correctableInForm,
   FIELD_ORDER,
   formValuesFromStored,
   formValuesFromSubmission,
+  REGION_ALL,
+  REGION_ERRORS,
+  REGION_SELECTED,
   validateProfileForm,
   type ProfileFormValues,
 } from "../src/web/profile-form.js";
 
 /*
  * PR-06B: the profile form's validation with the domain schema and its
- * Polish messages. Pure; pseudonymised data only.
+ * Polish messages. PR-13: no counties field, the explicit region radio.
+ * Pure; pseudonymised data only.
  */
 
 const CURRENT = "kontakt@example.invalid";
@@ -20,8 +25,8 @@ function values(overrides: Partial<ProfileFormValues> = {}): ProfileFormValues {
     name: "Jan Kowalski Elektryka",
     email: CURRENT,
     categories: ["elektryka"],
+    region: REGION_SELECTED,
     voivodeships: ["mazowieckie"],
-    counties: "",
     includeKeywords: "oświetlenie",
     excludeKeywords: "",
     ...overrides,
@@ -39,7 +44,6 @@ describe("validateProfileForm", () => {
     const result = validateProfileForm(
       values({
         name: "  Jan Kowalski  ",
-        counties: "\r\n  warszawski zachodni \r\n\r\npiaseczyński",
         includeKeywords: "oświetlenie\n\n  latarnie uliczne  \n",
         excludeKeywords: "dostawa paliwa",
       }),
@@ -51,7 +55,6 @@ describe("validateProfileForm", () => {
         email: CURRENT,
         categories: ["elektryka"],
         voivodeships: ["mazowieckie"],
-        counties: ["warszawski zachodni", "piaseczyński"],
         includeKeywords: ["oświetlenie", "latarnie uliczne"],
         excludeKeywords: ["dostawa paliwa"],
       },
@@ -60,7 +63,7 @@ describe("validateProfileForm", () => {
 
   it("accepts empty region and keyword lists (no restriction)", () => {
     const result = validateProfileForm(
-      values({ voivodeships: [], counties: " \n ", includeKeywords: "" }),
+      values({ region: REGION_ALL, voivodeships: [], includeKeywords: "" }),
     );
     expect(result.ok).toBe(true);
   });
@@ -88,11 +91,11 @@ describe("validateProfileForm", () => {
   });
 
   it("names the textarea line of a bad entry, counting blank lines", () => {
-    expect(errorsOf(values({ counties: `\n\n${"a".repeat(101)}` }))).toEqual({
-      counties: ["Wiersz 3: najwyżej 100 znaków."],
+    expect(errorsOf(values({ includeKeywords: `\n\n${"a".repeat(101)}` }))).toEqual({
+      includeKeywords: ["Wiersz 3: najwyżej 100 znaków."],
     });
-    expect(errorsOf(values({ counties: "warszawski\r\nx\uD800" }))).toEqual({
-      counties: ["Wiersz 2: wpis zawiera niedozwolone znaki."],
+    expect(errorsOf(values({ excludeKeywords: "paliwo\r\nx\uD800" }))).toEqual({
+      excludeKeywords: ["Wiersz 2: wpis zawiera niedozwolone znaki."],
     });
   });
 
@@ -116,32 +119,6 @@ describe("validateProfileForm", () => {
     expect(errorsOf(values({ excludeKeywords: many }))).toEqual({
       excludeKeywords: ["Wpisz najwyżej 100 słów wykluczających, jedno w wierszu."],
     });
-    expect(errorsOf(values({ counties: many }))).toEqual({
-      counties: ["Wpisz najwyżej 100 powiatów, każdy w osobnym wierszu."],
-    });
-  });
-
-  it("refuses a county entry that is no county name, as profile:create does", () => {
-    expect(
-      errorsOf(values({ counties: "warszawski zachodni\n\npowiat\nm. st.\nPOWIAT " })),
-    ).toEqual({
-      counties: [
-        "Wiersz 3: wpisz nazwę powiatu, np. warszawski zachodni.",
-        "Wiersz 4: wpisz nazwę powiatu, np. warszawski zachodni.",
-        "Wiersz 5: wpisz nazwę powiatu, np. warszawski zachodni.",
-      ],
-    });
-    // Names in their usual spellings stay accepted.
-    const accepted = validateProfileForm(
-      values({
-        counties: "m. st. Warszawa\npowiat piaseczyński\nKraków (miasto na prawach powiatu)",
-      }),
-    );
-    expect(accepted.ok).toBe(true);
-    // An entry the schema already refuses gets the schema's message only.
-    expect(errorsOf(values({ counties: "powiat\uD800" }))).toEqual({
-      counties: ["Wiersz 1: wpis zawiera niedozwolone znaki."],
-    });
   });
 
   it("refuses control characters (a pasted tab) in the name and in every list entry", () => {
@@ -149,16 +126,12 @@ describe("validateProfileForm", () => {
       errorsOf(
         values({
           name: "Jan\tKowalski",
-          counties: "warszawski zachodni\npiase\u0000czyński",
           includeKeywords: "oświetlenie\n\nlatarnie\tuliczne",
           excludeKeywords: "paliwo\u0085",
         }),
       ),
     ).toEqual({
       name: ["Nazwa firmy zawiera znaki sterujące (np. tabulator) — wpisz wartość ponownie."],
-      counties: [
-        "Wiersz 2: wpis zawiera znaki sterujące (np. tabulator) — wpisz wartość ponownie.",
-      ],
       includeKeywords: [
         "Wiersz 3: wpis zawiera znaki sterujące (np. tabulator) — wpisz wartość ponownie.",
       ],
@@ -171,12 +144,6 @@ describe("validateProfileForm", () => {
       validateProfileForm(values({ name: "\tJan Kowalski\t", includeKeywords: "\toświetlenie" }))
         .ok,
     ).toBe(true);
-    // An entry that is only a control character gets one message, not also the county one.
-    expect(errorsOf(values({ counties: "\u0001" }))).toEqual({
-      counties: [
-        "Wiersz 1: wpis zawiera znaki sterujące (np. tabulator) — wpisz wartość ponownie.",
-      ],
-    });
   });
 
   it("shows at most five messages per field and counts the rest", () => {
@@ -195,10 +162,95 @@ describe("validateProfileForm", () => {
 
   it("lists the errors of several fields in the order of the form", () => {
     const errors = errorsOf(
-      values({ excludeKeywords: "---", name: "", categories: [], counties: "a".repeat(101) }),
+      values({ excludeKeywords: "---", name: "", categories: [], voivodeships: ["x"] }),
     );
-    expect(Object.keys(errors)).toEqual(["name", "categories", "counties", "excludeKeywords"]);
+    expect(Object.keys(errors)).toEqual(["name", "categories", "voivodeships", "excludeKeywords"]);
     expect(FIELD_ORDER.filter((field) => field in errors)).toEqual(Object.keys(errors));
+  });
+
+  // PR-13: the region is an explicit choice; with „Cała Polska” the ticked boxes are discarded.
+  describe("the region radio", () => {
+    it("saves the whole country with no voivodeship and the ticked ones otherwise", () => {
+      const all = validateProfileForm(values({ region: REGION_ALL, voivodeships: [] }));
+      if (!all.ok) throw new Error("expected the form to be valid");
+      expect(all.settings.voivodeships).toEqual([]);
+      const selected = validateProfileForm(
+        values({ region: REGION_SELECTED, voivodeships: ["opolskie", "mazowieckie"] }),
+      );
+      if (!selected.ok) throw new Error("expected the form to be valid");
+      expect(selected.settings.voivodeships).toEqual(["opolskie", "mazowieckie"]);
+    });
+
+    it("refuses „Wybrane województwa” with none ticked", () => {
+      expect(errorsOf(values({ region: REGION_SELECTED, voivodeships: [] }))).toEqual({
+        voivodeships: ["Zaznacz co najmniej jedno województwo albo wybierz „Cała Polska”."],
+      });
+    });
+
+    // The owner's decision in the review of PR #19: the page has no script, so boxes
+    // ticked before „Cała Polska” was chosen are still sent; the radio wins.
+    it("saves „Cała Polska” with voivodeships ticked as the whole country, discarding them", () => {
+      for (const voivodeships of [["mazowieckie"], [...VOIVODESHIPS]]) {
+        const result = validateProfileForm(values({ region: REGION_ALL, voivodeships }));
+        if (!result.ok) throw new Error("expected the form to be valid");
+        expect(result.settings.voivodeships).toEqual([]);
+      }
+    });
+
+    it("discards tampered voivodeships with „Cała Polska” unvalidated, storing none", () => {
+      for (const voivodeships of [["Mazowieckie"], ["x", "mazowieckie", "mazowieckie"], [""]]) {
+        const result = validateProfileForm(values({ region: REGION_ALL, voivodeships }));
+        if (!result.ok) throw new Error("expected the form to be valid");
+        expect(result.settings.voivodeships).toEqual([]);
+      }
+    });
+
+    it("still refuses „Wybrane województwa” with none and an unknown choice after discarding", () => {
+      expect(errorsOf(values({ region: REGION_SELECTED, voivodeships: [] }))).toEqual({
+        voivodeships: [REGION_ERRORS.selectedWithout],
+      });
+      expect(errorsOf(values({ region: "wszystkie", voivodeships: ["mazowieckie"] }))).toEqual({
+        voivodeships: [REGION_ERRORS.unknown],
+      });
+      expect(Object.keys(REGION_ERRORS).sort()).toEqual(["selectedWithout", "unknown"]);
+    });
+
+    it("refuses an unknown choice whatever is ticked", () => {
+      for (const region of ["", "ALL", "wszystkie", " all", "selected\n"]) {
+        for (const voivodeships of [[], ["mazowieckie"]]) {
+          expect(errorsOf(values({ region, voivodeships }))).toEqual({
+            voivodeships: [REGION_ERRORS.unknown],
+          });
+        }
+      }
+      expect(REGION_ERRORS.unknown).toBe("Wybierz „Cała Polska” albo „Wybrane województwa”.");
+    });
+
+    it("adds its message after the schema's for an unknown voivodeship", () => {
+      expect(errorsOf(values({ region: "ALL", voivodeships: ["Mazowieckie"] }))).toEqual({
+        voivodeships: ["Wybierz województwa z listy.", REGION_ERRORS.unknown],
+      });
+      // „Wybrane województwa” keeps validating the ticked ones.
+      expect(errorsOf(values({ region: REGION_SELECTED, voivodeships: ["Mazowieckie"] }))).toEqual({
+        voivodeships: ["Wybierz województwa z listy."],
+      });
+    });
+  });
+
+  it("never carries counties: the form leaves the stored ones alone (PR-13)", () => {
+    const result = validateProfileForm(values());
+    if (!result.ok) throw new Error("expected the form to be valid");
+    expect(Object.keys(result.settings).sort()).toEqual(
+      ["categories", "email", "excludeKeywords", "includeKeywords", "name", "voivodeships"].sort(),
+    );
+    expect(FIELD_ORDER).toEqual([
+      "name",
+      "email",
+      "categories",
+      "voivodeships",
+      "includeKeywords",
+      "excludeKeywords",
+    ]);
   });
 
   // D-031: a new address is confirmed by the link sent to it, not by typing it twice.
@@ -218,6 +270,24 @@ describe("validateProfileForm", () => {
   });
 });
 
+// PR-13: a stored profile refused at a field the form does not rewrite needs the operator.
+describe("correctableInForm", () => {
+  it("is true only when every refused path is a field a save rewrites", () => {
+    expect(correctableInForm(["name"])).toBe(true);
+    expect(correctableInForm(["categories", "includeKeywords.0", "excludeKeywords.3"])).toBe(true);
+    expect(correctableInForm(["voivodeships.1"])).toBe(true);
+    expect(correctableInForm(["counties"])).toBe(false);
+    expect(correctableInForm(["counties.0"])).toBe(false);
+    expect(correctableInForm(["includeKeywords.0", "counties.100"])).toBe(false);
+    // A refused stored address stays: a new one only waits as pending.
+    expect(correctableInForm(["email"])).toBe(false);
+    expect(correctableInForm(["active"])).toBe(false);
+    expect(correctableInForm(["(root)"])).toBe(false);
+    expect(correctableInForm(["nameX"])).toBe(false);
+    expect(correctableInForm([])).toBe(false);
+  });
+});
+
 describe("form values", () => {
   it("show the stored lists one per line", () => {
     expect(
@@ -234,11 +304,29 @@ describe("form values", () => {
       name: "Jan Kowalski",
       email: CURRENT,
       categories: ["elektryka", "it"],
+      region: REGION_ALL,
       voivodeships: [],
-      counties: "warszawski zachodni\npiaseczyński",
       includeKeywords: "oświetlenie",
       excludeKeywords: "",
     });
+  });
+
+  it("pre-select „Wybrane województwa” when the profile names voivodeships", () => {
+    const stored = {
+      name: "Jan Kowalski",
+      email: CURRENT,
+      categories: ["elektryka"],
+      voivodeships: ["opolskie"],
+      counties: [],
+      includeKeywords: [],
+      excludeKeywords: [],
+    };
+    expect(formValuesFromStored(stored).region).toBe(REGION_SELECTED);
+    expect(formValuesFromStored({ ...stored, voivodeships: [] }).region).toBe(REGION_ALL);
+    // Counties set by the operator do not change the choice (they are not on the form).
+    expect(
+      formValuesFromStored({ ...stored, voivodeships: [], counties: ["piaseczyński"] }).region,
+    ).toBe(REGION_ALL);
   });
 
   it("take the submitted fields by their form names", () => {
@@ -248,7 +336,7 @@ describe("form values", () => {
           csrf: "c",
           name: "n",
           email: "e",
-          counties: "co",
+          region: "r",
           include_keywords: "ik",
           exclude_keywords: "ek",
         },
@@ -258,8 +346,8 @@ describe("form values", () => {
       name: "n",
       email: "e",
       categories: ["it"],
+      region: "r",
       voivodeships: ["opolskie"],
-      counties: "co",
       includeKeywords: "ik",
       excludeKeywords: "ek",
     });

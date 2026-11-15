@@ -151,7 +151,7 @@ describe.skipIf(skipWithoutDatabase)("self-service access (PostgreSQL)", () => {
       csrf,
       name,
       email,
-      counties: "",
+      region: "selected",
       include_keywords: "oświetlenie",
       exclude_keywords: "",
     });

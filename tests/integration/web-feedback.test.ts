@@ -19,6 +19,7 @@ import type {
 } from "../../src/infrastructure/db/schema.js";
 import { upsertSource } from "../../src/infrastructure/db/sources-repository.js";
 import { createLogger } from "../../src/infrastructure/logger.js";
+import { MORE_LABEL } from "../../src/notifications/card.js";
 import { csrfTokenFor, SESSION_COOKIE } from "../../src/web/session.js";
 import { MATCHES_SHOWN, startWebServer, type WebServer } from "../../src/web/server.js";
 import { createTestSchema, skipWithoutDatabase, type TestSchema } from "./test-database.js";
@@ -588,6 +589,148 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
       expect(annaPage).toContain(`<li id="oferta-${first}"><article><h2>`);
       expect(annaPage.match(/class="nietrafne"/g)).toHaveLength(1);
     });
+
+    // PR-13: „Nietrafne” go last in the whole list, not in each page.
+    it("lists „Nietrafne” offers after every other one, across the pages", async () => {
+      const ids: string[] = [];
+      for (let i = 0; i < MATCHES_SHOWN + 2; i++) ids.push(await offer());
+      const [earliest, second] = ids;
+      if (earliest === undefined || second === undefined) throw new Error("no offers");
+      await rateOffer(schema.db, jan.id, earliest, "not_relevant");
+      await rateOffer(schema.db, jan.id, second, "not_relevant");
+      const { cookie } = await login(jan.id);
+      const order = async (query: string) =>
+        [
+          ...(
+            await (await fetch(`${url}/dopasowania${query}`, { headers: { cookie } })).text()
+          ).matchAll(/<li id="oferta-([0-9a-f-]{36})">/g),
+        ].map((match) => match[1]);
+      const rest = ids.slice(2);
+      expect(await order("")).toEqual(rest.slice(0, MATCHES_SHOWN));
+      expect(await order("?strona=2")).toEqual([earliest, second]);
+    });
+
+    it("returns to the page of the rated card, never to a page it was not sent from", async () => {
+      const ids: string[] = [];
+      for (let i = 0; i < MATCHES_SHOWN + 2; i++) ids.push(await offer());
+      const onSecond = ids[MATCHES_SHOWN] ?? "";
+      const last = ids[MATCHES_SHOWN + 1] ?? "";
+      const { cookie, csrf } = await login(jan.id);
+      const page = await (
+        await fetch(`${url}/dopasowania?strona=2`, { headers: { cookie } })
+      ).text();
+      expect(page).toContain(
+        `<input type="hidden" name="oferta" value="${onSecond}">` +
+          `<input type="hidden" name="nastepna" value="${last}">` +
+          '<input type="hidden" name="strona" value="2">',
+      );
+      const first = await (await fetch(`${url}/dopasowania`, { headers: { cookie } })).text();
+      expect(first).not.toContain('name="strona"');
+      // The last card on page 1 names the first one of page 2 as the next card.
+      expect(first).toContain(
+        `<input type="hidden" name="oferta" value="${ids[MATCHES_SHOWN - 1] ?? ""}">` +
+          `<input type="hidden" name="nastepna" value="${onSecond}">`,
+      );
+
+      const back = await rate(cookie, { csrf, oferta: onSecond, werdykt: "trafne", strona: "2" });
+      expect(back.status).toBe(303);
+      expect(back.headers.get("location")).toBe(`/dopasowania?strona=2#oferta-${onSecond}`);
+      const next = await rate(cookie, {
+        csrf,
+        oferta: onSecond,
+        werdykt: "nietrafne",
+        nastepna: last,
+        strona: "2",
+      });
+      expect(next.headers.get("location")).toBe(`/dopasowania?strona=2#oferta-${last}`);
+      // Page 1 and anything malformed: the first page; the value is never echoed.
+      for (const strona of ["1", "", "0", "01", "-2", "2.0", "1e1", "21", "x", "2#x", "/evil"]) {
+        const response = await rate(cookie, { csrf, oferta: onSecond, werdykt: "trafne", strona });
+        expect(response.status).toBe(303);
+        expect(response.headers.get("location")).toBe(`/dopasowania#oferta-${onSecond}`);
+      }
+      expect(await ratings()).toEqual([
+        { profile_id: jan.id, opportunity_id: onSecond, verdict: "relevant" },
+      ]);
+      // A repeated `strona`: a malformed form, nothing written.
+      const repeated = await post(
+        "/dopasowania/ocena",
+        `csrf=${csrf}&oferta=${onSecond}&werdykt=nietrafne&strona=2&strona=2`,
+        { cookie },
+      );
+      expect(repeated.status).toBe(403);
+      const withNext = await post(
+        "/dopasowania/ocena",
+        `csrf=${csrf}&oferta=${onSecond}&werdykt=nietrafne&strona=2&x=1`,
+        { cookie },
+      );
+      expect(withNext.status).toBe(403);
+      const unknown = await post(
+        "/dopasowania/ocena",
+        `csrf=${csrf}&oferta=${onSecond}&werdykt=nietrafne&x=1`,
+        { cookie },
+      );
+      expect(unknown.status).toBe(400);
+      expect(await ratings()).toEqual([
+        { profile_id: jan.id, opportunity_id: onSecond, verdict: "relevant" },
+      ]);
+    });
+
+    // PR-12 × PR-13: the Location of a „Nietrafne” on page 2 opens page 2 with
+    // the next card on it, each card in the D-030 order with the form last.
+    it("after „Nietrafne” on page 2, opens page 2 at the next card (D-030 card order)", async () => {
+      const ids: string[] = [];
+      for (let i = 0; i < MATCHES_SHOWN + 3; i++) ids.push(await offer());
+      const [rated, next, after] = ids.slice(MATCHES_SHOWN);
+      if (rated === undefined || next === undefined || after === undefined) {
+        throw new Error("no offers");
+      }
+      const { cookie, csrf } = await login(jan.id);
+      const response = await rate(cookie, {
+        csrf,
+        oferta: rated,
+        werdykt: "nietrafne",
+        nastepna: next,
+        strona: "2",
+      });
+      expect(response.status).toBe(303);
+      expect(response.headers.get("location")).toBe(`/dopasowania?strona=2#oferta-${next}`);
+      const html = await (
+        await fetch(`${url}/dopasowania?strona=2`, { headers: { cookie } })
+      ).text();
+      // The rated card went last in the whole list; the next one took its place.
+      const order = [...html.matchAll(/<li id="oferta-([0-9a-f-]{36})">/g)].map(
+        (match) => match[1] ?? "",
+      );
+      expect(order).toEqual([next, after, rated]);
+      for (const id of order) {
+        const start = html.indexOf(`<li id="oferta-${id}">`);
+        const card = html.slice(start, html.indexOf("</article>", start) + "</article>".length);
+        const at = [
+          card.indexOf("<h2>"),
+          card.indexOf('class="button"'),
+          card.indexOf(`<summary>${MORE_LABEL} (`),
+          card.lastIndexOf("</details>"),
+          card.indexOf('<form method="post" action="/dopasowania/ocena"'),
+          card.indexOf('<input type="hidden" name="strona" value="2">'),
+          card.indexOf("</form></article>"),
+        ];
+        expect(at.every((index) => index >= 0)).toBe(true);
+        expect(at).toEqual([...at].sort((a, b) => a - b));
+      }
+      // The page line, the window, this page's CSV, the cards, the pager, the rating note.
+      const layout = [
+        html.indexOf("<p><strong>Strona 2 z 2</strong>: zamówienia 51–53 z 53.</p>"),
+        html.indexOf("<p>Pokazujemy zamówienia dodane do Radaru"),
+        html.indexOf('<a href="/dopasowania.csv?strona=2">Ta strona jako CSV</a>'),
+        html.indexOf('<ol class="matches" start="51">'),
+        html.indexOf("</ol>"),
+        html.indexOf('<nav aria-label="Strony listy">'),
+        html.indexOf("<p>Oceń zamówienia przyciskami"),
+      ];
+      expect(layout.every((index) => index >= 0)).toBe(true);
+      expect(layout).toEqual([...layout].sort((a, b) => a - b));
+    });
   });
 
   describe("GET /dopasowania.csv", () => {
@@ -639,6 +782,50 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
       const file = await (await fetch(`${url}/dopasowania.csv`, { headers: { cookie } })).text();
       // Header, the rows, and the empty string after the last CRLF.
       expect(file.split("\r\n")).toHaveLength(MATCHES_SHOWN + 2);
+    });
+
+    // PR-13: the CSV is the page shown, with the page's number in its name.
+    it("downloads the page asked for, by the same rules as the list", async () => {
+      const ids: string[] = [];
+      for (let i = 0; i < MATCHES_SHOWN + 3; i++) {
+        ids.push(await offer({ title: `Oświetlenie numer ${String(i + 1).padStart(3, "0")}` }));
+      }
+      const { cookie } = await login(jan.id);
+      const csv = (query: string) =>
+        fetch(`${url}/dopasowania.csv${query}`, { headers: { cookie } });
+      const titles = (file: string) =>
+        file
+          .split("\r\n")
+          .slice(1, -1)
+          .map((row) => row.split(";")[0]);
+
+      const first = await csv("");
+      expect(first.headers.get("content-disposition")).toMatch(
+        /^attachment; filename="dopasowania-\d{4}-\d{2}-\d{2}\.csv"$/,
+      );
+      const firstTitles = titles(await first.text());
+      expect(firstTitles).toHaveLength(MATCHES_SHOWN);
+      expect(firstTitles[0]).toBe("Oświetlenie numer 001");
+      expect(firstTitles[MATCHES_SHOWN - 1]).toBe("Oświetlenie numer 050");
+
+      for (const query of ["?strona=2", "?strona=3"]) {
+        const second = await csv(query);
+        expect(second.status).toBe(200);
+        expect(second.headers.get("content-disposition")).toMatch(
+          /^attachment; filename="dopasowania-\d{4}-\d{2}-\d{2}-strona-2\.csv"$/,
+        );
+        expect(titles(await second.text())).toEqual([
+          "Oświetlenie numer 051",
+          "Oświetlenie numer 052",
+          "Oświetlenie numer 053",
+        ]);
+      }
+      expect((await csv("?strona=1")).headers.get("content-disposition")).not.toContain("strona");
+      for (const query of ["?strona=0", "?strona=02", "?strona=21", "?strona=1&strona=2"]) {
+        const refused = await csv(query);
+        expect(refused.status).toBe(404);
+        expect(refused.headers.get("content-type")).toMatch(/^text\/html/);
+      }
     });
 
     it("shows a customer only their own list and ratings", async () => {

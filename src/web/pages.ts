@@ -16,6 +16,8 @@ import { verdictWord } from "./links.js";
 import {
   FIELD_LABELS,
   FIELD_ORDER,
+  REGION_ALL,
+  REGION_SELECTED,
   type ProfileFormErrors,
   type ProfileFormField,
   type ProfileFormValues,
@@ -42,7 +44,11 @@ export interface Page {
  * #f4f7fb 5.8:1, button text #fff on the accent 6.3:1, hints #555 6.9:1;
  * dark — text #e8eaed on #1b2028 13.6:1, accent #8ab4f8 on the card 7.8:1,
  * button text #0b1a2e on the accent 8.3:1, hints #b8bcc2 8.6:1. The card
- * grid falls back to one column under 30rem (a 390 px phone).
+ * grid falls back to one column under 30rem (a 390 px phone). The profile
+ * form's checkboxes and radios (PR-13): three columns, two under 30rem; each
+ * label is a touch target of at least 44 px (WCAG 2.5.5), as are the links of
+ * /dopasowania's pager; a line sets the region radios apart from the
+ * voivodeships.
  */
 export const STYLESHEET = `:root{color-scheme:light dark;--fg:#1a1a1a;--bg:#fff;--card:#f4f7fb;--line:#c3cedb;--accent:#1d5fb4;--on-accent:#fff;--muted:#555;--error:#b00020;--ok:#1a7f37;--ok-bg:#f0f7f1;--warn:#8a6d00;--warn-bg:#fbf6e6}
 @media (prefers-color-scheme:dark){:root{--fg:#e8eaed;--bg:#121417;--card:#1b2028;--line:#3a4452;--accent:#8ab4f8;--on-accent:#0b1a2e;--muted:#b8bcc2;--error:#ff8a80;--ok:#7ee2a8;--ok-bg:#14261a;--warn:#f0c674;--warn-bg:#2a2410}}
@@ -61,12 +67,20 @@ button{font:inherit;padding:.5rem 1rem;cursor:pointer}
 .error-summary{border:.2rem solid var(--error);padding:.5rem 1rem;margin:1rem 0}
 .error-summary h2{font-size:1.1rem;margin:.3rem 0}
 .error{color:var(--error);font-weight:bold;margin:.3rem 0}
-.hint{color:var(--muted);margin:.3rem 0}
-.field{margin:1.2rem 0}
-fieldset{border:1px solid var(--line);margin:1.2rem 0;padding:.5rem 1rem}
+.hint{color:var(--muted);margin:.3rem 0;font-size:.9rem}
+.field{margin:1rem 0}
+fieldset{border:1px solid var(--line);margin:1rem 0;padding:.3rem .6rem}
 legend{font-weight:bold;padding:0 .3rem}
 label{display:block;font-weight:bold}
-.option label{display:inline;font-weight:normal;margin-left:.4rem}
+.options{display:grid;grid-template-columns:repeat(3,1fr);gap:0 .5rem}
+.option{display:flex;align-items:center}
+.option input{flex:none;width:1.2rem;height:1.2rem;margin:0}
+.option label{flex:1;display:flex;align-items:center;min-height:44px;font-weight:normal;line-height:1.25;padding-left:.4rem}
+.primary{min-height:44px;padding:.6rem 2.5rem;border:0;border-radius:.3rem;background:var(--accent);color:var(--on-accent);font-weight:bold}
+.region{border-bottom:1px solid var(--line);padding-bottom:.3rem;margin-bottom:.3rem}
+.pages-status{margin:1.5rem 0 .5rem}
+.pages{display:flex;flex-wrap:wrap;gap:.5rem 1rem;margin:.5rem 0 1.5rem}
+.pages a{display:inline-flex;align-items:center;min-height:44px;padding:0 .8rem;border:1px solid var(--line);border-radius:.3rem}
 input[type=text],input[type=email],textarea{box-sizing:border-box;width:100%;font:inherit;padding:.4rem;color:var(--fg);background:var(--bg);border:1px solid var(--line)}
 [aria-invalid=true]{border:.15rem solid var(--error)}
 .matches{list-style:none;padding:0}
@@ -85,7 +99,7 @@ input[type=text],input[type=email],textarea{box-sizing:border-box;width:100%;fon
 .matches .ocena{margin:.6rem 0 0}
 .matches .ocena p{margin:0 0 .3rem}
 .matches .ocena button{margin-right:.5rem}
-@media (max-width:30rem){.matches dl{grid-template-columns:1fr}.matches dd{margin-bottom:.4rem}}
+@media (max-width:30rem){.matches dl{grid-template-columns:1fr}.matches dd{margin-bottom:.4rem}.options{grid-template-columns:repeat(2,1fr)}}
 nav p{margin:1.5rem 0}
 h2{font-size:1.15rem;margin:1.5rem 0 .3rem}
 `;
@@ -158,22 +172,18 @@ function linkRequestForm(error: LinkRequestError | null = null): string {
  * Counties: kept in the profile, but no source gives an offer's county yet, so
  * they never narrow and never match (src/matching/match.ts, regionReason). A
  * profile with counties and no voivodeship has an unknown region for every
- * offer: only category + keyword reach MATCH_THRESHOLD then.
+ * offer: only category + keyword reach MATCH_THRESHOLD then. Since PR-13 only
+ * the operator sets them (docs/RUNBOOK.md): the form has no counties field, so
+ * no page tells the customer to edit them.
  */
-const COUNTIES_HINT =
-  "Jeden powiat w wierszu, np. warszawski zachodni. Ogłoszenia nie podają jeszcze powiatu — " +
-  "zamówienia dobieramy po województwie, więc zaznacz województwo. Sam powiat bez województwa " +
-  "pokaże tylko zamówienia pasujące jednocześnie kategorią i słowem kluczowym.";
-/** The empty matches page's note on counties, with voivodeships ticked or not. */
 const COUNTIES_NOTE = {
   withVoivodeships:
-    "Wpisane powiaty nie zawężają listy: ogłoszenia nie podają jeszcze powiatu, więc liczy się " +
-    "województwo. Powiat bez zaznaczonego województwa przepuszcza tylko zamówienia pasujące " +
-    "jednocześnie kategorią i słowem kluczowym.",
+    "Powiaty zapisane w profilu nie zawężają listy: ogłoszenia nie podają jeszcze powiatu, " +
+    "więc liczy się województwo.",
   withoutVoivodeships:
-    "Ogłoszenia nie podają jeszcze powiatu, więc same powiaty nie wystarczą: zaznacz " +
-    "województwo w ustawieniach. Bez województwa pokazujemy tylko zamówienia pasujące " +
-    "jednocześnie kategorią i słowem kluczowym.",
+    "Profil ma zapisane powiaty, a ogłoszenia nie podają jeszcze powiatu: bez zaznaczonego " +
+    "województwa pokazujemy tylko zamówienia pasujące jednocześnie kategorią i słowem " +
+    "kluczowym. Wybierz w ustawieniach „Wybrane województwa” i zaznacz województwo.",
 } as const;
 
 /**
@@ -184,7 +194,8 @@ const COUNTIES_NOTE = {
 const RESUBSCRIBE_HINT =
   "Jeśli to pomyłka, odpowiedz na ostatnią wiadomość — włączymy powiadomienia ponownie.";
 
-function layout(title: string, body: readonly string[]): string {
+/** `head`: extra elements of <head> (the 503's refresh); built by this module only. */
+function layout(title: string, body: readonly string[], head: readonly string[] = []): string {
   return [
     "<!doctype html>",
     '<html lang="pl">',
@@ -199,6 +210,7 @@ function layout(title: string, body: readonly string[]): string {
     // The site name once: also in „Błąd: Radar Zamówień”, the home page with a form error.
     `<title>${escapeHtml(title.endsWith(SITE_NAME) ? title : `${title} — ${SITE_NAME}`)}</title>`,
     '<link rel="stylesheet" href="/styl.css">',
+    ...head,
     "</head>",
     "<body>",
     `<header class="site">${link("/", SITE_NAME)}</header>`,
@@ -239,11 +251,18 @@ function backLinks(): string {
   return `<nav><p>${link("/profil", "Twój profil")} · ${link("/", "Strona główna")}</p></nav>`;
 }
 
-function form(action: string, fields: readonly string[], button: string): string {
+/** `buttonClass`: "primary" for the one main action of a page (PR-13: „Zapisz”). */
+function form(
+  action: string,
+  fields: readonly string[],
+  button: string,
+  buttonClass: "primary" | null = null,
+): string {
   return (
     `<form method="post" action="${escapeHtml(action)}">` +
     fields.join("") +
-    `<button type="submit">${escapeHtml(button)}</button></form>`
+    `<button type="submit"${buttonClass === null ? "" : ` class="${buttonClass}"`}>` +
+    `${escapeHtml(button)}</button></form>`
   );
 }
 
@@ -434,9 +453,15 @@ export interface ProfileView {
   readonly pendingEmailExpired?: boolean;
 }
 
+/**
+ * When a saved profile takes effect (PR-13): /dopasowania computes on each
+ * request, the digest goes out once a day.
+ */
+export const SAVED_EFFECT_TEXT = "Lista dopasowań pokazuje zmiany od razu, e-mail — od jutra.";
+
 /** What /profil says once after a form (session.ts, NOTICE_COOKIE). */
 const NOTICE_TEXT: Readonly<Record<Notice, string>> = {
-  zapisano: "Zapisano zmiany profilu.",
+  zapisano: `Zapisano zmiany profilu. ${SAVED_EFFECT_TEXT}`,
   zmieniono_email:
     "Adres e-mail został zmieniony na potwierdzony adres: linki z wcześniejszych wiadomości " +
     "przestały działać, a inne urządzenia zostały wylogowane. Sprawdź poniżej, czy nowy adres " +
@@ -445,10 +470,26 @@ const NOTICE_TEXT: Readonly<Record<Notice, string>> = {
   wlaczono:
     "Włączono powiadomienia. Nowe pasujące zamówienia przyjdą w najbliższej codziennej wiadomości.",
   wyslano_potwierdzenie:
-    "Zapisano zmiany profilu. Na nowy adres wysłaliśmy link potwierdzający, ważny 24 godziny. " +
-    "Do potwierdzenia wiadomości przychodzą na dotychczasowy adres.",
+    `Zapisano zmiany profilu. ${SAVED_EFFECT_TEXT} Na nowy adres wysłaliśmy link ` +
+    "potwierdzający, ważny 24 godziny. Do potwierdzenia wiadomości przychodzą na dotychczasowy " +
+    "adres.",
   anulowano_zmiane: "Anulowano zmianę adresu e-mail. Wysłany link potwierdzający już nie działa.",
 };
+
+/** The link after a saved profile's notice (PR-13): straight to the changed list. */
+const NOTICE_LINK: Partial<Readonly<Record<Notice, string>>> = {
+  zapisano: link("/dopasowania", "Zobacz pasujące zamówienia"),
+  wyslano_potwierdzenie: link("/dopasowania", "Zobacz pasujące zamówienia"),
+};
+
+/** The notice paragraph: its fixed text escaped, then its fixed link, if any. */
+function noticeParagraph(notice: Notice): string {
+  const after = NOTICE_LINK[notice];
+  return (
+    `<p class="notice" role="status">${escapeHtml(NOTICE_TEXT[notice])}` +
+    `${after === undefined ? "" : ` ${after}`}</p>`
+  );
+}
 
 /**
  * „Oczekuje na potwierdzenie” with the „Anuluj zmianę” form (D-031): its own
@@ -482,9 +523,7 @@ export function profilePage(
   return {
     status: 200,
     html: layout("Twój profil", [
-      ...(notice === null
-        ? []
-        : [`<p class="notice" role="status">${escapeHtml(NOTICE_TEXT[notice])}</p>`]),
+      ...(notice === null ? [] : [noticeParagraph(notice)]),
       `<p>Firma: <strong>${escapeHtml(profile.name)}</strong></p>`,
       // Always the current address, so a mistyped change is visible at once.
       `<p>Adres powiadomień: <strong>${escapeHtml(profile.email)}</strong></p>`,
@@ -515,8 +554,8 @@ const FIELD_IDS: Readonly<Record<ProfileFormField, string>> = {
   name: "nazwa",
   email: "email",
   categories: "kategoria-1",
-  voivodeships: "wojewodztwo-1",
-  counties: "powiaty",
+  // The group starts with the region radio (PR-13); its messages are about the choice.
+  voivodeships: "region-polska",
   includeKeywords: "slowa",
   excludeKeywords: "wykluczenia",
 };
@@ -573,38 +612,144 @@ function textarea(name: string, value: string) {
   // A leading newline right after <textarea> is dropped by the parser: one is
   // added, so a value starting with a blank line keeps it.
   return (attributes: string): string =>
-    `<textarea name="${escapeHtml(name)}" rows="5"${attributes}>\n${escapeHtml(value)}</textarea>`;
+    `<textarea name="${escapeHtml(name)}" rows="2"${attributes}>\n${escapeHtml(value)}</textarea>`;
 }
 
-/** A fieldset of checkboxes with a legend, a hint and the group's errors. */
-function checkboxGroup(
-  field: "categories" | "voivodeships",
+/** One checkbox or radio with its label (the label is the ≥ 44 px touch target). */
+function option(
+  type: "checkbox" | "radio",
+  id: string,
   name: string,
-  hintText: string,
+  value: string,
+  label: string,
+  checked: boolean,
+  extra: string,
+): string {
+  return (
+    `<div class="option"><input type="${type}" id="${escapeHtml(id)}" name="${escapeHtml(name)}" ` +
+    `value="${escapeHtml(value)}"${checked ? " checked" : ""}${extra}>` +
+    `<label for="${escapeHtml(id)}">${escapeHtml(label)}</label></div>`
+  );
+}
+
+/** The checkboxes of a group in the grid: ids `<prefix>-1`, `<prefix>-2`, … */
+function checkboxes(
+  prefix: string,
+  name: string,
   options: readonly (readonly [string, string])[],
   checked: readonly string[],
-  errors: ProfileFormErrors,
+  invalid: boolean,
 ): string {
-  const prefix = field === "categories" ? "kategoria" : "wojewodztwo";
+  const extra = invalid ? ' aria-invalid="true"' : "";
+  const boxes = options.map(([value, label], index) =>
+    option(
+      "checkbox",
+      `${prefix}-${String(index + 1)}`,
+      name,
+      value,
+      label,
+      checked.includes(value),
+      extra,
+    ),
+  );
+  return `<div class="options">${boxes.join("")}</div>`;
+}
+
+/**
+ * A fieldset with a legend and an optional hint, then the group's errors and
+ * its controls; the fieldset is described by the hint, `noteId` (a note in
+ * `content`) and the errors.
+ */
+function group(
+  field: "categories" | "voivodeships",
+  prefix: string,
+  hintText: string | null,
+  content: string,
+  errors: ProfileFormErrors,
+  noteId: string | null = null,
+): string {
   const messages = errors[field];
-  const hintId = `${prefix}-opis`;
-  const errorId = `${prefix}-blad`;
-  const ids = messages === undefined ? [hintId] : [hintId, errorId];
-  const boxes = options.map(([value, label], index) => {
-    const id = `${prefix}-${String(index + 1)}`;
-    return (
-      `<div class="option"><input type="checkbox" id="${id}" name="${escapeHtml(name)}" ` +
-      `value="${escapeHtml(value)}"${checked.includes(value) ? " checked" : ""}` +
-      `${messages === undefined ? "" : ' aria-invalid="true"'}>` +
-      `<label for="${id}">${escapeHtml(label)}</label></div>`
-    );
-  });
+  const hintId = hintText === null ? null : `${prefix}-opis`;
+  const errorId = messages === undefined ? null : `${prefix}-blad`;
+  const ids = [hintId, noteId, errorId].filter((id): id is string => id !== null);
   return (
     `<fieldset${describedBy(ids, false)}><legend>${escapeHtml(FIELD_LABELS[field])}</legend>` +
-    hint(hintId, hintText) +
-    (messages === undefined ? "" : fieldErrors(errorId, messages)) +
-    boxes.join("") +
+    (hintId === null || hintText === null ? "" : hint(hintId, hintText)) +
+    (errorId === null ? "" : fieldErrors(errorId, messages)) +
+    content +
     "</fieldset>"
+  );
+}
+
+/** The id of the stored-counties note, which describes the region fieldset (PR-13). */
+const COUNTIES_NOTE_ID = "powiaty-uwaga";
+
+/**
+ * The region (PR-13): an explicit „Cała Polska” / „Wybrane województwa”
+ * radio, then the voivodeships. No script: with „Cała Polska” the server
+ * discards the ticked boxes (validateProfileForm), and a form shown again
+ * after another field's error keeps them as sent — switching back to
+ * „Wybrane województwa” needs no re-ticking, and saving with „Cała Polska”
+ * still stores none. `counties`: set by the operator, shown read-only — they
+ * change what „Cała Polska” matches — with the way to the operator
+ * (`contactEmail`, CONTACT_EMAIL, when set).
+ */
+function regionGroup(
+  values: ProfileFormValues,
+  counties: readonly string[],
+  errors: ProfileFormErrors,
+  contactEmail: string | null,
+): string {
+  const invalid = errors.voivodeships !== undefined;
+  const extra = ` required${invalid ? ' aria-invalid="true"' : ""}`;
+  const radios =
+    '<div class="options region">' +
+    option(
+      "radio",
+      "region-polska",
+      "region",
+      REGION_ALL,
+      "Cała Polska",
+      values.region === REGION_ALL,
+      extra,
+    ) +
+    option(
+      "radio",
+      "region-wybrane",
+      "region",
+      REGION_SELECTED,
+      "Wybrane województwa",
+      values.region === REGION_SELECTED,
+      extra,
+    ) +
+    "</div>";
+  const who =
+    contactEmail === null
+      ? "Powiaty zmienia obsługa — odpowiedz na ostatnią wiadomość od nas."
+      : `Powiaty zmienia obsługa. ${SUPPORT_MAIL_TEXT}: ${mailLink(contactEmail)}.`;
+  const countiesNote =
+    counties.length === 0
+      ? ""
+      : `<p class="note" id="${COUNTIES_NOTE_ID}">Obsługa serwisu ustawiła w profilu powiaty: ` +
+        `${escapeHtml(counties.join(", "))}. Ogłoszenia nie podają jeszcze powiatu, więc przy ` +
+        "„Cała Polska” pokazujemy tylko zamówienia pasujące jednocześnie kategorią i słowem " +
+        `kluczowym. ${who}</p>`;
+  // No hint: the two radio labels say it (PR-13, a shorter form). The note describes the group.
+  return group(
+    "voivodeships",
+    "wojewodztwo",
+    null,
+    countiesNote +
+      radios +
+      checkboxes(
+        "wojewodztwo",
+        "voivodeships",
+        VOIVODESHIPS.map((voivodeship) => [voivodeship, voivodeship] as const),
+        values.voivodeships,
+        invalid,
+      ),
+    errors,
+    counties.length === 0 ? null : COUNTIES_NOTE_ID,
   );
 }
 
@@ -629,7 +774,9 @@ function errorSummary(errors: ProfileFormErrors): string[] {
  * GET /profil/ustawienia (200) and an invalid POST (400, the submitted
  * values shown again, escaped). Nothing is saved until every field is valid.
  * `pendingEmail`: a new address waiting for its confirmation (D-031);
- * `pendingEmailExpired`: its link expired or was revoked.
+ * `pendingEmailExpired`: its link expired or was revoked; `counties`: the
+ * stored counties, set by the operator only (PR-13), shown read-only;
+ * `contactEmail`: CONTACT_EMAIL, named next to them when set.
  */
 export function settingsPage(
   values: ProfileFormValues,
@@ -637,6 +784,8 @@ export function settingsPage(
   errors: ProfileFormErrors = {},
   pendingEmail: string | null = null,
   pendingEmailExpired = false,
+  counties: readonly string[] = [],
+  contactEmail: string | null = null,
 ): Page {
   const invalid = FIELD_ORDER.some((field) => errors[field] !== undefined);
   const fields = [
@@ -654,14 +803,10 @@ export function settingsPage(
       },
       errors,
     ),
-    "<fieldset><legend>Adres e-mail do powiadomień</legend>",
     textControl(
       {
         field: "email",
-        hint:
-          "Na ten adres wysyłamy codzienną wiadomość. Nowy adres zacznie działać dopiero po " +
-          "potwierdzeniu linkiem, który na niego wyślemy (ważnym 24 godziny); wtedy linki " +
-          "z wcześniejszych wiadomości przestaną działać, a inne urządzenia zostaną wylogowane.",
+        hint: "Nowy adres zadziała po potwierdzeniu linkiem.",
         input: textInput(
           "email",
           "email",
@@ -671,37 +816,24 @@ export function settingsPage(
       },
       errors,
     ),
-    "</fieldset>",
-    checkboxGroup(
+    group(
       "categories",
-      "categories",
-      "Wybierz co najmniej jedną. Kategorię zamówienia ustalamy z jego kodów CPV.",
-      MVP_CATEGORIES.map((category) => [category, CATEGORY_LABELS[category]] as const),
-      values.categories,
+      "kategoria",
+      "Co najmniej jedna. Dobieramy po kodach CPV.",
+      checkboxes(
+        "kategoria",
+        "categories",
+        MVP_CATEGORIES.map((category) => [category, CATEGORY_LABELS[category]] as const),
+        values.categories,
+        errors.categories !== undefined,
+      ),
       errors,
     ),
-    checkboxGroup(
-      "voivodeships",
-      "voivodeships",
-      "Nie zaznaczaj żadnego, jeśli interesują Cię zamówienia z całej Polski.",
-      VOIVODESHIPS.map((voivodeship) => [voivodeship, voivodeship] as const),
-      values.voivodeships,
-      errors,
-    ),
-    textControl(
-      {
-        field: "counties",
-        hint: COUNTIES_HINT,
-        input: textarea("counties", values.counties),
-      },
-      errors,
-    ),
+    regionGroup(values, counties, errors, contactEmail),
     textControl(
       {
         field: "includeKeywords",
-        hint:
-          "Jedno słowo lub wyrażenie w wierszu, np. oświetlenie. Szukamy ich w tytule i opisie " +
-          "zamówienia. Najwyżej 100.",
+        hint: "Jedno w wierszu. Szukamy w tytule i opisie.",
         input: textarea("include_keywords", values.includeKeywords),
       },
       errors,
@@ -709,9 +841,7 @@ export function settingsPage(
     textControl(
       {
         field: "excludeKeywords",
-        hint:
-          "Zamówienia z którymkolwiek z tych słów pomijamy. Jedno w wierszu, np. dostawa paliwa. " +
-          "Najwyżej 100.",
+        hint: "Pomijamy zamówienia z tymi słowami.",
         input: textarea("exclude_keywords", values.excludeKeywords),
       },
       errors,
@@ -721,14 +851,37 @@ export function settingsPage(
     status: invalid ? 400 : 200,
     html: layout(invalid ? "Błąd: Ustawienia profilu" : "Ustawienia profilu", [
       ...errorSummary(errors),
-      paragraph("Zmiany obowiązują od najbliższej codziennej wiadomości."),
       ...(pendingEmail === null
         ? []
         : pendingEmailNote(pendingEmail, pendingEmailExpired, hidden("csrf", csrfToken))),
-      form("/profil/ustawienia", fields, "Zapisz"),
+      form("/profil/ustawienia", fields, "Zapisz", "primary"),
       `<nav><p>${link("/profil", "Wróć do profilu bez zapisywania")}</p></nav>`,
     ]),
   };
+}
+
+/**
+ * The URL of a /dopasowania page or of its CSV (PR-13): page 1 has no
+ * parameter (the canonical form), the others `?strona=N`. Built from the
+ * parsed number only, never from the request's text.
+ */
+export function matchesHref(page: number, kind: "page" | "csv" = "page"): string {
+  const path = kind === "page" ? "/dopasowania" : "/dopasowania.csv";
+  return page <= 1 ? path : `${path}?strona=${String(page)}`;
+}
+
+/** Which page of the list /dopasowania shows (PR-13). */
+export interface MatchesPagination {
+  /** 1-based, at most `pages`. */
+  readonly page: number;
+  /** At least 1 (an empty list is one empty page). */
+  readonly pages: number;
+  /** The index of the page's first offer in the whole list (0-based). */
+  readonly offset: number;
+  /** Offers on all pages together (at most `limit`). */
+  readonly listed: number;
+  /** Most offers on all pages (the page limit × offers per page). */
+  readonly limit: number;
 }
 
 export interface MatchesView {
@@ -741,9 +894,10 @@ export interface MatchesView {
   readonly stateAt: string;
   /** How many days back "new" goes (DIGEST_NEW_DAYS). */
   readonly windowDays: number;
-  /** The shown offers' cards: soonest deadline first, those rated „Nietrafne” last. */
+  /** This page's cards: soonest deadline first, those rated „Nietrafne” last (whole list). */
   readonly items: readonly MatchesItem[];
-  /** Matching offers beyond the shown ones. */
+  readonly pagination: MatchesPagination;
+  /** Matching offers beyond the page limit (on no page). */
   readonly more: number;
   /** The candidate limit was reached: some offers were not considered. */
   readonly truncated: boolean;
@@ -761,6 +915,11 @@ export interface CardFeedback {
    * returns after „Nietrafne”, which moves this card to the end (`nastepna`).
    */
   readonly next: string | null;
+  /**
+   * The list page the card is on (PR-13): the rating returns there
+   * (`strona`). Absent or 1: no field, page 1.
+   */
+  readonly page?: number;
 }
 
 /** A card of /dopasowania: with the rating buttons when `feedback` is given. */
@@ -791,6 +950,9 @@ function feedbackForm(title: string, feedback: CardFeedback): string {
     hidden("csrf", feedback.csrf) +
     hidden("oferta", feedback.opportunityId) +
     (feedback.next === null ? "" : hidden("nastepna", feedback.next)) +
+    (feedback.page === undefined || feedback.page <= 1
+      ? ""
+      : hidden("strona", String(feedback.page))) +
     button("relevant", RATE_RELEVANT_LABEL) +
     button("not_relevant", RATE_NOT_RELEVANT_LABEL) +
     "</form>"
@@ -856,10 +1018,38 @@ function cardItem(card: MatchesItem): string {
 }
 
 /**
+ * Under a list of more than one page (PR-13): „Strona X z Y” on its own
+ * line, then „← Poprzednia” / „Następna →”, each a ≥ 44 px touch target. The
+ * only links with `rel` (the line above the list has a plain one).
+ */
+function pager(pagination: MatchesPagination): string {
+  const { page, pages } = pagination;
+  const links = [
+    ...(page > 1
+      ? [`<a href="${escapeHtml(matchesHref(page - 1))}" rel="prev">← Poprzednia strona</a>`]
+      : []),
+    ...(page < pages
+      ? [`<a href="${escapeHtml(matchesHref(page + 1))}" rel="next">${NEXT_PAGE_LABEL} →</a>`]
+      : []),
+  ];
+  return (
+    '<nav aria-label="Strony listy">' +
+    `<p class="pages-status">Strona ${String(page)} z ${String(pages)}</p>` +
+    `<p class="pages">${links.join("")}</p></nav>`
+  );
+}
+
+const NEXT_PAGE_LABEL = "Następna strona";
+const CSV_LIST_LABEL = "Pobierz listę jako CSV";
+const CSV_PAGE_LABEL = "Ta strona jako CSV";
+
+/**
  * GET /dopasowania: the offers matching the profile now, by the digest's
- * candidates and rules (D-027), shown the way the digest shows them.
+ * candidates and rules (D-027), shown the way the digest shows them; a page
+ * of MATCHES_SHOWN at a time (PR-13).
  */
 export function matchesPage(view: MatchesView): Page {
+  const { page, pages, offset, listed, limit } = view.pagination;
   const days = `${String(view.windowDays)} dni`;
   const window =
     `Pokazujemy zamówienia dodane do Radaru w ciągu ostatnich ${days}, których termin ` +
@@ -874,8 +1064,7 @@ export function matchesPage(view: MatchesView): Page {
   if (view.items.length === 0) {
     // No voivodeship ticked already means the whole country: adding one narrows.
     const widen = view.hasVoivodeships
-      ? "dodaj kategorie, słowa kluczowe lub województwa (albo odznacz wszystkie województwa, " +
-        "aby szukać w całej Polsce)"
+      ? "dodaj kategorie, słowa kluczowe lub województwa (albo wybierz „Cała Polska”)"
       : "dodaj kategorie lub słowa kluczowe";
     body.push(
       paragraph(`Brak pasujących zamówień. ${window}`),
@@ -894,37 +1083,53 @@ export function matchesPage(view: MatchesView): Page {
         : []),
     );
   } else {
+    const first = offset + 1;
+    const last = offset + view.items.length;
+    const range = `${String(first)}–${String(last)}`;
     body.push(
+      ...(pages > 1
+        ? [
+            `<p><strong>Strona ${String(page)} z ${String(pages)}</strong>: zamówienia ${range} ` +
+              `z ${String(listed + view.more)}.` +
+              (page < pages ? ` ${link(matchesHref(page + 1), `${NEXT_PAGE_LABEL} →`)}` : "") +
+              "</p>",
+          ]
+        : []),
       // Short above the list, so the first card's button stays on a phone's first screen.
       paragraph(
         `${window} Najbliższy termin na górze. Stan na ${view.stateAt} (czas polski). ` +
           "Lista obejmuje także zamówienia, które już wysłaliśmy e-mailem.",
       ),
-      // One line on a 390 px phone; with more offers, one parenthesis says the CSV holds the shown ones.
-      `<p>${link("/dopasowania.csv", "Pobierz listę jako CSV")} (Excel, Arkusze Google` +
-        (view.more > 0
-          ? `; pierwsze ${String(view.items.length)} z ${String(view.items.length + view.more)} ` +
-            "— zawęź profil, aby mieć wszystkie"
-          : "") +
-        ").</p>",
-      `<ol class="matches">${view.items.map(cardItem).join("")}</ol>`,
+      // The CSV is the page shown (the same rows): one file per page. One line on a
+      // 390 px phone (≈ 335 of 358 px; „Pobierz tę stronę jako CSV …” would wrap);
+      // the page line above already gives the page's range.
+      `<p>${link(matchesHref(page, "csv"), pages > 1 ? CSV_PAGE_LABEL : CSV_LIST_LABEL)} ` +
+        "(Excel, Arkusze Google).</p>",
+      `<ol class="matches"${offset > 0 ? ` start="${String(first)}"` : ""}>` +
+        `${view.items.map(cardItem).join("")}</ol>`,
     );
-    if (view.more > 0) {
+    // Offers beyond the page limit are on no page: said once, after the last one.
+    if (view.more > 0 && page === pages) {
+      // Genitive after the negation: „nie pokazujemy 1 kolejnego … / 3 kolejnych …”.
       const offers = plural(
         view.more,
-        "pasujące zamówienie",
-        "pasujące zamówienia",
+        "pasującego zamówienia",
+        "pasujących zamówień",
         "pasujących zamówień",
       );
       body.push(
         paragraph(
-          `I ${String(view.more)} ${plural(view.more, "kolejne", "kolejne", "kolejnych")} ` +
+          `Lista kończy się na ${String(limit)} zamówieniach. Nie pokazujemy ${String(view.more)} ` +
+            `${plural(view.more, "kolejnego", "kolejnych", "kolejnych")} ` +
             `${offers} z dalszym terminem lub ` +
-            `${plural(view.more, "ocenione", "ocenione", "ocenionych")} jako nietrafne. ` +
+            `${plural(view.more, "ocenionego", "ocenionych", "ocenionych")} jako nietrafne. ` +
             "Aby lista była krótsza, zawęź profil, np. słowami wykluczającymi.",
         ),
       );
     }
+    // The pager right under the list, where a page is finished; the notes about
+    // the whole list (rating, data) after it.
+    if (pages > 1) body.push(pager(view.pagination));
     body.push(
       // Under the list: each card asks „Czy to zamówienie pasuje?” itself.
       paragraph(
@@ -980,8 +1185,33 @@ export function examplePage(view: ExampleView): Page {
   };
 }
 
-/** /dopasowania for a stored profile the schema refuses: it must be corrected first. */
-export function matchesUnavailablePage(): Page {
+/** The sentence before CONTACT_EMAIL wherever only the operator can help (PR-13). */
+const SUPPORT_MAIL_TEXT = "Napisz do obsługi serwisu";
+
+/**
+ * Where to turn when only the operator can correct the stored profile
+ * (PR-13): CONTACT_EMAIL when set, else a reply to our last e-mail.
+ */
+function supportContact(contactEmail: string | null): string {
+  return contactEmail === null
+    ? paragraph("Odpowiedz na ostatnią wiadomość od nas — obsługa serwisu poprawi profil.")
+    : `<p>${SUPPORT_MAIL_TEXT}: ${mailLink(contactEmail)}.</p>`;
+}
+
+/** What only the operator can correct, in the customer's words (PR-13). */
+const OPERATOR_SETTING_TEXT =
+  "Profil zawiera ustawienie, które może poprawić tylko obsługa serwisu (na przykład powiaty)";
+
+/**
+ * /dopasowania for a stored profile the schema refuses: it must be corrected
+ * first. `correctable` (correctableInForm): in the settings form; otherwise
+ * (PR-13: e.g. counties, set by the operator only) by the operator, reached
+ * at `contactEmail` (CONTACT_EMAIL) when set.
+ */
+export function matchesUnavailablePage(
+  correctable = true,
+  contactEmail: string | null = null,
+): Page {
   return {
     status: 200,
     html: layout("Pasujące zamówienia", [
@@ -989,33 +1219,75 @@ export function matchesUnavailablePage(): Page {
         "Zapisany profil jest niekompletny albo zawiera niedozwolone wartości, więc nie możemy " +
           "dobrać do niego zamówień.",
       ),
-      `<p>Popraw go w ${link("/profil/ustawienia", "ustawieniach profilu")}.</p>`,
-    ]),
-  };
-}
-
-/** 503 on /dopasowania while this server computes another list (one at a time, D-027). */
-export function matchesBusyPage(): Page {
-  return {
-    status: 503,
-    html: layout("Pasujące zamówienia", [
-      paragraph("Trwa przygotowanie listy dopasowań — spróbuj za kilka sekund."),
-      `<p>${link("/dopasowania", "Spróbuj ponownie")}</p>`,
+      correctable
+        ? `<p>Popraw go w ${link("/profil/ustawienia", "ustawieniach profilu")}.</p>`
+        : paragraph(`${OPERATOR_SETTING_TEXT}.`) + supportContact(contactEmail),
       backLinks(),
     ]),
   };
 }
 
-/** 429: this session already has MATCHES_MAX_PER_SESSION /dopasowania requests in progress. */
-export function matchesTooManyPage(): Page {
+/**
+ * 409 on POST /profil/ustawienia (PR-13): the form was valid, but the stored
+ * profile keeps a value the form does not rewrite (operator-set counties)
+ * that the schema refuses — nothing was saved. Not a 500: the request is
+ * fine and a retry fails the same way until the operator corrects the row.
+ */
+export function profileSaveBlockedPage(contactEmail: string | null = null): Page {
+  return {
+    status: 409,
+    html: layout("Nie zapisano zmian", [
+      paragraph(
+        `${OPERATOR_SETTING_TEXT}. Dopóki go nie poprawi, zmian w formularzu nie da się zapisać.`,
+      ),
+      supportContact(contactEmail),
+      backLinks(),
+    ]),
+  };
+}
+
+/** Seconds before the 503 page of /dopasowania reloads itself (PR-13). */
+export const MATCHES_REFRESH_SECONDS = 3;
+
+/**
+ * 503 on /dopasowania while this server computes another list (one at a
+ * time, D-027): a waiting page that reloads the same URL (`href`, the same
+ * page or CSV, built by matchesHref) on its own after
+ * MATCHES_REFRESH_SECONDS — a meta refresh, no script (PR-13). `kind`: what
+ * `href` is — for the CSV the text speaks of the file (the reload downloads
+ * it).
+ */
+export function matchesBusyPage(href: string, kind: "page" | "csv" = "page"): Page {
+  const [text, action] =
+    kind === "page"
+      ? ["Liczymy listę… strona odświeży się sama za kilka sekund.", "Odśwież teraz"]
+      : ["Przygotowujemy plik… pobierze się sam za kilka sekund.", "Pobierz teraz"];
+  return {
+    status: 503,
+    html: layout(
+      "Pasujące zamówienia",
+      [paragraph(text), `<p>${link(href, action)}</p>`, backLinks()],
+      [
+        `<meta http-equiv="refresh" content="${String(MATCHES_REFRESH_SECONDS)}; url=${escapeHtml(href)}">`,
+      ],
+    ),
+  };
+}
+
+/**
+ * 429: this session already has MATCHES_MAX_PER_SESSION /dopasowania
+ * requests in progress — in plain words, with the way back to `href`
+ * (matchesHref). No refresh: the other tab is the one computing.
+ */
+export function matchesTooManyPage(href: string): Page {
   return {
     status: 429,
     html: layout("Pasujące zamówienia", [
       paragraph(
-        "Lista dopasowań już się przygotowuje (np. w innej karcie albo po odświeżeniu " +
-          "strony) — poczekaj kilka sekund i spróbuj ponownie.",
+        "Ta lista już się przygotowuje (np. w innej karcie albo po odświeżeniu). Poczekaj " +
+          "chwilę i otwórz ją ponownie.",
       ),
-      `<p>${link("/dopasowania", "Spróbuj ponownie")}</p>`,
+      `<p>${link(href, "Otwórz listę ponownie")}</p>`,
       backLinks(),
     ]),
   };
