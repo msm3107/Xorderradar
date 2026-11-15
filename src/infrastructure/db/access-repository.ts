@@ -21,11 +21,14 @@ export const UNSUBSCRIBE_TOKEN_TTL_MS = 1440 * HOUR_MS;
 export const SESSION_TTL_MS = 720 * HOUR_MS;
 /** The confirmation link of a new address (D-031): single use, 24 hours. */
 export const EMAIL_CHANGE_TOKEN_TTL_MS = 24 * HOUR_MS;
+/** The rating links of one digest (D-032): reusable, 60 days, like the unsubscribe link. */
+export const FEEDBACK_TOKEN_TTL_MS = 1440 * HOUR_MS;
 
 const TOKEN_TTL_MS: Readonly<Record<AccessTokenPurpose, number>> = {
   login: LOGIN_TOKEN_TTL_MS,
   unsubscribe: UNSUBSCRIBE_TOKEN_TTL_MS,
   email_change: EMAIL_CHANGE_TOKEN_TTL_MS,
+  feedback: FEEDBACK_TOKEN_TTL_MS,
 };
 
 /**
@@ -99,18 +102,27 @@ async function insertToken(
   return { token, expiresAt: row.expires_at };
 }
 
+/** The tokens of one digest e-mail (issueDigestTokens). */
+export interface DigestTokens {
+  readonly login: IssuedToken;
+  readonly unsubscribe: IssuedToken;
+  /** The e-mail's rating links „Trafne”/„Nietrafne” (D-032): one token for all its offers. */
+  readonly feedback: IssuedToken;
+}
+
 /**
- * The two links of one digest e-mail (D-027), issued only while the profile
- * still has `email`, the address the e-mail goes to. The profile row is
- * locked FOR SHARE first: an e-mail change in progress (FOR NO KEY UPDATE)
- * is waited for, and the row is then read again with its new address. null
- * when the address differs (or the profile is gone): nothing is issued.
+ * The links of one digest e-mail (D-027, D-032), issued only while the
+ * profile still has `email`, the address the e-mail goes to. The profile row
+ * is locked FOR SHARE first: an e-mail change in progress (FOR NO KEY
+ * UPDATE) is waited for, and the row is then read again with its new
+ * address. null when the address differs (or the profile is gone): nothing
+ * is issued.
  */
 export async function issueDigestTokens(
   db: Kysely<Database>,
   profileId: string,
   email: string,
-): Promise<{ readonly login: IssuedToken; readonly unsubscribe: IssuedToken } | null> {
+): Promise<DigestTokens | null> {
   return db.transaction().execute(async (trx) => {
     const profile = await trx
       .selectFrom("company_profiles")
@@ -121,7 +133,8 @@ export async function issueDigestTokens(
       .executeTakeFirst();
     if (profile === undefined) return null;
     const login = await issueAccessToken(trx, profileId, "login");
-    return { login, unsubscribe: await issueAccessToken(trx, profileId, "unsubscribe") };
+    const unsubscribe = await issueAccessToken(trx, profileId, "unsubscribe");
+    return { login, unsubscribe, feedback: await issueAccessToken(trx, profileId, "feedback") };
   });
 }
 
@@ -614,8 +627,8 @@ export interface RevokedAccess {
 }
 
 /**
- * `access:revoke`: deletes every token (login, unsubscribe and an address
- * confirmation; used or not) and every session of the profile, in one
+ * `access:revoke`: deletes every token (login, unsubscribe, rating links and
+ * an address confirmation; used or not) and every session of the profile, in one
  * transaction, so each e-mail link and signed-in browser stops working at
  * once (a forwarded digest, a lost device; D-026). The profile row itself is
  * not touched: a pending address stays until cancelled or saved again.

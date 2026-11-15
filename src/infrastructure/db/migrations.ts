@@ -381,4 +381,47 @@ export const migrations: Readonly<Record<string, Migration>> = {
       );
     },
   },
+  "0009_match_feedback": {
+    async up(db: Kysely<unknown>) {
+      // The rating links of a digest (D-032): purpose `feedback`, reusable
+      // like an unsubscribe link and as long (60 days: the ELSE branch of the
+      // expiry check), one per e-mail. Never used up, so used_at stays a
+      // login-only column and the expiry and email checks stay as they are.
+      await sql`
+        ALTER TABLE access_tokens
+          DROP CONSTRAINT access_tokens_purpose_check,
+          ADD CONSTRAINT access_tokens_purpose_check
+            CHECK (purpose IN ('login', 'unsubscribe', 'email_change', 'feedback'))
+      `.execute(db);
+
+      // A customer's rating of one offer for one profile (PR-12, D-032): one
+      // row per pair, changed in place (INSERT … ON CONFLICT DO UPDATE).
+      // Only the verdict and its times — no title, no address. Deleting the
+      // profile deletes its ratings; offers are never deleted, the cascade
+      // only keeps a manual cleanup possible.
+      await sql`
+        CREATE TABLE match_feedback (
+          profile_id uuid NOT NULL,
+          opportunity_id uuid NOT NULL,
+          verdict text NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT match_feedback_pkey PRIMARY KEY (profile_id, opportunity_id),
+          CONSTRAINT match_feedback_profile_id_fkey
+            FOREIGN KEY (profile_id) REFERENCES company_profiles (id) ON DELETE CASCADE,
+          CONSTRAINT match_feedback_opportunity_id_fkey
+            FOREIGN KEY (opportunity_id) REFERENCES opportunities (id) ON DELETE CASCADE,
+          CONSTRAINT match_feedback_verdict_check CHECK (verdict IN ('relevant', 'not_relevant')),
+          CONSTRAINT match_feedback_updated_at_check CHECK (updated_at >= created_at)
+        )
+      `.execute(db);
+      // `feedback:report --since`; the cascade from opportunities.
+      await sql`CREATE INDEX match_feedback_updated_at_idx ON match_feedback (updated_at)`.execute(
+        db,
+      );
+      await sql`
+        CREATE INDEX match_feedback_opportunity_id_idx ON match_feedback (opportunity_id)
+      `.execute(db);
+    },
+  },
 };

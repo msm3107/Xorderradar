@@ -1,14 +1,21 @@
 # Current State
 
 Current phase: PHASE 4 — PILOT
-Current PR: PR-11 — Karta oferty do oceny w 20 sekund (UX/QOL series PR-10 – PR-13)
+Current PR: PR-12 — Ocena trafności i eksport (UX/QOL series PR-10 – PR-13)
 Status: PR-08 **MERGED in PR #14 (366618e)**. PR-09 **MERGED in PR #15 (42dd008)**. PR-10
 (first PR of the UX/QOL series from the independent UX audit of 2026-11-06; plan in
 `docs/PR_PLAN.md` → PR-10 – PR-13, `docs/LAUNCH_ROADMAP.md` → 3d) **MERGED in PR #16
-(3b70f94)**. PR-11 **open as PR #17**: owner review 2026-11-12 PASS + 2 QoL changes (card
-order for the phone, a name-free `/przyklad` contact) implemented; Code & Safety Review PASS,
-Quality Review ACCEPT. Owner steps on the VPS for PR-08 (AC1, `bk` backfill, DEPLOY §6) remain
-in Blockers.
+(3b70f94)**. PR-11 **MERGED in PR #17 (b974984)** after the owner's review 2026-11-12 (card
+order for the phone — D-030 „Kolejność karty oferty”; a name-free `/przyklad` contact). PR-12
+**READY locally for review** (branch `pr-12-local`; Code & Safety Review PASS round 2, Quality
+Review ACCEPT); the base branch with PR #17 merged in 2026-11-12 (the rating links/buttons end
+the D-030 card): C&S PASS (merge) and re-check PASS after M1; Quality Review ACCEPT (merge) and re-check
+ACCEPT with its M1 implemented (a shorter `/dopasowania` intro); opened as PR #18. Owner review
+of PR #18 (2026-11-12): PASS; the owner-review round (delivery coverage in `feedback:report`,
+decision 1) is implemented: Code & Safety Review PASS (its L1/L2 doc notes done), Quality
+Review ACCEPT (its M1–M3 and O2 doc notes done, O1 left to the owner), `pnpm check` green
+(2274 tests); pushed to PR #18. Owner steps on the
+VPS for PR-08 (AC1, `bk` backfill, DEPLOY §6) remain in Blockers.
 
 ## Completed
 
@@ -685,7 +692,123 @@ Round-1 fixes:
 
 ## In progress
 
-**PR-11 — Karta oferty do oceny w 20 sekund** (`docs/PR_PLAN.md` → PR-11) — READY locally
+**PR-12 — Ocena trafności i eksport** (`docs/PR_PLAN.md` → PR-12) — implemented locally on top
+of PR-11 (`pr-12-local`), `pnpm check` green (2274 tests in 65 files after the owner-review
+round; 2268 after the base merge of 2026-11-12; 2224 before). Code & Safety Review
+PASS (round 2, after the minors and nits fix below), Quality Review ACCEPT. Follow-up (C&S
+round 2, optional): pin the `nastepna` CR/LF rejection with an integration test (the uuid
+check already rejects it). D-032 new; RUNBOOK, README, ARCHITECTURE, SECURITY, DEPLOY, `docs/LAUNCH_ROADMAP.md`
+(stage 4) and `deploy/caddy/Caddyfile` updated. No new dependency.
+
+- Migration `0009_match_feedback`: table `match_feedback` (`profile_id`, `opportunity_id` —
+  primary key, both `ON DELETE CASCADE`; `verdict` `relevant`/`not_relevant` CHECK;
+  `created_at`, `updated_at`) and the `feedback` purpose in `access_tokens`' purpose CHECK.
+  `src/infrastructure/db/feedback-repository.ts`: one atomic upsert
+  (`INSERT … SELECT … ON CONFLICT DO UPDATE`, `updated_at` moves only when the verdict
+  changes), verdicts of a list in one query, counts for the report.
+- Rating links in the digest (with `PUBLIC_BASE_URL`): one `feedback` token per e-mail
+  (multi-use, 60 days, hashed), plain links „Trafne”/„Nietrafne” with accessible labels in the
+  text and HTML card. `GET`/`HEAD /ocena/<token>/<oppId>/<trafne|nietrafne>` only reads
+  (page with a button, `no-store`, `Referrer-Policy: strict-origin`); `POST` checks the token,
+  the delivery (`pending`/`sent`) of that offer to the token's profile and upserts in one
+  statement; the login-CSRF check (`Origin`/`Sec-Fetch-Site`) applies. A bad shape, unknown,
+  expired or other-purpose token, foreign or unknown offer, bad verdict → the same 404 body.
+  `access:revoke` and the address confirmation delete the token with the others.
+- `/dopasowania`: buttons „Trafne”/„Nietrafne” per card (`POST /dopasowania/ocena`, session +
+  CSRF + `Origin`, fields `csrf`/`oferta`/`werdykt`, 303 to `#oferta-<id>`); allowed for an
+  offer sent to the profile or matching it now, else 404. Offers rated „nietrafne” greyed and
+  moved to the end before the cut to 50 (so they are the first to fall off a long list). Link
+  „Pobierz listę jako CSV” above the list (renamed in the post-merge round below).
+- `GET /dopasowania.csv` (session, the same list, order, limit and slot as the page):
+  `;`, UTF-8 BOM, CRLF, RFC 4180 quoting, formula neutralisation (`'` before `= + - @` TAB
+  CR), missing → empty cell, decimal comma, attachment + `no-store`.
+- `feedback:report [--since YYYY-MM-DD]`: one JSON line, `total`/`profiles`/`categories`
+  with `ratings`, `relevant`, `notRelevant`, `precision` (null with zero ratings); `--since` is
+  the Warsaw day start compared with `updated_at`; exit 1 database/schema, 2 usage.
+- The outbox `.json` copy also redacts `/ocena/<token>` (`redactTokenLinks`); Caddy
+  `log_skip` and the log filters cover `/ocena/*`.
+- Tests: `tests/feedback-report.test.ts` (17), `tests/web-csv.test.ts` (11),
+  `tests/integration/web-feedback.test.ts` (20: AC1 GET/HEAD write nothing, AC2 18 refused paths
+  × GET/POST with one 404 body, AC3 repeat/concurrent POST leaves one row, AC4 `=1+1` as text,
+  tenant isolation of rating, list order and CSV, CSRF/Origin, cascade, report);
+  additions in `tests/digest.test.ts` (4), `tests/web-pages.test.ts` (7),
+  `tests/email-sender.test.ts` (1). 2217 tests (+60 over PR-11).
+- Changed tracked assertions (list/contract additions only, nothing weakened):
+  `tests/deploy-artifacts.test.ts` (`@token path` and the `REDACT` filter gain `ocena`, the JS
+  mirror of the pattern too; new expectations for a rating path and `/dopasowania/ocena`);
+  `tests/integration/backup-restore.test.ts` (`tables` 10 → 11, `match_feedback` in the
+  snapshot, seed and restored counts); `tests/integration/digest.test.ts` (the stored-tokens
+  `toEqual` gains the `feedback` row; no-leak asserts for it); migration-name lists in
+  `tests/integration/migrations.test.ts` (3 lists + the tables list gains `match_feedback`),
+  `tests/integration/cli-database.test.ts` (2) and `tests/integration/ingestion.test.ts` (1)
+  gain `0009_match_feedback`.
+- Review fix round (C&S PASS lows L1–L4, Quality ACCEPT minors M1–M4 and nits N1–N7):
+  D-032 defines „pasuje teraz” (the profile's rules, whatever the offer's age; effect limited
+  to the customer's own ratings and own report row) (L1); README/SECURITY wording (L2, L3);
+  `pnpm audit` in Last verification (L4). After „Nietrafne” `/dopasowania` returns to the
+  anchor of the card that followed (optional hidden `nastepna`, lowercase uuid only, else the
+  rated card; never chooses the rated offer) (M1); CSV „Źródło” = „Biuletyn Zamówień
+  Publicznych” for `bzp` rows, BK attribution as before, other sources empty (M2); mail rating
+  links as outlined tap targets with a gap (inline styles; the text part unchanged) (M3); the
+  CSV link says „(pierwsze 50 z N — zawęź profil, aby mieć wszystkie)” when more match (M4);
+  the saved page says the tab can be closed and links `/dopasowania` (N1); digest footer: the
+  links „otwierają stronę, na której jednym przyciskiem zapiszesz ocenę” (N2); the overflow
+  notice counts offers rated „nietrafne” too (N3); a valid link whose verdict is already stored
+  shows „To zamówienie ma już ocenę: …” and only the opposite button (N4); the `/ocena/…` 404
+  adds „Zamówienia ocenisz też na stronie „Pasujące zamówienia” po zalogowaniu.” for every
+  failure alike (N5; the 18-path identity test unchanged and passing); the current verdict's
+  button has `aria-pressed="true"` and bold text, the other `aria-pressed="false"` (N7).
+  `feedbackConfirmPage` takes one view object (its PR-12 unit tests adapted to the call,
+  assertions kept).
+  Tests added: `tests/integration/web-feedback.test.ts` (+2: `nastepna` valid/invalid/absent,
+  already-rated link page; +1 assertion on the shared 404 hint), `tests/web-pages.test.ts`
+  (+4: pressed buttons, `nastepna` field, CSV note, already-rated page; +2 assertions on the
+  saved page and the opposite form), `tests/web-csv.test.ts` (+1: BZP name, unknown source
+  empty). 2224 tests (+7).
+  Changed tracked assertions in this round (requested wording/contract changes, exact
+  replacements): the overflow notice („…z dalszym terminem lub ocenione/ocenionych jako
+  nietrafne.”) in `tests/web-pages.test.ts` (3 strings, from PR-06B/PR-09) and
+  `tests/integration/web-profile.test.ts` (1); the BZP „Źródło” cell `""` → „Biuletyn Zamówień
+  Publicznych” in two `tests/web-csv.test.ts` row expectations; the digest footer sentence
+  and the HTML rating-link markup in `tests/digest.test.ts` (PR-12 tests).
+- Post-merge round (2026-11-12, base with PR #17 merged in): the rating links (e-mail) and
+  form (`/dopasowania`) end the D-030 card, after the match details / „Więcej szczegółów”;
+  D-032 says so (C&S L1). Tests added: the rating's place in the card (text, HTML,
+  `/dopasowania`, also with a cut description; C&S M1/L2). Quality M1: the `/dopasowania`
+  intro is shorter, so the first card's „Otwórz ogłoszenie” is on a 390×844 first screen
+  again (638–678 px, was 790–830): „Lista obejmuje także…” joins the first paragraph, the
+  rating paragraph moves under the list (before „Dane pochodzą…”), the CSV link is one line
+  („Pobierz listę jako CSV (Excel, Arkusze Google).”; with more offers one parenthesis:
+  „(Excel, Arkusze Google; pierwsze 50 z 57 — zawęź profil, aby mieć wszystkie)”, N4). Changed
+  tracked assertions (requested wording/position, exact replacements): the „already sent”
+  sentence now in the first paragraph (`tests/web-pages.test.ts`, from PR-10) and the two CSV
+  link strings (PR-12 tests); one assertion added: the rating paragraph is after `</ol>`.
+- Owner review round (2026-11-12, PR #18): PASS. Decision 1 implemented: `feedback:report`
+  reports delivery coverage — in `total` and per profile `delivered` (distinct offers with a
+  `sent` delivery; `pending`/`failed` do not count; with `--since` by `sent_at` from the Warsaw
+  day start), `ratedDelivered` (of those, rated by the same profile, any verdict, any date) and
+  `coverage` = ratedDelivered / delivered (3 decimals, `null` with nothing sent, never 0).
+  `countFeedback` gains one grouped query in the same `REPEATABLE READ` snapshot (`deliveries`
+  `LEFT JOIN match_feedback` on profile and offer, `count(DISTINCT …)`); `profiles[]` now also
+  lists profiles with offers sent and no rating, and profiles that rated only on `/dopasowania`
+  get `delivered: 0`, `coverage: null`. Categories unchanged. The „fewer than ~20 ratings — no
+  conclusions” rule is a reading rule (RUNBOOK „Oceny trafności”, LAUNCH_ROADMAP stage 4), no
+  flag in the report. D-032, README, ARCHITECTURE, SECURITY and the CLI usage text updated.
+  Decisions 2–4 accepted as described: 2 — decide on the per-profile values; 3 — the CSV stays
+  without Kontakt/Opis/„Dlaczego pasuje” for the pilot (Kontakt is personal data); 4 — the
+  leading `'` is accepted. Tests added: `tests/feedback-report.test.ts` (+5: coverage rounding
+  and null, a profile with deliveries and no ratings, ratings without deliveries, total = sum),
+  `tests/integration/web-feedback.test.ts` (+1: `sent` only, one offer over two transports
+  counts once, `--since` by `sent_at`, tenant isolation of `ratedDelivered`). Changed tracked
+  assertions (additions only): the existing report expectations gain `delivered`,
+  `ratedDelivered`, `coverage` and `deliveries: []`; the test `deliver` helper gains optional
+  `transport`/`sentAt`. 2274 tests (+6).
+- Do decyzji właściciela (PR-12, notes only, no code): 1–4 decided in the owner review round
+  above. 5. Pilot onboarding: recommend rating in bulk on `/dopasowania` (one click per offer);
+  sentence added to RUNBOOK and LAUNCH_ROADMAP stage 4.
+
+**PR-11 — Karta oferty do oceny w 20 sekund** (`docs/PR_PLAN.md` → PR-11) — **MERGED in PR
+#17 (b974984)** after the owner's review 2026-11-12 (see „Order” below); before that READY locally
 for review: implemented on top of PR-10 (`pr-11-local`), `pnpm check` green (2157 tests),
 Code & Safety Review PASS (round 3, after the Quality minors 1–4 fix below), Quality Review
 ACCEPT. D-030 (value line) updated; D-024
@@ -1081,15 +1204,25 @@ attribution, source order); D-018 and D-021 notes (15-min source timeout, `bk` c
 
 ## Next action
 
-0. PR-10: MERGED in PR #16 (3b70f94). PR-11: open as PR #17; the owner's review (PASS + card
-   order, name-free sample contact) is addressed → owner re-review and merge (not merged by
-   the agents); screenshots at 390 px and 1280 px go in its PR description (AC4). Follow-ups
-   (later PR): the phone number in a card wraps mid-number at 390 px — format `contact.phone`
-   with no-break spaces (Quality Review nit 2); optional desktop alignment of the two card
-   `<dl>` grids (`minmax(11.5rem,max-content) 1fr`, nit 1); follow-up (C&S round 3 L-a, later PR): `tests/email-sender.test.ts`
-   fixture subject still uses the old company-name format (pass-through only, nothing asserts
-   it). Then PR-12 – PR-13 in order (`docs/PR_PLAN.md`). Each PR opens only when ready for
-   owner review.
+0. PR-12: PR #18, owner review PASS (2026-11-12); the owner-review round (coverage in
+   `feedback:report`) is reviewed (C&S PASS, Quality ACCEPT) and pushed to PR #18 → owner's
+   review and merge (not merged by the agents). Owner's call (Quality O1): filter the coverage
+   query on `transport = 'smtp'` instead of the documented `--since` caveat. Out of scope there and left for later: scoring that learns
+   from ratings, ratings in `match:preview`, XLSX. Then PR-13 (`docs/PR_PLAN.md`). Each PR
+   opens only when ready for owner review.
+   PR-10: MERGED in PR #16 (3b70f94). PR-11: MERGED in PR #17 (b974984). Follow-ups from
+   PR-11 (later PR, not PR-12 scope): the phone number in a card wraps mid-number at 390 px —
+   format `contact.phone` with no-break spaces (Quality Review nit 2); optional desktop
+   alignment of the two card `<dl>` grids (`minmax(11.5rem,max-content) 1fr`, nit 1);
+   `tests/email-sender.test.ts` fixture subject still uses the old company-name format
+   (pass-through only, nothing asserts it; C&S round 3 L-a). PR-12 changes neither
+   `contact.phone` formatting, the card `<dl>` grid rules nor that fixture subject (its one addition
+   to `tests/email-sender.test.ts` is the `/ocena/` redaction case), so all three stay open.
+   Also later, not PR-12 scope: the e-mail footer's „Stan na …” date is ISO
+   („2026-11-09 15:38”) while the page says „12.11.2026 07:00” (deferred from PR-11, Quality
+   N3). After the pilot (Quality N5 of PR-12): a card rated „nietrafne” has no label at its
+   top (only greyed and moved last), and the chosen rating button is only bold
+   (`aria-pressed` for screen readers).
 1. PR-09: MERGED in PR #15 (42dd008). On the VPS
    (PR-08 is merged, 366618e): PR-07B checklist (`docs/DEPLOY.md` §13) if not done yet, then
    PR-08 AC1 and the `bk` backfill (Blockers). Follow-ups from the PR-08 reviews (owner to
@@ -1347,6 +1480,35 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
 
 ## Last verification
 
+2026-11-12, PR-12 owner-review round (coverage in `feedback:report`; Node 22, pnpm 10.28.0,
+PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2274 tests passed in 65 files,
+none skipped. Code & Safety Review: PASS (L1 — `test`-transport sends count as delivered,
+documented: coverage only with `EMAIL_MODE=smtp`, `--since` from the day after the switch; L2 —
+`total` sums over profiles, i.e. (profile, offer) pairs, documented). Quality Review: ACCEPT
+(M1 — the go/no-go and the ~20-ratings rule use the whole-pilot window, the weekly run is for
+progress only; M2 — why a profile shows `delivered: 0`; M3 — `ratedDelivered` may exceed
+`ratings`, a week's coverage grows on re-run; O2 — reflow; all docs-only). No dependency
+changes; no network requests to live sources; no e-mail sent.
+
+2026-11-12, PR-12 after merging the base branch (PR #17, PR-11, b974984) in (Node 22, pnpm
+10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2268 tests passed in 65 files,
+none skipped (2266 after the resolution + 2 order tests from the C&S review of the merge, M1).
+Conflicts in `src/notifications/digest.ts` (2), `src/web/pages.ts` (1), README
+(2), ARCHITECTURE (1) and STATE (3): the D-030 card (`lead`/`body`/`more`, one web `<details>`
+„Więcej szczegółów (…)”) kept, the PR-12 rating links/form appended at the end of the card; no
+existing test changed. C&S review of the merge: PASS; its two optional notes done — M1: tests
+pin the rating at the card's end (`tests/digest.test.ts` text and HTML, `tests/web-pages.test.ts`
+`/dopasowania`, the latter also with a cut description — L2 of the re-check; each turns red
+when the order in the code is swapped), L1: D-032 says the rating
+ends the card, after the D-030 match details / „Więcej szczegółów”. Quality Review of the
+merge: ACCEPT; its M1 (shorter `/dopasowania` intro), N1, N2, N4 done, N3 and N5 noted in Next action (N5 for after the
+pilot); C&S re-check PASS, Quality re-check ACCEPT; 2268 tests (the M1 check is one more assertion in an existing test). Rendered
+`/dopasowania` (sample offers with rating forms) at 390×844: the first card's „Otwórz
+ogłoszenie” at 638–678 px (was 790–830), the CSV link one line, scrollWidth 390. No dependency changes; no network requests to live
+sources; no e-mail sent.
+
 2026-11-12, PR-11 after the owner's review of PR #17 (card order, name-free `/przyklad`
 contact; Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
 REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2199 tests passed in 62 files,
@@ -1364,6 +1526,12 @@ PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_t
 REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2133 tests passed in 61 files,
 none skipped (2094 PR-10 + 39 from the PR-09 owner-review round). Conflicts only in README,
 STATE and one `src/cli.ts` config block (both sides kept).
+
+2026-11-09, PR-12 after the review fixes (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
+REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2224 tests passed in 65 files,
+none skipped (run by the coder; 2217 before the fixes). pnpm audit: bez zmian (1 moderate,
+dev-only minimatch przez eslint). No dependency changes; no network requests to live sources;
+no e-mail sent.
 
 2026-11-09, PR-11 READY locally for review (Node 22, pnpm 10.28.0, PostgreSQL 16): `TEST_DATABASE_URL=postgres://radar:radar@localhost:5432/radar_test
 REQUIRE_DB_TESTS=1 pnpm check` — format, lint, typecheck clean; 2157 tests passed in 62 files,

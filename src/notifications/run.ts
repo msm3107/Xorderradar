@@ -18,7 +18,7 @@ import {
 import type { Database, DeliveryTransport } from "../infrastructure/db/schema.js";
 import type { Logger } from "../infrastructure/logger.js";
 import { warsawDay } from "../sources/normalize/warsaw-time.js";
-import { loginUrl, unsubscribeUrl } from "../web/links.js";
+import { feedbackUrl, loginUrl, unsubscribeUrl } from "../web/links.js";
 import {
   DIGEST_CANDIDATE_LIMIT,
   DIGEST_NEW_DAYS,
@@ -245,7 +245,7 @@ async function selectProfiles(
 }
 
 /**
- * A fresh login token and unsubscribe token for one e-mail; null without
+ * A fresh login, unsubscribe and rating token for one e-mail; null without
  * PUBLIC_BASE_URL; "address_changed" when the profile's address is no longer
  * the one read at the start of the run (an e-mail change on the web, D-027).
  */
@@ -257,10 +257,12 @@ async function issueLinks(
   if (publicBaseUrl === null) return null;
   const tokens = await issueDigestTokens(db, profile.id, profile.email);
   if (tokens === null) return "address_changed";
-  const { login, unsubscribe } = tokens;
+  const { login, unsubscribe, feedback } = tokens;
   return {
     profileUrl: loginUrl(publicBaseUrl, login.token),
     unsubscribeUrl: unsubscribeUrl(publicBaseUrl, unsubscribe.token),
+    feedbackUrl: (opportunityId, verdict) =>
+      feedbackUrl(publicBaseUrl, feedback.token, opportunityId, verdict),
   };
 }
 

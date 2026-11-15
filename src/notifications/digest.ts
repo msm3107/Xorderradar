@@ -1,4 +1,5 @@
 import type { CompanyProfile } from "../domain/company-profile.js";
+import type { FeedbackVerdict } from "../infrastructure/db/schema.js";
 import { escapeHtml } from "../infrastructure/html.js";
 import { formatWarsawMinute } from "../sources/normalize/warsaw-time.js";
 import {
@@ -46,6 +47,11 @@ export interface DigestOptions {
 export interface DigestLinks {
   readonly profileUrl: string;
   readonly unsubscribeUrl: string;
+  /**
+   * The rating link of one offer (PR-12, D-032): „Trafne”/„Nietrafne” under
+   * every card, one multi-use token per e-mail. Absent: no rating links.
+   */
+  readonly feedbackUrl?: (opportunityId: string, verdict: FeedbackVerdict) => string;
 }
 
 export interface DigestEmail {
@@ -78,11 +84,23 @@ interface FooterParagraph {
   readonly linkText?: string;
 }
 
+/** The rating links of one card, http(s) only (safeLink). */
+interface FeedbackLinks {
+  readonly relevant: string;
+  readonly notRelevant: string;
+}
+
+interface DigestCard {
+  readonly card: OfferCard;
+  /** null without rating links (no PUBLIC_BASE_URL, or a link safeLink refused). */
+  readonly feedback: FeedbackLinks | null;
+}
+
 interface DigestModel {
   readonly heading: string;
   /** Shown right under the heading: matching offers left for later e-mails. */
   readonly overflowNotice: string | null;
-  readonly cards: readonly OfferCard[];
+  readonly cards: readonly DigestCard[];
   readonly footer: readonly FooterParagraph[];
 }
 
@@ -152,6 +170,22 @@ function profileName(profile: Pick<CompanyProfile, "name">): string {
   return snippet(profile.name, PROFILE_NAME_MAX_CHARS);
 }
 
+/** Labels of the rating links: the text part's lines, the HTML part's link texts. */
+export const RATE_RELEVANT_LABEL = "Trafne";
+export const RATE_NOT_RELEVANT_LABEL = "Nietrafne";
+const RATE_QUESTION = "Czy to zamówienie pasuje?";
+
+function feedbackLinks(
+  links: DigestLinks | undefined,
+  opportunityId: string,
+): FeedbackLinks | null {
+  const url = links?.feedbackUrl;
+  if (url === undefined) return null;
+  const relevant = safeLink(url(opportunityId, "relevant"));
+  const notRelevant = safeLink(url(opportunityId, "not_relevant"));
+  return relevant === null || notRelevant === null ? null : { relevant, notRelevant };
+}
+
 function digestModel(
   profile: Pick<CompanyProfile, "name">,
   items: readonly DigestItem[],
@@ -161,6 +195,10 @@ function digestModel(
   const profileUrl = options.links === undefined ? null : safeLink(options.links.profileUrl);
   const unsubscribeUrl =
     options.links === undefined ? null : safeLink(options.links.unsubscribeUrl);
+  const cards = [...items].sort(digestOrder).map((item) => ({
+    card: offerCard(item, now),
+    feedback: feedbackLinks(options.links, item.offer.id),
+  }));
   const footer: FooterParagraph[] = [
     { text: `Stan na ${formatWarsawMinute(now)} (czas polski).` },
     {
@@ -174,6 +212,16 @@ function digestModel(
         "w Radarze Zamówień: raz dziennie wysyłamy nowe zamówienia pasujące do jego kategorii, " +
         "słów kluczowych i regionów.",
     },
+    ...(cards.some((card) => card.feedback !== null)
+      ? [
+          {
+            text:
+              `Linki „${RATE_RELEVANT_LABEL}” i „${RATE_NOT_RELEVANT_LABEL}” przy zamówieniach ` +
+              "otwierają stronę, na której jednym przyciskiem zapiszesz ocenę (bez logowania, " +
+              "ważne 60 dni; ocenę możesz zmienić). Dzięki nim poprawiamy dopasowania.",
+          },
+        ]
+      : []),
     ...(profileUrl === null
       ? []
       : [
@@ -203,7 +251,7 @@ function digestModel(
   return {
     heading: `Znaleźliśmy dziś ${newOffers(items.length)} ${matching(items.length)} do Twojej firmy.`,
     overflowNotice: options.overflow > 0 ? overflowNotice(options.overflow) : null,
-    cards: [...items].sort(digestOrder).map((item) => offerCard(item, now)),
+    cards,
     footer,
   };
 }
@@ -216,9 +264,10 @@ function rowText(row: CardRow): string {
 /**
  * One card as text, in the card's order: the title, the lead rows, the
  * "Otwórz ogłoszenie" line, the body rows (the excerpt only, never the full
- * description), the more rows and the match details as the last line.
+ * description), the more rows, the match details and — when the digest
+ * carries them (PR-12) — the two rating links last.
  */
-function cardText(card: OfferCard, index: number): string[] {
+function cardText({ card, feedback }: DigestCard, index: number): string[] {
   const rows = (group: readonly CardRow[]) =>
     group.map((row) => `   ${row.label}: ${rowText(row)}`);
   return [
@@ -230,6 +279,12 @@ function cardText(card: OfferCard, index: number): string[] {
     ...(card.matchDetails.length === 0
       ? []
       : [`   ${MATCH_DETAILS_LABEL}: ${card.matchDetails.join(" · ")}`]),
+    ...(feedback === null
+      ? []
+      : [
+          `   Oceń jako ${RATE_RELEVANT_LABEL.toLowerCase()}: ${feedback.relevant}`,
+          `   Oceń jako ${RATE_NOT_RELEVANT_LABEL.toLowerCase()}: ${feedback.notRelevant}`,
+        ]),
   ];
 }
 
@@ -267,10 +322,11 @@ function rowsHtml(rows: readonly CardRow[], style: string): string {
  * One card as HTML, inline-styled (mail clients drop <style>): a bordered
  * box in the accent colour, in the card's order — the lead rows, one
  * "Otwórz ogłoszenie" button, the body rows, then the more rows and the
- * match details, smaller. All visible: mail clients do not all support
- * <details>. No colour on text, no images or fonts.
+ * match details, smaller, and — when the digest carries them (PR-12) — the
+ * rating links last. All visible: mail clients do not all support <details>.
+ * No colour on text, no images or fonts.
  */
-function cardHtml(card: OfferCard): string {
+function cardHtml({ card, feedback }: DigestCard): string {
   const button =
     card.url === null
       ? ""
@@ -281,6 +337,13 @@ function cardHtml(card: OfferCard): string {
     card.matchDetails.length === 0
       ? ""
       : `<small>${MATCH_DETAILS_LABEL}: ${escapeHtml(card.matchDetails.join(" · "))}</small>`;
+  // Plain links (no form: mail clients block them); the label names the offer for screen readers.
+  const rate =
+    feedback === null
+      ? ""
+      : `<p style="margin:10px 0 0"><small>${RATE_QUESTION}</small><br>` +
+        `${rateLink(feedback.relevant, RATE_RELEVANT_LABEL, card.title)} ` +
+        `${rateLink(feedback.notRelevant, RATE_NOT_RELEVANT_LABEL, card.title)}</p>`;
   return (
     `<div style="border:1px solid ${ACCENT};padding:0 12px 10px;margin:12px 0">` +
     `<h2 style="font-size:1.05em;margin:10px 0 6px">${escapeHtml(card.title)}</h2>` +
@@ -289,7 +352,23 @@ function cardHtml(card: OfferCard): string {
     // Without a button, the lead's last line ("Link: nie podano") needs the gap instead.
     rowsHtml(card.body, card.url === null ? "margin:8px 0 0" : "margin:0") +
     rowsHtml(card.more, "margin:8px 0 4px;font-size:0.9em") +
-    `${details}</div>`
+    `${details}${rate}</div>`
+  );
+}
+
+/**
+ * The rating links' inline style: a bordered tap target (about 30 px high)
+ * with a gap between the two, outlined only, so the filled „Otwórz
+ * ogłoszenie” button stays the card's main action.
+ */
+const RATE_LINK_STYLE =
+  `display:inline-block;padding:6px 12px;border:1px solid ${ACCENT};border-radius:4px;` +
+  "margin:6px 16px 0 0";
+
+function rateLink(href: string, label: string, title: string): string {
+  return (
+    `<a href="${escapeHtml(href)}" aria-label="${escapeHtml(`${label}: ${title}`)}" ` +
+    `style="${RATE_LINK_STYLE}">${label}</a>`
   );
 }
 

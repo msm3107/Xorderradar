@@ -89,11 +89,13 @@ src/
 ├── operations/             # status.ts (raport i alert operatora, czysty),      [PR-07A]
 │                           # backup.ts (pg_dump/pg_restore jako procesy potomne; D-028)
 │                           # heartbeat.ts (ping HEARTBEAT_URL po status; D-029) [PR-07B]
+│                           # feedback-report.ts: feedback:report (czysty; D-032) [PR-12]
 └── web/                    # serve: node:http, strony SSR, sesja, CSRF, wypis  [PR-06A]
                             # server.ts, pages.ts, session.ts, links.ts, multipart.ts
                             # profile-form.ts: formularz profilu, polskie błędy  [PR-06B]
                             # access-mail.ts, mail-queue.ts: e-maile dostępu po    [PR-10]
                             # odpowiedzi; rate-limit.ts: limit na IP; example.ts: /przyklad
+                            # csv.ts: /dopasowania.csv (czysty; D-032)             [PR-12]
 .github/workflows/ci.yml   # CI: pnpm check z PostgreSQL 16 (wymagane testy z bazą) [PR-07A]
 deploy/                    # wdrożenie na VPS (docs/DEPLOY.md, D-029)               [PR-07B]
                            # systemd/radar-serve.service, cron/radar, caddy/Caddyfile,
@@ -120,12 +122,15 @@ z jednym wyjątkiem (D-023): może importować czyste helpery `sources/normalize
 (PR-06A: `access-repository.ts`; od PR-06B także `company-profiles-repository.ts`).
 `cli`/`web` składają zależności (proste wstrzykiwanie przez parametry, bez kontenera DI).
 `notifications` importuje z `web` wyłącznie `web/links.ts` (czyste budowanie URL-i tras
-`/dostep/…`, `/wypis/…` i od PR-10 `/potwierdz-email/…`, bez I/O) — trasy definiuje `web`.
+`/dostep/…`, `/wypis/…`, od PR-10 `/potwierdz-email/…` i od PR-12 `/ocena/…`, bez I/O) —
+trasy definiuje `web`.
 W drugą stronę (PR-06B, D-027) `web` importuje z `notifications` wyłącznie `candidates.ts`
 (odczyt kandydatów i dopasowanie — te same reguły co digest), czyste `digest.ts`
 (`digestOrder`, `plural`) i od PR-11 czyste `card.ts` (karta oferty `offerCard` i jej
-etykiety; także `/przyklad`), a z `sources` tylko czysty
-`normalize/warsaw-time.ts`; nic z `run.ts`. Od PR-10 (D-031) `serve` wysyła e-maile dostępu
+etykiety; także `/przyklad`; od PR-12 także etykiety „Trafne”/„Nietrafne” z `digest.ts`), a
+z `sources` tylko czyste `normalize/warsaw-time.ts` i od PR-12 (`csv.ts`)
+`normalize/cpv-categories.ts` i `bk/attribution.ts`; nic z `run.ts`. Od PR-12 `server.ts`
+woła też czyste `matching/match.ts` (czy ocenianą z listy ofertę wolno ocenić). Od PR-10 (D-031) `serve` wysyła e-maile dostępu
 („Wyślij mi link”, potwierdzenie zmiany adresu i powiadomienie na stary adres):
 `web/access-mail.ts` importuje czyste `notifications/access-emails.ts` (treść) i z
 `sender.ts` interfejs nadawcy oraz `EmailSendError`; sam nadawca (`createEmailSender`) jest
@@ -134,6 +139,9 @@ tworzony w `cli`.
 `operations` (PR-07A) czyta przez własne repozytoria (`status-repository.ts`,
 `maintenance-repository.ts`) i bierze z `notifications/run.ts` tylko stałe (`DIGEST_LOCK_KEY`,
 `DIGEST_MAX_ATTEMPTS`); alert wysyła `cli` przez `notifications/sender.ts`.
+`operations/feedback-report.ts` (PR-12) dostaje gotowe liczby z `feedback-repository.ts`
+(`countFeedback`, przez `cli`) i mapuje kody CPV na kategorie czystym
+`sources/normalize/cpv-categories.ts`.
 
 ### Warstwa bazy danych (PR-01)
 
@@ -614,29 +622,32 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   e-maili dostępu (`null`: niewysyłane, log `not_sent`), `contactEmail` — `CONTACT_EMAIL` na
   stronie głównej, stronach 409 i 429 i w powiadomieniu na stary adres (`null`: bez kontaktu). Stała tabela tras:
 
-  | Trasa (nazwa w logu)                            | Metody          | Działanie                                            |
-  | ----------------------------------------------- | --------------- | ---------------------------------------------------- |
-  | `/` (`home`)                                    | GET, HEAD       | strona główna z formularzem „Wyślij mi link”         |
-  | `/przyklad` (`example`)                         | GET, HEAD       | przykładowy digest (stałe dane, bez bazy)            |
-  | `/wyslij-link` (`link_request`)                 | POST            | „Wyślij mi link”: ta sama strona dla każdego adresu  |
-  | `/styl.css` (`stylesheet`)                      | GET, HEAD       | arkusz stylów (jedyna odpowiedź z cache, 1 h)        |
-  | `/zdrowie` (`health`)                           | GET, HEAD       | `select 1` ≤ 2 s → 200 `ok` / 503 (tekst, bez sesji) |
-  | `/dostep/<token>` (`login_link`)                | GET, HEAD       | sprawdza token (bez zużycia) → strona z przyciskiem  |
-  | `/dostep` (`login`)                             | POST            | zużywa token, tworzy sesję → 303 `/profil`           |
-  | `/profil` (`profile`)                           | GET, HEAD       | nazwa, status, komunikat, linki, formularze (sesja)  |
-  | `/profil/ustawienia` (`profile_settings`)       | GET, HEAD, POST | formularz profilu; POST: zapis (sesja + CSRF)        |
-  | `/profil/wypisz` (`profile_unsubscribe`)        | POST            | `active = false` (sesja + CSRF) → 303 `/profil`      |
-  | `/profil/wlacz` (`profile_resubscribe`)         | POST            | `active = true` (sesja + CSRF) → 303 `/profil`       |
-  | `/profil/anuluj-email` (`profile_cancel_email`) | POST            | anuluje zmianę adresu (sesja + CSRF) → 303 `/profil` |
-  | `/dopasowania` (`matches`)                      | GET, HEAD       | pasujące oferty profilu (sesja)                      |
-  | `/wyloguj` (`logout`)                           | POST            | usuwa sesję i ciasteczko (sesja + CSRF) → 303 `/`    |
-  | `/wypis/<token>` (`unsubscribe`)                | GET, HEAD, POST | GET: strona z nazwą firmy i przyciskiem; POST: wypis |
-  | `/potwierdz-email/<token>` (`email_confirm`)    | GET, HEAD, POST | GET: strona z przyciskiem; POST: zmiana adresu       |
+  | Trasa (nazwa w logu)                                   | Metody          | Działanie                                            |
+  | ------------------------------------------------------ | --------------- | ---------------------------------------------------- |
+  | `/` (`home`)                                           | GET, HEAD       | strona główna z formularzem „Wyślij mi link”         |
+  | `/przyklad` (`example`)                                | GET, HEAD       | przykładowy digest (stałe dane, bez bazy)            |
+  | `/wyslij-link` (`link_request`)                        | POST            | „Wyślij mi link”: ta sama strona dla każdego adresu  |
+  | `/styl.css` (`stylesheet`)                             | GET, HEAD       | arkusz stylów (jedyna odpowiedź z cache, 1 h)        |
+  | `/zdrowie` (`health`)                                  | GET, HEAD       | `select 1` ≤ 2 s → 200 `ok` / 503 (tekst, bez sesji) |
+  | `/dostep/<token>` (`login_link`)                       | GET, HEAD       | sprawdza token (bez zużycia) → strona z przyciskiem  |
+  | `/dostep` (`login`)                                    | POST            | zużywa token, tworzy sesję → 303 `/profil`           |
+  | `/profil` (`profile`)                                  | GET, HEAD       | nazwa, status, komunikat, linki, formularze (sesja)  |
+  | `/profil/ustawienia` (`profile_settings`)              | GET, HEAD, POST | formularz profilu; POST: zapis (sesja + CSRF)        |
+  | `/profil/wypisz` (`profile_unsubscribe`)               | POST            | `active = false` (sesja + CSRF) → 303 `/profil`      |
+  | `/profil/wlacz` (`profile_resubscribe`)                | POST            | `active = true` (sesja + CSRF) → 303 `/profil`       |
+  | `/profil/anuluj-email` (`profile_cancel_email`)        | POST            | anuluje zmianę adresu (sesja + CSRF) → 303 `/profil` |
+  | `/dopasowania` (`matches`)                             | GET, HEAD       | pasujące oferty profilu z ocenami (sesja)            |
+  | `/dopasowania.csv` (`matches_csv`)                     | GET, HEAD       | ta sama lista jako CSV do pobrania (sesja)           |
+  | `/dopasowania/ocena` (`matches_feedback`)              | POST            | ocena oferty (sesja + CSRF) → 303 do karty           |
+  | `/wyloguj` (`logout`)                                  | POST            | usuwa sesję i ciasteczko (sesja + CSRF) → 303 `/`    |
+  | `/wypis/<token>` (`unsubscribe`)                       | GET, HEAD, POST | GET: strona z nazwą firmy i przyciskiem; POST: wypis |
+  | `/potwierdz-email/<token>` (`email_confirm`)           | GET, HEAD, POST | GET: strona z przyciskiem; POST: zmiana adresu       |
+  | `/ocena/<token>/<id>/<trafne\|nietrafne>` (`feedback`) | GET, HEAD, POST | GET: strona z przyciskiem; POST: zapis oceny         |
 
   Inna ścieżka → 404 (`not_found`), inna metoda → 405 z `Allow`. POST: `Origin` (poza
   wypisem) → typ treści (urlencoded; dla wypisu także `multipart/form-data`) → rozmiar
   (8 KB; `/profil/ustawienia` 64 KB i najwyżej 64 pary pól; `/wyslij-link` 1 KiB) → trasa;
-  formularze bez sesji (`/dostep`, `/wyslij-link`, `/potwierdz-email/<token>`) dodatkowo
+  formularze bez sesji (`/dostep`, `/wyslij-link`, `/potwierdz-email/<token>`, `/ocena/…`) dodatkowo
   sprawdzają login-CSRF: `Origin` równy `PUBLIC_BASE_URL` albo, gdy `Origin` brak, nagłówek
   `Sec-Fetch-Site: same-origin`; inaczej 403, a token nie jest zużywany. Błąd bazy → 500 i
   log bez szczegółów. Każda odpowiedź ma `Referrer-Policy: strict-origin` (od PR-06B;
@@ -705,6 +716,24 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   najwyżej 2 żądania `/dopasowania` w toku albo w kolejce (`MATCHES_MAX_PER_SESSION`, licznik po
   id sesji w `ServerState`, nigdy po tokenie z ciasteczka); trzecie → od razu 429
   `matchesTooManyPage` z `Retry-After: 5`, bez kolejki (PR-07A, D-028).
+- Oceny i eksport (PR-12, D-032): `/dopasowania` czyta oceny profilu dla całej listy jednym
+  zapytaniem (`feedbackVerdicts`, `= ANY(uuid[])`), przesuwa „nietrafne” na koniec (kolejność
+  digestu w obu częściach) przed obcięciem do `MATCHES_SHOWN` i na końcu każdej karty (po
+  `<details>` „Więcej szczegółów”) pokazuje formularz `POST /dopasowania/ocena` (sesja + CSRF; karta „nietrafne” wyszarzona, kotwica
+  `#oferta-<id>`; przycisk bieżącej oceny `aria-pressed="true"`; ukryte `nastepna` — id
+  następnej karty, kotwica powrotu po „Nietrafne”, sprawdzane wzorcem uuid, nigdy nie wybiera
+  ocenianej oferty). Ocenić z listy można ofertę wysłaną profilowi (`wasDelivered`) albo
+  pasującą do niego teraz (`matchOpportunity`, regułami profilu niezależnie od wieku oferty,
+  D-032); inna → 404. `GET /dopasowania.csv` liczy tę
+  samą listę w tym samym slocie (`withMatchesSlot`) i zwraca ją przez czyste `csv.ts` (BOM,
+  `;`, CRLF, neutralizacja formuł, `Content-Disposition: attachment`). Link z digestu
+  `/ocena/<token>/<id>/<trafne|nietrafne>`: ścieżka sprawdzana przed bazą
+  (`parseFeedbackPath`: 3 segmenty, werdykt z listy, uuid małymi literami); GET/HEAD tylko
+  czyta (`feedbackLinkOffer`), POST to jedno `INSERT … SELECT … ON CONFLICT DO UPDATE`
+  (`rateWithFeedbackLink`) warunkowane tokenem `feedback` i dostawą `pending`/`sent` tego
+  profilu; każda odmowa → ta sama strona 404 `invalidLinkPage({ feedbackLink: true })`
+  (zdanie o ocenie po zalogowaniu zależy tylko od trasy). Gdy zapisana ocena jest już ta z
+  linku, strona GET pokazuje tylko przycisk przeciwnej oceny.
 - `Strict-Transport-Security: max-age=31536000` (bez `includeSubDomains` i `preload`) na każdej
   odpowiedzi, gdy `PUBLIC_BASE_URL` to `https://`; przy `http://` (tylko loopback poza
   produkcją) — brak nagłówka (PR-07A, D-028).
@@ -718,7 +747,7 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   odczyt (tylko wartość w kształcie tokenu), CSRF (HMAC z id sesji, `timingSafeEqual`),
   kontrola `Origin`. `multipart.ts` — minimalny ścisły parser `multipart/form-data` tylko dla
   wypisu RFC 8058 (boundary według RFC 2046, jedno pole; D-026). `links.ts` —
-  `loginUrl`/`unsubscribeUrl`/`emailConfirmUrl` (czyste; używa też `notifications` i
+  `loginUrl`/`unsubscribeUrl`/`emailConfirmUrl`, od PR-12 `feedbackUrl` (czyste; używa też `notifications` i
   `access:link`). `example.ts` — dane `/przyklad` (`exampleView(now)`: zmyślone oferty
   z datami liczonymi od `now`, dopasowane prawdziwymi regułami, karty jak na `/dopasowania`,
   najważniejsze stany karty na jednej stronie — wartość podana i nie, termin za kilka dni,
@@ -734,7 +763,9 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   `unsubscribeTokenProfileName`, `getProfileStatus`, `pendingEmailLinkLive`,
   `lockLiveSession`, `requestLoginLink`,
   `requestEmailChange`, `isUsableEmailChangeToken`, `confirmEmailChange`, `cancelEmailChange`,
-  `deleteExpiredAccess`, `deleteOldAccessEmails`) i `company-profiles-repository.ts`
+  `deleteExpiredAccess`, `deleteOldAccessEmails`), `feedback-repository.ts` (PR-12:
+  `feedbackLinkOffer`, `rateWithFeedbackLink`, `rateOffer`, `wasDelivered`,
+  `feedbackVerdicts`, `countFeedback`) i `company-profiles-repository.ts`
   (`getProfileSettings`, `updateProfileSettings`, `getCompanyProfile`). Strona profilu czyta
   tylko `name`, `email` (pokazywany jako „Adres powiadomień”), `pending_email` i `active`,
   a formularz surowe wartości (bez schematu domenowego), więc wypis i poprawka działają także
@@ -944,19 +975,20 @@ dostał dziś digest”. Nigdy treść e-maila, adres ani komunikat serwera.
 
 ### `access_tokens` i `sessions` (PR-06A, migracja `0006_access`, D-026)
 
-`access_tokens` — tokeny z linków (logowanie, wypis, od PR-10 potwierdzenie adresu); sam
+`access_tokens` — tokeny z linków (logowanie, wypis, od PR-10 potwierdzenie adresu, od PR-12
+oceny z digestu); sam
 sekret nigdy nie jest zapisywany:
 
-| Kolumna      | Typ                        | Null | Uwagi                                                                                     |
-| ------------ | -------------------------- | ---- | ----------------------------------------------------------------------------------------- |
-| `id`         | uuid                       | nie  | PK, `gen_random_uuid()`                                                                   |
-| `token_hash` | text                       | nie  | SHA-256 tokenu, hex (64 znaki), unikalny                                                  |
-| `profile_id` | uuid FK → company_profiles | nie  | `ON DELETE CASCADE`                                                                       |
-| `purpose`    | text + CHECK               | nie  | `login` (jednorazowy, ≤ 7 dni) / `unsubscribe` (≤ 60 dni) / `email_change` (≤ 24 h, 0008) |
-| `email`      | text                       | tak  | adres potwierdzany tokenem `email_change` (znormalizowany); dla innych celów `NULL`       |
-| `created_at` | timestamptz                | nie  | domyślnie `now()`                                                                         |
-| `expires_at` | timestamptz                | nie  | `> created_at` i nie dalej niż limit celu                                                 |
-| `used_at`    | timestamptz                | tak  | zużycie tokenu logowania; dla `unsubscribe` i `email_change` zawsze `NULL`                |
+| Kolumna      | Typ                        | Null | Uwagi                                                                                                                                |
+| ------------ | -------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `id`         | uuid                       | nie  | PK, `gen_random_uuid()`                                                                                                              |
+| `token_hash` | text                       | nie  | SHA-256 tokenu, hex (64 znaki), unikalny                                                                                             |
+| `profile_id` | uuid FK → company_profiles | nie  | `ON DELETE CASCADE`                                                                                                                  |
+| `purpose`    | text + CHECK               | nie  | `login` (jednorazowy, ≤ 7 dni) / `unsubscribe` (≤ 60 dni) / `email_change` (≤ 24 h, 0008) / `feedback` (wielokrotny, ≤ 60 dni, 0009) |
+| `email`      | text                       | tak  | adres potwierdzany tokenem `email_change` (znormalizowany); dla innych celów `NULL`                                                  |
+| `created_at` | timestamptz                | nie  | domyślnie `now()`                                                                                                                    |
+| `expires_at` | timestamptz                | nie  | `> created_at` i nie dalej niż limit celu                                                                                            |
+| `used_at`    | timestamptz                | tak  | zużycie tokenu logowania; dla pozostałych celów zawsze `NULL`                                                                        |
 
 Ograniczenia: `access_tokens_token_hash_key`, `access_tokens_profile_id_fkey`,
 `access_tokens_token_hash_check`, `access_tokens_purpose_check`,
@@ -980,9 +1012,22 @@ Wysłane (zlecone) e-maile dostępu, tylko na potrzeby dziennych limitów: `id u
 `access_emails_profile_kind_created_at_idx (profile_id, kind, created_at)` (licznik z 24 h) i
 `access_emails_created_at_idx` (sprzątanie wierszy starszych niż 24 h w `serve`).
 
+### `match_feedback` (PR-12, migracja `0009_match_feedback`, D-032)
+
+Ocena oferty przez profil, jeden wiersz na parę: `profile_id` (FK → `company_profiles`,
+`ON DELETE CASCADE`, `match_feedback_profile_id_fkey`), `opportunity_id` (FK →
+`opportunities`, `ON DELETE CASCADE`, `match_feedback_opportunity_id_fkey`), `verdict`
+(`match_feedback_verdict_check`: `relevant` / `not_relevant`), `created_at`, `updated_at`
+(domyślnie `now()`; `match_feedback_updated_at_check`: `updated_at >= created_at`). Klucz
+główny `match_feedback_pkey (profile_id, opportunity_id)`; zapis tylko przez
+`INSERT … ON CONFLICT DO UPDATE` (`updated_at` zmienia się tylko ze zmianą werdyktu).
+Indeksy `match_feedback_updated_at_idx` (`feedback:report --since`) i
+`match_feedback_opportunity_id_idx` (kaskada). Wszystkie kolumny `NOT NULL`; nigdy tytuł ani
+adres.
+
 ### Później
 
-Żadnych tabel analitycznych w MVP.
+Żadnych tabel analitycznych w MVP (oceny `match_feedback` to dane produktu, nie analityka).
 
 ## 6. Uruchamianie
 
@@ -1072,11 +1117,21 @@ release failed`. `ingest` i `digest` nie blokują się wzajemnie.
 - `access:link <profileId>` (PR-06A) — wydaje link logowania (jednorazowy, 7 dni) i wypisuje
   `{"status":"ok","url":…,"expiresAt":…}` na stdout (ostrzeżenie „link jest sekretem” na
   stderr). Wymaga `PUBLIC_BASE_URL`; nieznany profil → kod 1. Link jest tylko na stdout.
-- `access:revoke <profileId>` (PR-06A) — usuwa w jednej transakcji wszystkie tokeny (logowania
-  i wypisu) i sesje profilu (`revokeProfileAccess`); `company_profiles` bez zmian. Wypisuje
+- `access:revoke <profileId>` (PR-06A) — usuwa w jednej transakcji wszystkie tokeny (logowania,
+  wypisu, potwierdzenia adresu i ocen) i sesje profilu (`revokeProfileAccess`); `company_profiles` bez zmian. Wypisuje
   `{"status":"ok","tokens":…,"sessions":…}`. Kontrola schematu jak w `access:link`, bez
   `PUBLIC_BASE_URL`; nieznany profil → kod 1.
-- `digest` przy ustawionym `PUBLIC_BASE_URL` dodaje do e-maili linki (§4.5).
+- `digest` przy ustawionym `PUBLIC_BASE_URL` dodaje do e-maili linki (§4.5), od PR-12 także
+  „Trafne”/„Nietrafne” na końcu każdej karty, po szczegółach dopasowania (jeden token
+  `feedback` na e-mail, 60 dni).
+- `feedback:report [--since YYYY-MM-DD]` (PR-12, D-032) — `countFeedback` (trzy `GROUP BY`
+  w jednej migawce `REPEATABLE READ`: oceny na profil i na zestaw kodów CPV oferty oraz
+  pokrycie na profil — `deliveries` `sent` `LEFT JOIN match_feedback` po (profil, oferta),
+  `count(DISTINCT …)`; `--since` to północ czasu polskiego, porównywana z `updated_at` ocen i
+  `sent_at` dostaw) → `buildFeedbackReport` (kategorie MVP z CPV, precyzja `null` przy zerze
+  ocen, `coverage` `null` przy zerze wysłanych; profile z ocenami lub z wysłanymi ofertami).
+  Jedna linia JSON z id, kategoriami i liczbami.
+  Zły argument → kod 2; nieaktualny schemat albo baza niedostępna → kod 1.
 - `deliveries:pending` i `deliveries:resolve <profileId> --sent|--failed [--date] [--transport]`
   (PR-09, D-024) — decyzja operatora o wierszach `pending` (`deliveries-repository.ts`):
   `listPendingDeliveries` (grupy profil × transport × dzień digestu, tylko id, daty i liczby,
@@ -1156,7 +1211,7 @@ nie ponawia się w nieskończoność.
 | Blokady ingest/digest                                       | sprawdzanie połączenia co 5 s                                                                                                                                                                         | brak — utrata blokady przerywa przebieg                                                                                                           |
 | SMTP (`digest`, `status --notify`, e-maile dostępu `serve`) | połączenie 10 s, powitanie 10 s, gniazdo 30 s, DNS 10 s                                                                                                                                               | chwilowe błędy: najwyżej 2 w przebiegu (po 2 s i 10 s); `failed` — kolejne uruchomienia do 3 prób na ofertę; `uncertain` nigdy                    |
 | `serve`                                                     | nagłówki 10 s, żądanie 15 s, keep-alive 5 s, zamknięcie po SIGTERM: żądania ≤ 10 s, potem e-mail dostępu w toku ≤ 5 s                                                                                 | —                                                                                                                                                 |
-| `/dopasowania`                                              | czekanie w kolejce ≤ 3 s (≤ 8 czekających) → 503; ≤ 2 żądania na sesję → 429                                                                                                                          | — (klient ponawia po `Retry-After: 5`)                                                                                                            |
+| `/dopasowania`, `/dopasowania.csv`                          | czekanie w kolejce ≤ 3 s (≤ 8 czekających) → 503; ≤ 2 żądania na sesję → 429                                                                                                                          | — (klient ponawia po `Retry-After: 5`)                                                                                                            |
 | `/zdrowie`                                                  | czekanie na `select 1` ≤ 2 s → 503; jedno zapytanie naraz, wspólne dla równoległych żądań (zawieszone zostaje wspólne, aż skończy je limit puli)                                                      | — (kolejne żądanie sprawdza ponownie)                                                                                                             |
 | `pg_dump` / `pg_restore` (`backup`/`restore`)               | 30 min, potem SIGTERM, po 5 s SIGKILL; połączenie 10 s (`PGCONNECT_TIMEOUT`)                                                                                                                          | brak                                                                                                                                              |
 | Heartbeat (`status`, `HEARTBEAT_URL`)                       | 10 s na całość (połączenie, TLS, żądanie, nagłówki odpowiedzi); ogranicza wynik, nie czas życia procesu (trwający `getaddrinfo` może go przedłużyć do limitu resolvera; kod wyjścia i logi bez zmian) | brak (kolejny `status` wyśle nowy ping)                                                                                                           |

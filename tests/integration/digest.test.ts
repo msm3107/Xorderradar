@@ -1161,12 +1161,22 @@ describe.skipIf(skipWithoutDatabase)("digest (PostgreSQL)", () => {
       const login = new RegExp(`${BASE}/dostep/([A-Za-z0-9_-]{43})`).exec(email.text)?.[1];
       const unsubscribe = new RegExp(`${BASE}/wypis/([A-Za-z0-9_-]{43})`).exec(email.text)?.[1];
       if (login === undefined || unsubscribe === undefined) throw new Error("links missing");
+      // PR-12: one rating token per e-mail, in both links of every card.
+      const feedback = new RegExp(`${BASE}/ocena/([A-Za-z0-9_-]{43})/`).exec(email.text)?.[1];
+      if (feedback === undefined) throw new Error("rating links missing");
       expect(email.unsubscribeUrl).toBe(`${BASE}/wypis/${unsubscribe}`);
       expect(email.text).toContain("Twój profil");
       expect(email.html).toContain(`<a href="${BASE}/dostep/${login}">`);
       expect(email.html).toContain(`<a href="${BASE}/wypis/${unsubscribe}">`);
       // Stored as hashes only, for the profile, with their lifetimes; never printed.
       expect(await tokens()).toEqual([
+        {
+          purpose: "feedback",
+          profile_id: profile.id,
+          token_hash: hashSecretToken(feedback),
+          used_at: null,
+          ttl: 60 * 24 * 3600,
+        },
         {
           purpose: "login",
           profile_id: profile.id,
@@ -1184,6 +1194,8 @@ describe.skipIf(skipWithoutDatabase)("digest (PostgreSQL)", () => {
       ]);
       expect(result.stderr).not.toContain(login);
       expect(result.stderr).not.toContain(unsubscribe);
+      expect(result.stderr).not.toContain(feedback);
+      expect(JSON.stringify(result.report)).not.toContain(feedback);
       expect(await consumeLoginToken(schema.db, login)).toMatchObject({ profileId: profile.id });
     });
 

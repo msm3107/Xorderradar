@@ -3,9 +3,11 @@ import type { CompanyProfile } from "../src/domain/company-profile.js";
 import type { Opportunity } from "../src/domain/opportunity.js";
 import { MVP_CATEGORIES, VOIVODESHIPS } from "../src/domain/vocabulary.js";
 import { matchOpportunity } from "../src/matching/match.js";
-import { offerCard } from "../src/notifications/card.js";
+import { MORE_LABEL, offerCard } from "../src/notifications/card.js";
 import {
   errorPage,
+  feedbackConfirmPage,
+  feedbackSavedPage,
   invalidLinkPage,
   loginConfirmPage,
   loginRefusedPage,
@@ -431,7 +433,7 @@ describe("matchesPage", () => {
 
   it("says the list includes offers already sent by e-mail", () => {
     expect(matchesPage(view()).html).toContain(
-      "<p>Lista obejmuje także zamówienia, które już wysłaliśmy e-mailem.</p>",
+      " (czas polski). Lista obejmuje także zamówienia, które już wysłaliśmy e-mailem.</p>",
     );
   });
 
@@ -440,13 +442,15 @@ describe("matchesPage", () => {
     expect(html).toContain(
       '<p class="note">Powiadomienia e-mail są wyłączone: tej listy nie wysyłamy.',
     );
-    expect(html).toContain("I 3 kolejne pasujące zamówienia z dalszym terminem.");
+    expect(html).toContain(
+      "I 3 kolejne pasujące zamówienia z dalszym terminem lub ocenione jako nietrafne.",
+    );
     expect(html).toContain("Lista może być niepełna");
     expect(matchesPage(view({ more: 1 })).html).toContain(
-      "I 1 kolejne pasujące zamówienie z dalszym terminem.",
+      "I 1 kolejne pasujące zamówienie z dalszym terminem lub ocenione jako nietrafne.",
     );
     expect(matchesPage(view({ more: 12 })).html).toContain(
-      "I 12 kolejnych pasujących zamówień z dalszym terminem.",
+      "I 12 kolejnych pasujących zamówień z dalszym terminem lub ocenionych jako nietrafne.",
     );
     expect(matchesPage(view()).html).not.toContain("z dalszym terminem");
   });
@@ -464,6 +468,194 @@ describe("matchesPage", () => {
     );
     expect(page.html).toContain('<p><a href="/dopasowania">Spróbuj ponownie</a></p>');
     expect(page.html).toContain('<a href="/profil">Twój profil</a>');
+    expect(page.html).not.toMatch(NO_SCRIPT);
+  });
+
+  describe("rating (PR-12)", () => {
+    const CSRF = "C".repeat(43);
+    const rated = (
+      value: Opportunity,
+      verdict: "relevant" | "not_relevant" | null,
+      next: string | null = null,
+    ): MatchesView["items"][number] => ({
+      ...cardOf(value),
+      feedback: { opportunityId: value.id, verdict, csrf: CSRF, next },
+    });
+
+    it("puts the „Trafne”/„Nietrafne” form, with CSRF and the offer id, under each card", () => {
+      const { html } = matchesPage(view({ items: [rated(offer, null)] }));
+      expect(html).not.toMatch(NO_SCRIPT);
+      expect(html).toContain(
+        `<li id="oferta-${offer.id}"><article><h2>Modernizacja oświetlenia</h2>`,
+      );
+      expect(html).toContain(
+        '<form method="post" action="/dopasowania/ocena" class="ocena">' +
+          "<p>Czy to zamówienie pasuje?</p>" +
+          `<input type="hidden" name="csrf" value="${CSRF}">` +
+          `<input type="hidden" name="oferta" value="${offer.id}">` +
+          '<button type="submit" name="werdykt" value="trafne" ' +
+          'aria-label="Trafne: Modernizacja oświetlenia">Trafne</button>' +
+          '<button type="submit" name="werdykt" value="nietrafne" ' +
+          'aria-label="Nietrafne: Modernizacja oświetlenia">Nietrafne</button></form>',
+      );
+    });
+
+    it("ends the card with the form, after „Więcej szczegółów” (D-030 order)", () => {
+      // Also with a cut description, whose „Pełny opis” <details> comes first.
+      const cut = { ...offer, description: "Wymiana opraw. ".repeat(40) };
+      expect(cardOf(cut).fullDescription).not.toBeNull();
+      for (const value of [offer, cut]) {
+        const { html } = matchesPage(view({ items: [rated(value, null)] }));
+        // The one card: from its anchor to the end of its article.
+        const start = html.indexOf(`<li id="oferta-${value.id}">`);
+        const card = html.slice(start, html.indexOf("</article>", start) + "</article>".length);
+        const at = [
+          card.indexOf('class="button"'),
+          card.indexOf(`<summary>${MORE_LABEL}`),
+          // The last </details>: the „Więcej szczegółów” one, not „Pełny opis”.
+          card.lastIndexOf("</details>"),
+          card.indexOf('<form method="post" action="/dopasowania/ocena"'),
+          card.indexOf("</article>"),
+        ];
+        expect(start).toBeGreaterThanOrEqual(0);
+        expect(at.every((index) => index >= 0)).toBe(true);
+        expect(at).toEqual([...at].sort((a, b) => a - b));
+        expect(at[4]).toBe(card.length - "</article>".length);
+      }
+    });
+
+    it("shows the current rating and greys a „Nietrafne” card", () => {
+      const relevant = matchesPage(view({ items: [rated(offer, "relevant")] })).html;
+      expect(relevant).toContain("<p>Twoja ocena: <strong>trafne</strong>. Możesz ją zmienić.</p>");
+      expect(relevant).not.toContain('class="nietrafne"');
+      const notRelevant = matchesPage(view({ items: [rated(offer, "not_relevant")] })).html;
+      expect(notRelevant).toContain(`<li id="oferta-${offer.id}"><article class="nietrafne"><h2>`);
+      expect(notRelevant).toContain(
+        "<p>Twoja ocena: <strong>nietrafne</strong>. Możesz ją zmienić.</p>",
+      );
+    });
+
+    it("marks the current verdict's button pressed and bold, only once rated", () => {
+      const relevant = matchesPage(view({ items: [rated(offer, "relevant")] })).html;
+      expect(relevant).toContain(
+        '<button type="submit" name="werdykt" value="trafne" ' +
+          'aria-label="Trafne: Modernizacja oświetlenia" aria-pressed="true">' +
+          "<strong>Trafne</strong></button>" +
+          '<button type="submit" name="werdykt" value="nietrafne" ' +
+          'aria-label="Nietrafne: Modernizacja oświetlenia" aria-pressed="false">' +
+          "Nietrafne</button>",
+      );
+      const notRelevant = matchesPage(view({ items: [rated(offer, "not_relevant")] })).html;
+      expect(notRelevant).toContain(
+        'aria-label="Trafne: Modernizacja oświetlenia" aria-pressed="false">Trafne</button>',
+      );
+      expect(notRelevant).toContain(
+        'aria-label="Nietrafne: Modernizacja oświetlenia" aria-pressed="true">' +
+          "<strong>Nietrafne</strong></button>",
+      );
+      expect(matchesPage(view({ items: [rated(offer, null)] })).html).not.toContain("aria-pressed");
+    });
+
+    it("names the card that follows in the form (`nastepna`), the last card none", () => {
+      const nextId = "00000000-0000-4000-8000-0000000000ff";
+      const { html } = matchesPage(view({ items: [rated(offer, null, nextId)] }));
+      expect(html).toContain(
+        `<input type="hidden" name="oferta" value="${offer.id}">` +
+          `<input type="hidden" name="nastepna" value="${nextId}">` +
+          '<button type="submit" name="werdykt" value="trafne"',
+      );
+      expect(matchesPage(view({ items: [rated(offer, null)] })).html).not.toContain("nastepna");
+    });
+
+    it("escapes a hostile title in the buttons' labels", () => {
+      const hostile = { ...offer, title: '"><img src=x onerror=alert(1)>' };
+      const { html } = matchesPage(view({ items: [rated(hostile, null)] }));
+      expect(html).not.toMatch(NO_MARKUP_FROM_DATA);
+      expect(html).toContain('aria-label="Trafne: &quot;&gt;&lt;img src=x onerror=alert(1)&gt;"');
+    });
+
+    it("explains the rating and links the CSV export", () => {
+      const { html } = matchesPage(view({ items: [rated(offer, null)] }));
+      const rating =
+        "<p>Oceń zamówienia przyciskami „Trafne” i „Nietrafne” — pomagasz nam lepiej je " +
+        "dobierać. Ocenione jako nietrafne są wyszarzone i na końcu listy.</p>";
+      expect(html).toContain(rating);
+      // Under the list, so the first card stays on a phone's first screen (the CSV link above it).
+      expect(html.indexOf(rating)).toBeGreaterThan(html.indexOf("</ol>"));
+      expect(html).toContain(
+        '<p><a href="/dopasowania.csv">Pobierz listę jako CSV</a> (Excel, Arkusze Google).</p>',
+      );
+    });
+
+    it("says the CSV holds only the shown offers when there are more", () => {
+      const items = Array.from({ length: 50 }, () => rated(offer, null));
+      const { html } = matchesPage(view({ items, more: 7 }));
+      expect(html).toContain(
+        '<p><a href="/dopasowania.csv">Pobierz listę jako CSV</a> (Excel, Arkusze Google' +
+          "; pierwsze 50 z 57 — zawęź profil, aby mieć wszystkie).</p>",
+      );
+    });
+  });
+});
+
+describe("rating link pages (PR-12)", () => {
+  const PATH = `/ocena/${"F".repeat(43)}/00000000-0000-4000-8000-000000000001/nietrafne`;
+
+  const OPPOSITE = PATH.replace(/nietrafne$/, "trafne");
+  const confirm = (
+    title: string,
+    verdict: "relevant" | "not_relevant",
+    current: "relevant" | "not_relevant" | null,
+  ) =>
+    feedbackConfirmPage({
+      title,
+      verdict,
+      current,
+      path: verdict === "not_relevant" ? PATH : OPPOSITE,
+      oppositePath: verdict === "not_relevant" ? OPPOSITE : PATH,
+    });
+
+  it("confirms with a POST form to the same path, the offer's title escaped", () => {
+    const page = confirm("Remont <b>szkoły</b>", "not_relevant", null);
+    expect(page.status).toBe(200);
+    expect(page.html).not.toMatch(NO_SCRIPT);
+    expect(page.html).not.toMatch(NO_MARKUP_FROM_DATA);
+    expect(page.html).toContain(
+      "<p>Zamówienie: <strong>Remont &lt;b&gt;szkoły&lt;/b&gt;</strong></p>",
+    );
+    expect(page.html).toContain(
+      `<form method="post" action="${PATH}"><button type="submit">Zapisz ocenę: nietrafne</button></form>`,
+    );
+    expect(page.html).not.toContain("Obecna ocena");
+  });
+
+  it("shows the current rating when there is one", () => {
+    const page = confirm("Remont szkoły", "not_relevant", "relevant");
+    expect(page.html).toContain("<p>Obecna ocena: trafne.</p>");
+    expect(page.html).toContain(
+      `<form method="post" action="${PATH}"><button type="submit">Zapisz ocenę: nietrafne</button></form>`,
+    );
+  });
+
+  it("offers only the other verdict when the offer already has the link's one", () => {
+    const page = confirm("Remont szkoły", "not_relevant", "not_relevant");
+    expect(page.status).toBe(200);
+    expect(page.html).toContain("<p>To zamówienie ma już ocenę: nietrafne.</p>");
+    expect(page.html).toContain(
+      `<form method="post" action="${OPPOSITE}"><button type="submit">Zmień ocenę na: trafne</button></form>`,
+    );
+    expect(page.html).not.toContain(`action="${PATH}"`);
+    expect(page.html).not.toContain("Obecna ocena");
+    expect(page.html).not.toContain("Zapisz ocenę");
+  });
+
+  it("thanks after saving, naming the rating", () => {
+    const page = feedbackSavedPage("relevant");
+    expect(page.status).toBe(200);
+    expect(page.html).toContain("Dziękujemy za ocenę");
+    expect(page.html).toContain("<p>Zapisaliśmy ocenę: trafne.</p>");
+    expect(page.html).toContain("<p>Możesz zamknąć tę kartę i wrócić do wiadomości.</p>");
+    expect(page.html).toContain('<a href="/dopasowania">Pasujące zamówienia</a>');
     expect(page.html).not.toMatch(NO_SCRIPT);
   });
 });
