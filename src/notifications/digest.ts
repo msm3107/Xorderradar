@@ -1,12 +1,12 @@
 import type { CompanyProfile } from "../domain/company-profile.js";
 import type { FeedbackVerdict } from "../infrastructure/db/schema.js";
 import { escapeHtml } from "../infrastructure/html.js";
-import { formatWarsawMinute } from "../sources/normalize/warsaw-time.js";
 import {
   MATCH_DETAILS_LABEL,
   OPEN_LABEL,
   URGENT_WORD,
   formatPolishDayMonth,
+  formatPolishMinute,
   offerCard,
   plural,
   safeLink,
@@ -200,7 +200,7 @@ function digestModel(
     feedback: feedbackLinks(options.links, item.offer.id),
   }));
   const footer: FooterParagraph[] = [
-    { text: `Stan na ${formatWarsawMinute(now)} (czas polski).` },
+    { text: `Stan na ${formatPolishMinute(now)} (czas polski).` },
     {
       text:
         "Dane pochodzą z publicznych ogłoszeń. Termin mógł się zmienić, a postępowanie mogło " +

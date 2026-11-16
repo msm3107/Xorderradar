@@ -158,8 +158,20 @@ function calendarDay(local: WarsawLocalTime): number {
 
 /** `DD.MM.YYYY` in Poland's time. */
 export function formatPolishDay(instant: Date): string {
-  const local = warsawWallTime(instant);
+  return polishDay(warsawWallTime(instant));
+}
+
+function polishDay(local: WarsawLocalTime): string {
   return `${pad2(local.day)}.${pad2(local.month)}.${String(local.year)}`;
+}
+
+/**
+ * `DD.MM.YYYY HH:MM` in Poland's time: „Stan na …” of /dopasowania and of the
+ * digest's footer (PR-15: one format, the card's day format).
+ */
+export function formatPolishMinute(instant: Date): string {
+  const local = warsawWallTime(instant);
+  return `${polishDay(local)} ${pad2(local.hour)}:${pad2(local.minute)}`;
 }
 
 /** `DD.MM` in Poland's time (the subject's nearest deadline). */
@@ -215,13 +227,32 @@ function formatLocation(location: OpportunityLocation | null): string {
   return location.raw ?? NOT_GIVEN;
 }
 
+/** Whitespace between two parts of one number: after a digit or ")", before a digit, "(" or "+". */
+const PHONE_GROUP_GAP = /(?<=[\d)])\s+(?=[\d(+])/gu;
+
+/**
+ * A phone as the card shows it (PR-15): the spaces between its digit groups
+ * become no-break spaces (U+00A0), so a 390 px phone never wraps it
+ * mid-number („(22) 765-43-21” stays one piece; a browser does not break
+ * after a hyphen or a slash before a digit, UAX #14 LB25). Display only: the
+ * stored value is not changed and its digits and separators stay as
+ * published. A space after a comma or a word („…, 22 765 43 22”, „wew. 12”)
+ * can still wrap, so two numbers in one field do not make one long piece.
+ */
+export function formatPhone(value: string): string {
+  return cleanText(value).replace(PHONE_GROUP_GAP, "\u00a0");
+}
+
+/** The contact row, each part cleaned; the phone with no-break spaces (formatPhone). */
 function formatContact(contact: OpportunityContact | null): string | null {
   if (contact === null) return null;
-  const parts = [contact.name, contact.email, contact.phone].filter(
-    (part): part is string => part !== undefined,
-  );
+  const parts = [
+    contact.name === undefined ? undefined : cleanText(contact.name),
+    contact.email === undefined ? undefined : cleanText(contact.email),
+    contact.phone === undefined ? undefined : formatPhone(contact.phone),
+  ].filter((part): part is string => part !== undefined);
   if (parts.length > 0) return parts.join(", ");
-  return contact.raw ?? null;
+  return contact.raw === undefined ? null : cleanText(contact.raw);
 }
 
 /** The source link when it is http(s); anything else (e.g. `javascript:`) is not shown. */
@@ -374,8 +405,9 @@ export function offerCard({ offer, reasons }: MatchedOffer, now: Date): OfferCar
       offer.publishedAt === null ? NOT_GIVEN : formatPolishDay(offer.publishedAt),
     ),
   ];
+  // Cleaned part by part (formatContact): cleaning the whole would undo the phone's no-break spaces.
   const contact = formatContact(offer.contact);
-  if (contact !== null) more.push(row("Kontakt", cleanText(contact)));
+  if (contact !== null) more.push(row("Kontakt", contact));
   return {
     title: cleanText(offer.title),
     lead,

@@ -1513,8 +1513,9 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     (`invalid_stored_row`) i wycofany. Zapis łapie dokładnie ten kod (żadnego szerokiego
     `catch`) i odpowiada **409** „Nie zapisano zmian” („Profil zawiera ustawienie, które może
     poprawić tylko obsługa serwisu (na przykład powiaty). Dopóki go nie poprawi, zmian w
-    formularzu nie da się zapisać.”) z kontaktem do obsługi (`CONTACT_EMAIL`,
-    bez niego „odpowiedz na ostatnią wiadomość”); nic nie zapisane, bez e-maila, w logu `warn`
+    formularzu nie da się zapisać.”) z kontaktem do obsługi („Kontakt z obsługą serwisu:
+    `CONTACT_EMAIL`”, bez niego „… odpowiedz na nasz e-mail.” — od PR-15 tak samo jak w notce o
+    powiatach); nic nie zapisane, bez e-maila, w logu `warn`
     tylko id profilu, kod i ścieżki pól. 409, nie 500: żądanie jest poprawne, a konflikt jest
     ze stanem zapisanego profilu (ponowienie da to samo, dopóki operator go nie poprawi); 500
     zostaje dla awarii. `/dopasowania` (i CSV) przy profilu odrzucanym na polach, których
@@ -1536,7 +1537,17 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     zostawałoby 24 px — mniej niż jedna linia z trzema powiatami, wyjaśnieniem wpływu na „Cała
     Polska” i kontaktem do obsługi. Właściciel zaakceptował (2026-11-15) 1473 px: notka 5 linii
     w stylu podpowiedzi zamiast żółtej ramki (z ramką i krótszym tekstem byłoby 1571 px); po review
-    PR #20 („Zmiana powiatów:”) — 1494 px, notka 6 linii.
+    PR #20 („Zmiana powiatów:”) — 1494 px, notka 6 linii. PR-15 (jedno brzmienie): notka
+    „Powiaty (ustawia obsługa serwisu): … Ogłoszenia nie podają powiatu, więc przy „Cała
+    Polska” tylko zamówienia z pasującą kategorią i słowem kluczowym. Zmiana powiatów:
+    `CONTACT_EMAIL` | odpowiedz na nasz e-mail.” — dalej 6 linii i 1494 px, z kontaktem i bez.
+  - **Jedno brzmienie (PR-15):** ten sam fakt tymi samymi słowami — „Ogłoszenia nie podają
+    powiatu” w notce ustawień i w obu notkach `/dopasowania` („Powiaty zapisane w profilu nie
+    zawężają listy. Ogłoszenia nie podają powiatu, więc liczy się województwo.”; bez województw
+    to samo zdanie o „Cała Polska” co w ustawieniach); obsługa zawsze „obsługa serwisu”, droga
+    do niej zawsze `CONTACT_EMAIL` (link), a bez niego „odpowiedz na nasz e-mail” (notka,
+    409 zapisu, profil odrzucany na `/dopasowania`). Inne strony mówią „operator serwisu”
+    (strona główna, 429, adres zajęty, e-maile) — poza zakresem PR-15.
   - **Po zapisie:** komunikat „Lista dopasowań pokazuje zmiany od razu, e-mail — od jutra.” z
     linkiem „Zobacz pasujące zamówienia” (`/dopasowania`), także przy zmianie adresu.
     Uproszczenie: zapis przed porannym digestem działa już w tym digeście.
@@ -2147,7 +2158,12 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     dopasowania)” — podsumowanie wymienia tylko to, co jest w środku; bez skryptu i bez
     zagnieżdżania `<details>`. W e-mailu wszystko jest widoczne (programy pocztowe nie
     wszystkie obsługują `<details>`), `more` i szczegóły mniejszym drukiem na końcu karty.
-    Brakujące wartości bez zmian: „nie podano”, nigdy zgadywane. Przykład `/przyklad` ma
+    Brakujące wartości bez zmian: „nie podano”, nigdy zgadywane. Telefon w kontakcie (PR-15,
+    `formatPhone`): spacje między grupami cyfr jednego numeru to przy wyświetlaniu twarde
+    spacje (U+00A0), więc numer nie łamie się w środku na 390 px; zapisana wartość bez zmian
+    (cyfry i separatory jak w źródle), spacja po przecinku lub słowie („wew.”) dalej łamie.
+    „Stan na …” w stopce e-maila i na `/dopasowania`: jeden format `DD.MM.RRRR GG:MM`
+    (`formatPolishMinute`, PR-15; wcześniej `RRRR-MM-DD GG:MM`). Przykład `/przyklad` ma
     kontakt tylko z e-mailem i telefonem, jak prawdziwe karty (D-022: adaptery nie
     zapisują imion i nazwisk).
 
@@ -2327,7 +2343,8 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
   - **`/dopasowania`:** na końcu każdej karty, po `<details>` „Więcej szczegółów (…)” z
     D-030, formularz POST `/dopasowania/ocena` (sesja + CSRF,
     pola `csrf`, `oferta`, `werdykt` i opcjonalne `nastepna`) z dwoma przyciskami o etykietach
-    dostępnych; po ocenie przycisk bieżącej oceny ma `aria-pressed="true"` i pogrubienie. Kolejność
+    dostępnych; po ocenie przycisk bieżącej oceny ma `aria-pressed="true"` i pogrubienie (od PR-15
+    oba przyciski zawsze mają `aria-pressed`, przed oceną oba `false`). Kolejność
     sprawdzeń: brak sesji 401 → zły CSRF 403 → zły formularz, werdykt lub id 400 → oferta
     niewysłana profilowi i niepasująca do niego teraz 404 (także oferta innego profilu) →
     zapis i 303 na `/dopasowania#oferta-<id>`; po „Nietrafne” (karta idzie na koniec) na
@@ -2339,7 +2356,8 @@ YYYY-MM-DD] [--transport test|smtp]`: `--sent` (doręczono) → wiersze `sent`, 
     znać spoza listy). Skutek ograniczony do własnych ocen klienta: może ocenić tylko oferty
     zgodne ze swoim profilem, zapisuje się wyłącznie jego wiersz, a w `feedback:report`
     dodaje szum tylko do własnego wiersza (i do sum, w które ten wiersz wchodzi). Oceny wczytywane jednym zapytaniem
-    (`= ANY(uuid[])`) dla całej listy. Oceny „nietrafne” są wyszarzone i przesunięte na
+    (`= ANY(uuid[])`) dla całej listy. Oceny „nietrafne” są wyszarzone (od PR-15 z etykietą
+    „Oznaczone jako nietrafne” na górze karty) i przesunięte na
     koniec (kolejność digestu zachowana w obu częściach) przed obcięciem do
     `MATCHES_SHOWN` (od PR-13: przed podziałem na strony, D-027).
   - **`GET /dopasowania.csv`** (sesja, ten sam slot dopasowań co strona): te same wiersze,

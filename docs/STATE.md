@@ -1,7 +1,7 @@
 # Current State
 
 Current phase: PHASE 4 — PILOT
-Current PR: PR-14 — CSV całej listy i krótsza notka o powiatach (UX/QOL series)
+Current PR: PR-15 — Spójne teksty i karta bez zgrzytów (UX/QOL series)
 Status: PR-08 **MERGED in PR #14 (366618e)**. PR-09 **MERGED in PR #15 (42dd008)**. PR-10
 **MERGED in PR #16 (3b70f94)**. PR-11 **MERGED in PR #17 (b974984)**. PR-12 **MERGED in PR #18
 (b4c7e4c)** after the owner's review 2026-11-12 (delivery coverage in `feedback:report`; the
@@ -17,7 +17,11 @@ PR-13 **MERGED in PR #19 (716a85f)**. PR-14 (whole-list CSV, shorter counties no
 implemented; Code & Safety Review PASS (round 2), Quality Review ACCEPT WITH NOTES; PR #20 open.
 Owner review of PR #20: PASS; owner decisions applied („Zmiana powiatów:” in the note, whole-list
 CSV cut at 1000 named `-pierwsze-1000`); Code & Safety Review PASS, Quality Review ACCEPT WITH
-NOTES; 2340 tests → back in owner review (not merged by the agents). Owner steps on the VPS for PR-08 (AC1,
+NOTES; 2340 tests. PR-14 **MERGED in PR #20 (f99b039)**. PR-15 (one wording for the counties fact
+and the support contact, unbreakable phone, Polish „Stan na” in the e-mail, „Oznaczone jako
+nietrafne” label + `aria-pressed`): implemented; Code & Safety Review PASS (+ follow-ups PASS);
+Quality Review ACCEPT; 2354 tests → PR open for owner review (not merged by the agents).
+Owner steps on the VPS for PR-08 (AC1,
 `bk` backfill, DEPLOY §6) remain in Blockers.
 
 ## Completed
@@ -695,7 +699,28 @@ Round-1 fixes:
 
 ## In progress
 
-**PR-14 — CSV całej listy i krótsza notka o powiatach** (`docs/PR_PLAN.md` → PR-14) —
+**PR-15 — Spójne teksty i karta bez zgrzytów** (`docs/PR_PLAN.md` → PR-15) — the owner's
+follow-ups from PR-11, PR-12 and PR #20, no new dependency, no migration:
+
+- One wording (D-027 „Jedno brzmienie (PR-15)”): the fact is always „Ogłoszenia nie podają
+  powiatu”, the contact always „Kontakt z obsługą serwisu: …” / „Zmiana powiatów: …” with the
+  `CONTACT_EMAIL` link or „odpowiedz na nasz e-mail”, on the settings note, the `/dopasowania`
+  note, the 409 page and the „only support can fix” `/dopasowania` page. „operator serwisu” is
+  left on the home, 429 and e-mail-taken pages, the access e-mail and the digest unsubscribe
+  text (D-027, next text change).
+- Phone (D-030): spaces between digit groups shown as U+00A0 on the web card and in the e-mail;
+  stored data unchanged. „(22) 765-43-21” at 390 px: 2 lines → 1.
+- „Stan na” on `/dopasowania` and in the e-mail (text and HTML) via one `formatPolishMinute`
+  („DD.MM.RRRR GG:MM”, Warsaw, DST tested); CSV/CLI times stay ISO.
+- A card rated „Nietrafne” shows „Oznaczone jako nietrafne” at its top; both rating buttons carry
+  `aria-pressed="true|false"` (D-032). Old email-sender fixture subject updated.
+- AC2: worst-case settings form at 390 px 1494 → 1494 px, with and without `CONTACT_EMAIL`.
+- Code & Safety Review PASS (Lows: RUNBOOK quote, README wrap, double wall-time call, DST test —
+  all fixed, re-check PASS); Quality Review ACCEPT (notes: resubscribe hint still „odpowiedz na ostatnią wiadomość”
+  without `CONTACT_EMAIL`; BK „pobrano” ISO next to Polish dates; the `/dopasowania` counties
+  note shares the settings note's verb-less sentence — all left for the next text change). 2340 → 2354 tests.
+
+**PR-14 — CSV całej listy i krótsza notka o powiatach** (MERGED in PR #20, f99b039) (`docs/PR_PLAN.md` → PR-14) —
 `GET /dopasowania.csv` without `strona` = the whole list (≤ 1000 rows, list order, „Nietrafne”
 last, one computation in the same slot); `?strona=N` kept for old links (every page file named
 `-strona-N`, incl. 1); one whole-list link on every list page; read-only counties note 10 → 5
@@ -703,8 +728,8 @@ lines in the hint style (form 1619 → 1473 px, owner-accepted). Code & Safety R
 CHANGES REQUIRED (AC3; Low file name) → round 2 PASS; Quality Review ACCEPT WITH NOTES; 2339
 tests. Owner review of PR #20: PASS; decisions applied: note says „Zmiana powiatów:” (6 lines,
 form 1494 px), a whole-list CSV cut at 1000 is named `dopasowania-RRRR-MM-DD-pierwsze-1000.csv`
-(content unchanged); Code & Safety Review PASS, Quality Review ACCEPT WITH NOTES; 2340 tests. PR open for owner review (not merged
-by the agents).
+(content unchanged); Code & Safety Review PASS, Quality Review ACCEPT WITH NOTES; 2340 tests.
+Merged by the owner in PR #20 (f99b039).
 
 **PR-13 — Ustawienia bez pułapek** (MERGED in PR #19, 716a85f) (`docs/PR_PLAN.md` → PR-13) — base branch (b4c7e4c, PR-11 +
 PR-12 merged) merged in 2026-11-15 (05dc031); `pnpm check` green (2332 tests in 65 files, DB
@@ -1416,13 +1441,13 @@ invalid operator counties → 409 with the support contact, not 500).
    `[]` (D-027 updated; Code & Safety PASS, Quality ACCEPT WITH NOTES; 2335 tests). Not merged by
    the agents. QR note: no extra form text (AC3 margin); if the pilot shows lost selections, a
    `/profil` notice variant „zaznaczone województwa usunięte”. Owner decisions:
-   - **PR-14 (done, in owner review):** whole-list CSV (≤ 1000 rows) and a shorter read-only
+   - **PR-14 (MERGED in PR #20, f99b039):** whole-list CSV (≤ 1000 rows) and a shorter read-only
      counties note. The ≥ 40% target with operator counties proved unreachable (form without the
      note 1355 px); owner accepted 1473 px (−36%, 5-line hint) on 2026-11-15 (PR_PLAN AC3, D-027).
      Owner review of PR #20 (PASS): „Zmiana powiatów:” in the note — **done** (6 lines, 1494 px);
      a cut whole-list CSV is named `-pierwsze-1000` — **done**; one wording for the counties fact
-     and the support contact across settings, `/dopasowania` and support text — **at the next
-     text change**; „(najwyżej 1000)” next to the CSV link — superseded by the file name.
+     and the support contact across settings, `/dopasowania` and support text — **done in
+     PR-15** (other pages' „operator serwisu” left for the next text change, D-027); „(najwyżej 1000)” next to the CSV link — superseded by the file name.
    - „Trafne” on a greyed card on page 2+ (card moves back to its deadline position, maybe an
      earlier page; redirect opens the same page at the top): **stays as is** — data correct,
      a redirect to page 1 would lose context.
@@ -1436,18 +1461,15 @@ invalid operator counties → 409 with the support contact, not 500).
    (−41%); worst case (16 voivodeships, 3 counties, pending e-mail change) 2299 → 1619 px
    (−30%).
 
-   Follow-ups from PR-11 and PR-12 (later PRs):
-   - The phone number in a card wraps mid-number at 390 px; format `contact.phone` with
-     no-break spaces (PR-11 Quality nit 2).
-   - Optional desktop alignment of the two card `<dl>` grids
-     (`minmax(11.5rem,max-content) 1fr`, PR-11 Quality nit 1).
-   - `tests/email-sender.test.ts` fixture subject still uses the old company-name format
-     (pass-through only, nothing asserts it; PR-11 C&S round 3 L-a).
-   - The e-mail footer's „Stan na …” date is ISO („2026-11-09 15:38”) while the page says
-     „12.11.2026 07:00” (PR-11 Quality N3).
-   - After the pilot (PR-12 Quality N5): a card rated „nietrafne” has no label at its top
-     (only greyed and moved last), and the chosen rating button is only bold (`aria-pressed`
-     for screen readers).
+   Follow-ups from PR-11 and PR-12:
+   - Done in PR-15: phone with no-break spaces (PR-11 Quality nit 2); email-sender fixture
+     subject (PR-11 C&S L-a); Polish „Stan na” in the e-mail, which was ISO on the page too
+     (PR-11 Quality N3); „Oznaczone jako nietrafne” label and `aria-pressed` (PR-12 Quality N5).
+   - Open (later PR): optional desktop alignment of the two card `<dl>` grids
+     (`minmax(11.5rem,max-content) 1fr`, PR-11 Quality nit 1); „operator serwisu” on the
+     remaining pages, the resubscribe hint („odpowiedz na ostatnią wiadomość”, ignores
+     `CONTACT_EMAIL`), the BK „pobrano” ISO date and the CLI „BZP nie podaje powiatu” warning
+     (D-027; PR-15 Quality notes).
 
 1. PR-09: MERGED in PR #15 (42dd008).
 2. PR-10 – PR-12: merged (PR #16 – #18); their open follow-ups are listed under item 0.
@@ -1707,6 +1729,10 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
 
 ## Last verification
 
+- 2026-11-16, PR-15: `TEST_DATABASE_URL=… REQUIRE_DB_TESTS=1 pnpm check` with PostgreSQL 16 —
+  format, lint, typecheck PASS; 65 files, 2354 tests PASS. Playwright 390 px: worst-case
+  settings form 1494 px before and after, with and without CONTACT_EMAIL; a card with
+  „(22) 765-43-21” keeps the number on one line.
 - 2026-11-15, PR-14 owner-review fixes: `TEST_DATABASE_URL=… REQUIRE_DB_TESTS=1 pnpm check` —
   format, lint, typecheck PASS; 65 files, 2340 tests PASS (new: exactly-1000 boundary → plain
   file name; 1003 rows → `-pierwsze-1000`). Playwright 390 px: worst-case settings form 1494 px

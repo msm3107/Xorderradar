@@ -85,7 +85,8 @@ describe("buildDigest", () => {
       "   Lokalizacja: Przykładowo, woj. mazowieckie",
       "   Opis: Wymiana opraw oświetleniowych na LED.",
       "   Data publikacji: 30.10.2026",
-      "   Kontakt: Jan Kowalski, kontakt@example.invalid, 000 000 000",
+      // The phone with no-break spaces (PR-15), in both parts.
+      "   Kontakt: Jan Kowalski, kontakt@example.invalid, 000\u00a0000\u00a0000",
       "   Szczegóły dopasowania: CPV: 45310000-3",
     ];
     // In this order, one card: the title, value, deadline and why, the link, the
@@ -125,7 +126,9 @@ describe("buildDigest", () => {
       expect(part).toContain("Otrzymujesz tę wiadomość, ponieważ dla firmy");
       expect(part).toContain("Jan Kowalski Elektryka");
       expect(part).toContain("Aby zrezygnować z powiadomień, odpowiedz na tę wiadomość");
-      expect(part).toContain("Stan na 2026-11-01 07:00 (czas polski).");
+      // The page's format (PR-15), not ISO.
+      expect(part).toContain("Stan na 01.11.2026 07:00 (czas polski).");
+      expect(part).not.toContain("2026-11-01 07:00");
       expect(part).toContain(
         "Termin mógł się zmienić, a postępowanie mogło zostać odwołane — przed złożeniem " +
           "oferty sprawdź ogłoszenie w źródle.",

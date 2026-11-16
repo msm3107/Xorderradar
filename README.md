@@ -332,12 +332,12 @@ Nieoczekiwany błąd wewnętrzny kończy komendę kodem `1` ze stałym komunikat
   zamawiający, lokalizacja, opis (wyciąg do ok. 300 znaków, ucięty na granicy słowa, „…”
   tylko po ucięciu; e-mail ma sam wyciąg), źródło (tylko oferty Bazy Konkurencyjności —
   atrybucja wymagana regulaminem, zawsze widoczna, D-030); na końcu data publikacji
-  (DD.MM.RRRR), kontakt (gdy jest) i „Szczegóły dopasowania” (kody CPV i powody techniczne,
-  np. nieznany region). Na stronach te trzy są w jednym natywnym `<details>` „Więcej
-  szczegółów (…)”; w e-mailu (programy pocztowe nie wszystkie obsługują `<details>`) są
-  widoczne, mniejszym drukiem, jako ostatnie linie karty. Kartę zamyka ocena
-  „Trafne”/„Nietrafne” (PR-12; e-mail: linki, `/dopasowania`: przyciski). Dni liczy chwila
-  przebiegu digestu (strona: chwila żądania).
+  (DD.MM.RRRR), kontakt (gdy jest; telefon nie łamie się w środku numeru, PR-15) i „Szczegóły
+  dopasowania” (kody CPV i powody techniczne, np. nieznany region). Na stronach te trzy są w
+  jednym natywnym `<details>` „Więcej szczegółów (…)”; w e-mailu (programy pocztowe nie
+  wszystkie obsługują `<details>`) są widoczne, mniejszym drukiem, jako ostatnie linie karty.
+  Kartę zamyka ocena „Trafne”/„Nietrafne” (PR-12; e-mail: linki, `/dopasowania`: przyciski).
+  Dni liczy chwila przebiegu digestu (strona: chwila żądania).
   **Temat:** „Radar Zamówień: 3 nowe, najbliższy termin 18.11” (1 nowe, 2–4 nowe, 5+ nowych
   z polską odmianą; najbliższy termin nieminiony, bez niego samo „Radar Zamówień: 3 nowe”),
   bez nazwy firmy i bez danych źródła.
@@ -409,11 +409,12 @@ PUBLIC_BASE_URL=https://radar.example.invalid node dist/main.js serve
     akcentu, schemat ciemny (`prefers-color-scheme`), widoczny fokus, przy wąskim ekranie
     (np. 390 px) etykiety nad wartościami. Na końcu każdej karty (po „Więcej szczegółów”)
     przyciski „Trafne” / „Nietrafne” (`POST /dopasowania/ocena`, sesja + CSRF, powrót 303 do
-    karty); ocenę można zmienić, zostaje jedna na ofertę; oferty „nietrafne” są wyszarzone i
-    na końcu całej listy, objaśnienie ocen jest pod listą i linkami stron (PR-12, D-032), a
-    ocena wraca na tę samą stronę. Gdy inna lista jest liczona, strona „Liczymy listę…” (503)
-    odświeża się sama po 3 s (bez JavaScriptu); trzecie równoczesne żądanie jednej sesji
-    dostaje stronę 429 z linkiem „Otwórz listę ponownie”;
+    karty); ocenę można zmienić, zostaje jedna na ofertę; oferty „nietrafne” są wyszarzone, z
+    etykietą „Oznaczone jako nietrafne” na górze karty (PR-15) i na końcu całej listy,
+    objaśnienie ocen jest pod listą i linkami stron (PR-12, D-032), a ocena wraca na tę samą
+    stronę. Gdy inna lista jest liczona, strona „Liczymy listę…” (503) odświeża się sama po 3 s
+    (bez JavaScriptu); trzecie równoczesne żądanie jednej sesji dostaje stronę 429 z linkiem
+    „Otwórz listę ponownie”;
   - `/dopasowania.csv` — cała lista jako jeden plik CSV (te same oferty i kolejność co
     wszystkie strony razem, najwyżej 1000 — dłuższa lista daje plik
     `dopasowania-RRRR-MM-DD-pierwsze-1000.csv`; od PR-14; link „Pobierz listę jako CSV” nad

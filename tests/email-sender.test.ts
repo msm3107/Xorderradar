@@ -22,7 +22,8 @@ import {
 // Pseudonymised data only; nothing here leaves the machine.
 const email: OutgoingEmail = {
   to: "kontakt@example.invalid",
-  subject: "Radar Zamówień: 1 nowe zamówienie — Jan Kowalski",
+  // The digest's subject format (buildDigest): the count and the nearest deadline, no company name.
+  subject: "Radar Zamówień: 1 nowe, najbliższy termin 05.11",
   text: "Znaleźliśmy dziś 1 nowe zamówienie pasujące do Twojej firmy.\n",
   html: "<p>Znaleźliśmy dziś 1 nowe zamówienie pasujące do Twojej firmy.</p>\n",
 };

@@ -5,6 +5,8 @@ import { matchOpportunity, type MatchReason } from "../src/matching/match.js";
 import {
   formatAmount,
   formatDeadline,
+  formatPhone,
+  formatPolishMinute,
   formatValue,
   matchDetails,
   offerCard,
@@ -317,6 +319,91 @@ describe("match details (PR-11)", () => {
   });
 });
 
+describe("phone (PR-15)", () => {
+  const NBSP = "\u00a0";
+
+  // Expected values with "_" for U+00A0, so the no-break spaces are visible here.
+  it.each([
+    ["000 000 000", "000_000_000"],
+    ["+48 22 000 00 00", "+48_22_000_00_00"],
+    ["(22) 000-00-00", "(22)_000-00-00"],
+    ["+48 (22) 000 00 00", "+48_(22)_000_00_00"],
+    ["000/000 00 00", "000/000_00_00"],
+    // A space after a word or a comma still wraps: two numbers are not one long piece.
+    ["000 000 000 wew. 12", "000_000_000 wew. 12"],
+    ["000 000 000, 000 000 001", "000_000_000, 000_000_001"],
+    ["tel. 000 000 000", "tel. 000_000_000"],
+  ])("binds the digit groups of %j with no-break spaces", (value, expected) => {
+    expect(formatPhone(value)).toBe(expected.replaceAll("_", NBSP));
+    // Display only: the digits and separators are the published ones.
+    expect(formatPhone(value).replaceAll(NBSP, " ")).toBe(value);
+  });
+
+  it("collapses whitespace first, so a line break in the source cannot split the number", () => {
+    expect(formatPhone(" 000\n 000\t000 ")).toBe(`000${NBSP}000${NBSP}000`);
+  });
+
+  it("shows the phone unbreakable in the card, leaving the stored contact as it was", () => {
+    const contact = { email: "zamowienia@example.invalid", phone: "+48 22 000 00 00" };
+    const value = offer({ contact });
+    const shown = offerCard(
+      { offer: value, reasons: matchOpportunity(value, profile).reasons },
+      NOW,
+    );
+    expect(shown.more.find((row) => row.label === "Kontakt")?.value).toBe(
+      `zamowienia@example.invalid, +48${NBSP}22${NBSP}000${NBSP}00${NBSP}00`,
+    );
+    expect(value.contact).toEqual({
+      email: "zamowienia@example.invalid",
+      phone: "+48 22 000 00 00",
+    });
+    // No phone: none is made up; the e-mail and a published raw text keep their spaces.
+    expect(card({ contact: { email: "zamowienia@example.invalid" } }).more[1]?.value).toBe(
+      "zamowienia@example.invalid",
+    );
+    expect(card({ contact: { raw: "tel. 000 000 000 (sekretariat)" } }).more[1]?.value).toBe(
+      "tel. 000 000 000 (sekretariat)",
+    );
+    expect(card({ contact: null }).more.map((row) => row.label)).toEqual(["Data publikacji"]);
+  });
+
+  it("keeps the no-break spaces in the e-mail's text and HTML parts and on /dopasowania", () => {
+    const value = offer({ contact: { phone: "000 000 000" } });
+    const item = { offer: value, reasons: matchOpportunity(value, profile).reasons };
+    const phone = `000${NBSP}000${NBSP}000`;
+    const { text, html } = buildDigest(profile, [item], NOW, { overflow: 0 });
+    expect(text).toContain(`   Kontakt: ${phone}\n`);
+    expect(html).toContain(phone);
+    expect(html).not.toContain("000 000 000");
+    const page = matchesPage({
+      active: true,
+      hasVoivodeships: true,
+      hasCounties: false,
+      stateAt: "09.11.2026 10:00",
+      windowDays: 7,
+      items: [offerCard(item, NOW)],
+      pagination: { page: 1, pages: 1, offset: 0, listed: 1, limit: 1000 },
+      more: 0,
+      truncated: false,
+    }).html;
+    expect(page).toContain(`<dt>Kontakt:</dt><dd>${phone}</dd>`);
+  });
+});
+
+describe("state time (PR-15)", () => {
+  it("formats „Stan na …” as DD.MM.YYYY HH:MM in Poland's time", () => {
+    expect(formatPolishMinute(new Date("2026-11-12T06:00:00.000Z"))).toBe("12.11.2026 07:00");
+    // Summer time and a day that is already the next one in Warsaw.
+    expect(formatPolishMinute(new Date("2026-07-01T22:30:00.000Z"))).toBe("02.07.2026 00:30");
+    expect(formatPolishMinute(new Date("2026-01-05T08:05:00.000Z"))).toBe("05.01.2026 09:05");
+  });
+
+  it("follows the DST switch: 02:00 CET jumps to 03:00 CEST on 29.03.2026", () => {
+    expect(formatPolishMinute(new Date("2026-03-29T00:59:00.000Z"))).toBe("29.03.2026 01:59");
+    expect(formatPolishMinute(new Date("2026-03-29T01:00:00.000Z"))).toBe("29.03.2026 03:00");
+  });
+});
+
 describe("offerCard (PR-11)", () => {
   it("groups the rows in the one order every renderer shows (owner's review of PR #17)", () => {
     const bk = card({
@@ -342,8 +429,9 @@ describe("offerCard (PR-11)", () => {
     ]);
     expect(bk.more.map((row) => row.label)).toEqual(["Data publikacji", "Kontakt"]);
     expect(bk.more.find((row) => row.label === "Data publikacji")?.value).toBe("06.11.2026");
+    // The phone with no-break spaces (PR-15): it never wraps mid-number.
     expect(bk.more.find((row) => row.label === "Kontakt")?.value).toBe(
-      "zamowienia@example.invalid, 000 000 000",
+      "zamowienia@example.invalid, 000\u00a0000\u00a0000",
     );
     expect(bk.matchDetails).toEqual(["CPV: 45310000-3"]);
   });
@@ -479,7 +567,7 @@ describe("the same card in the e-mail and on /dopasowania (PR-11 AC3)", () => {
       active: true,
       hasVoivodeships: true,
       hasCounties: false,
-      stateAt: "2026-11-09 10:00",
+      stateAt: "09.11.2026 10:00",
       windowDays: 7,
       items: [model],
       pagination: { page: 1, pages: 1, offset: 0, listed: 1, limit: 1000 },

@@ -280,7 +280,8 @@ describe("PR-10 pages", () => {
       '<a class="button" href="https://bzp.przyklad.invalid/ogloszenie/1" rel="noopener noreferrer">Otwórz ogłoszenie</a>',
       // a contact as the sources give it: e-mail and phone, folded with the publication date
       "<summary>Więcej szczegółów (data publikacji, kontakt, szczegóły dopasowania)</summary>",
-      "<dt>Kontakt:</dt><dd>zamowienia@fundacja.przyklad.invalid, 000 000 000</dd>",
+      // (PR-15: the phone with no-break spaces)
+      "<dt>Kontakt:</dt><dd>zamowienia@fundacja.przyklad.invalid, 000\u00a0000\u00a0000</dd>",
     ]) {
       expect(html).toContain(state);
     }

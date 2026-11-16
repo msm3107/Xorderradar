@@ -96,6 +96,7 @@ input[type=text],input[type=email],textarea{box-sizing:border-box;width:100%;fon
 .matches summary{cursor:pointer;color:var(--accent)}
 .matches ul{margin:.3rem 0;padding-left:1.2rem}
 .matches article.nietrafne{border-left-color:var(--line);background:var(--bg);color:var(--muted)}
+.matches .oznaczenie{margin:.6rem 0 0;font-size:.9rem;font-weight:bold}
 .matches .ocena{margin:.6rem 0 0}
 .matches .ocena p{margin:0 0 .3rem}
 .matches .ocena button{margin-right:.5rem}
@@ -168,6 +169,14 @@ function linkRequestForm(error: LinkRequestError | null = null): string {
   );
 }
 
+/** The counties fact in the same words wherever a page states it (PR-15). */
+const COUNTIES_FACT = "Ogłoszenia nie podają powiatu";
+
+/** What stored counties do under „Cała Polska” (no voivodeship): settings and /dopasowania (PR-15). */
+const COUNTIES_ALL_POLAND =
+  `${COUNTIES_FACT}, więc przy „Cała Polska” tylko zamówienia z pasującą kategorią ` +
+  "i słowem kluczowym.";
+
 /**
  * Counties: kept in the profile, but no source gives an offer's county yet, so
  * they never narrow and never match (src/matching/match.ts, regionReason). A
@@ -177,13 +186,10 @@ function linkRequestForm(error: LinkRequestError | null = null): string {
  * no page tells the customer to edit them.
  */
 const COUNTIES_NOTE = {
-  withVoivodeships:
-    "Powiaty zapisane w profilu nie zawężają listy: ogłoszenia nie podają jeszcze powiatu, " +
-    "więc liczy się województwo.",
+  withVoivodeships: `Powiaty zapisane w profilu nie zawężają listy. ${COUNTIES_FACT}, więc liczy się województwo.`,
   withoutVoivodeships:
-    "Profil ma zapisane powiaty, a ogłoszenia nie podają jeszcze powiatu: bez zaznaczonego " +
-    "województwa pokazujemy tylko zamówienia pasujące jednocześnie kategorią i słowem " +
-    "kluczowym. Wybierz w ustawieniach „Wybrane województwa” i zaznacz województwo.",
+    `Profil ma zapisane powiaty. ${COUNTIES_ALL_POLAND} Wybierz w ustawieniach ` +
+    "„Wybrane województwa” i zaznacz województwo.",
 } as const;
 
 /**
@@ -240,6 +246,18 @@ function link(href: string, text: string): string {
 /** CONTACT_EMAIL as a mailto link; a page leaves the contact out without it. */
 function mailLink(address: string): string {
   return link(`mailto:${address}`, address);
+}
+
+/** Who sets the counties and corrects what the form cannot, in the customer's words (PR-15). */
+const SUPPORT_NAME = "obsługa serwisu";
+
+/**
+ * The way to the operator wherever only they can help (PR-15: one wording):
+ * CONTACT_EMAIL as a link when set, else a reply to our e-mail. HTML, for
+ * the end of a sentence („Zmiana powiatów: …”).
+ */
+function supportContact(contactEmail: string | null): string {
+  return contactEmail === null ? "odpowiedz na nasz e-mail" : mailLink(contactEmail);
 }
 
 function homeLink(): string {
@@ -728,15 +746,14 @@ function regionGroup(
   // Polska” and who changes them. Form 1494 px; the planned ~3 lines did not fit (the
   // form without the note is 1355 px) and the owner accepted this (D-027). „Zmiana
   // powiatów” (owner's review of PR #20, not to be read as the e-mail change) costs the
-  // sixth line: 1473 → 1494 px.
-  const change = contactEmail === null ? "odpowiedz na nasz e-mail" : mailLink(contactEmail);
+  // sixth line: 1473 → 1494 px. PR-15: the fact and the way to support in the words of
+  // /dopasowania and the support pages („obsługa serwisu”) — still six lines, 1494 px.
   const countiesNote =
     counties.length === 0
       ? ""
-      : `<p class="hint" id="${COUNTIES_NOTE_ID}">Powiaty (ustawia obsługa): ` +
-        `${escapeHtml(counties.join(", "))}. Ogłoszenia nie podają powiatu, więc przy ` +
-        "„Cała Polska” tylko zamówienia z pasującą kategorią i słowem kluczowym. " +
-        `Zmiana powiatów: ${change}.</p>`;
+      : `<p class="hint" id="${COUNTIES_NOTE_ID}">Powiaty (ustawia ${SUPPORT_NAME}): ` +
+        `${escapeHtml(counties.join(", "))}. ${COUNTIES_ALL_POLAND} ` +
+        `Zmiana powiatów: ${supportContact(contactEmail)}.</p>`;
   // No hint: the two radio labels say it (PR-13, a shorter form). The note describes the group.
   return group(
     "voivodeships",
@@ -954,13 +971,17 @@ export interface CardFeedback {
   readonly page?: number;
 }
 
+/** The label at the top of a card rated „Nietrafne” on /dopasowania (PR-15). */
+export const NOT_RELEVANT_MARK = "Oznaczone jako nietrafne";
+
 /** A card of /dopasowania: with the rating buttons when `feedback` is given. */
 export type MatchesItem = OfferCard & { readonly feedback?: CardFeedback };
 
 /**
  * „Trafne” / „Nietrafne” under a card: one POST form (session and CSRF) with
  * two submit buttons; each button's accessible name says which offer it rates.
- * Once rated, both are toggle buttons: the current verdict's is pressed (and bold).
+ * Both are toggle buttons (PR-15: also before rating, both not pressed): the
+ * current verdict's is pressed (and bold), so a screen reader hears the choice.
  */
 function feedbackForm(title: string, feedback: CardFeedback): string {
   const current =
@@ -968,12 +989,11 @@ function feedbackForm(title: string, feedback: CardFeedback): string {
       ? "Czy to zamówienie pasuje?"
       : `Twoja ocena: <strong>${verdictWord(feedback.verdict)}</strong>. Możesz ją zmienić.`;
   const button = (verdict: FeedbackVerdict, label: string): string => {
-    const pressed = feedback.verdict === null ? "" : String(feedback.verdict === verdict);
+    const pressed = feedback.verdict === verdict;
     return (
       `<button type="submit" name="werdykt" value="${verdictWord(verdict)}" ` +
-      `aria-label="${escapeHtml(`${label}: ${title}`)}"` +
-      (pressed === "" ? "" : ` aria-pressed="${pressed}"`) +
-      `>${pressed === "true" ? `<strong>${label}</strong>` : label}</button>`
+      `aria-label="${escapeHtml(`${label}: ${title}`)}" aria-pressed="${String(pressed)}">` +
+      `${pressed ? `<strong>${label}</strong>` : label}</button>`
     );
   };
   return (
@@ -1041,10 +1061,14 @@ function cardItem(card: MatchesItem): string {
     `<dl>${body.join("")}</dl>${details}`;
   const { feedback } = card;
   if (feedback === undefined) return `<li><article>${inner}</article></li>`;
-  // An anchor for the redirect after rating; a „Nietrafne” card is greyed (and listed last).
-  const greyed = feedback.verdict === "not_relevant" ? ' class="nietrafne"' : "";
+  // An anchor for the redirect after rating; a „Nietrafne” card is greyed (and listed last)
+  // and says so at its top (PR-15), so the grey is not the only sign.
+  const notRelevant = feedback.verdict === "not_relevant";
   return (
-    `<li id="oferta-${escapeHtml(feedback.opportunityId)}"><article${greyed}>` +
+    `<li id="oferta-${escapeHtml(feedback.opportunityId)}">` +
+    (notRelevant
+      ? `<article class="nietrafne"><p class="oznaczenie">${NOT_RELEVANT_MARK}</p>`
+      : "<article>") +
     `${inner}${feedbackForm(card.title, feedback)}</article></li>`
   );
 }
@@ -1214,22 +1238,16 @@ export function examplePage(view: ExampleView): Page {
   };
 }
 
-/** The sentence before CONTACT_EMAIL wherever only the operator can help (PR-13). */
-const SUPPORT_MAIL_TEXT = "Napisz do obsługi serwisu";
-
 /**
  * Where to turn when only the operator can correct the stored profile
- * (PR-13): CONTACT_EMAIL when set, else a reply to our last e-mail.
+ * (PR-13), in the settings note's wording (PR-15).
  */
-function supportContact(contactEmail: string | null): string {
-  return contactEmail === null
-    ? paragraph("Odpowiedz na ostatnią wiadomość od nas — obsługa serwisu poprawi profil.")
-    : `<p>${SUPPORT_MAIL_TEXT}: ${mailLink(contactEmail)}.</p>`;
+function supportParagraph(contactEmail: string | null): string {
+  return `<p>Kontakt z obsługą serwisu: ${supportContact(contactEmail)}.</p>`;
 }
 
 /** What only the operator can correct, in the customer's words (PR-13). */
-const OPERATOR_SETTING_TEXT =
-  "Profil zawiera ustawienie, które może poprawić tylko obsługa serwisu (na przykład powiaty)";
+const OPERATOR_SETTING_TEXT = `Profil zawiera ustawienie, które może poprawić tylko ${SUPPORT_NAME} (na przykład powiaty)`;
 
 /**
  * /dopasowania for a stored profile the schema refuses: it must be corrected
@@ -1250,7 +1268,7 @@ export function matchesUnavailablePage(
       ),
       correctable
         ? `<p>Popraw go w ${link("/profil/ustawienia", "ustawieniach profilu")}.</p>`
-        : paragraph(`${OPERATOR_SETTING_TEXT}.`) + supportContact(contactEmail),
+        : paragraph(`${OPERATOR_SETTING_TEXT}.`) + supportParagraph(contactEmail),
       backLinks(),
     ]),
   };
@@ -1269,7 +1287,7 @@ export function profileSaveBlockedPage(contactEmail: string | null = null): Page
       paragraph(
         `${OPERATOR_SETTING_TEXT}. Dopóki go nie poprawi, zmian w formularzu nie da się zapisać.`,
       ),
-      supportContact(contactEmail),
+      supportParagraph(contactEmail),
       backLinks(),
     ]),
   };
