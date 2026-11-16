@@ -402,11 +402,12 @@ Ustawienia pokazują klientowi zapisane powiaty tylko do odczytu i odsyłają do
 
 **Uwaga: zły wpis blokuje klienta.** Formularz nie nadpisuje powiatów, więc wpis odrzucany
 przez schemat (pusty albo z samych spacji, `NULL`, dłuższy niż 100 znaków, więcej niż 100
-wpisów) sprawia, że `/dopasowania` i CSV pokazują tylko „napisz do obsługi”, a **każdy zapis
-ustawień** kończy się 409 „Nie zapisano zmian” (nic nie zapisane; w logu `warn` „profile
-settings not saved” z `profileId` i `fields: ["counties…"]`). Digest pomija taki profil
-(„invalid stored profile skipped”). Dlatego najpierw zanotuj obecną wartość, a zmianę
-sprawdź przed `COMMIT`:
+wpisów) sprawia, że `/dopasowania` i CSV pokazują tylko stronę z kontaktem do obsługi
+(„Kontakt z obsługą serwisu: …”, adres z `CONTACT_EMAIL` albo „odpowiedz na nasz e-mail”), a
+**każdy zapis ustawień** kończy się 409 „Nie zapisano zmian” (nic nie zapisane; w logu
+`warn` „profile settings not saved” z `profileId` i `fields: ["counties…"]`). Digest pomija
+taki profil („invalid stored profile skipped”). Dlatego najpierw zanotuj obecną wartość, a
+zmianę sprawdź przed `COMMIT`:
 
 ```sql
 SELECT counties FROM company_profiles WHERE id = '<profileId>';  -- obecna wartość (do cofnięcia)

@@ -605,9 +605,19 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
         (match) => match[1],
       );
       expect(order).toEqual([second, third, first]);
-      expect(janPage).toContain(`<li id="oferta-${first}"><article class="nietrafne">`);
+      // PR-15: labelled at its top, and its „Nietrafne” button pressed.
+      expect(janPage).toContain(
+        `<li id="oferta-${first}"><article class="nietrafne">` +
+          '<p class="oznaczenie">Oznaczone jako nietrafne</p><h2>',
+      );
       expect(janPage).toContain(`<li id="oferta-${second}"><article><h2>`);
       expect(janPage.match(/class="nietrafne"/g)).toHaveLength(1);
+      expect(janPage.match(/Oznaczone jako nietrafne/g)).toHaveLength(1);
+      // Two of Jan's ratings (first „Nietrafne”, third „Trafne”); the unrated card's are both false.
+      expect(janPage.match(/aria-pressed="true">/g)).toHaveLength(2);
+      expect(janPage.match(/aria-pressed="false">/g)).toHaveLength(4);
+      expect(janPage).toContain('aria-pressed="true"><strong>Nietrafne</strong></button>');
+      expect(janPage).toContain('aria-pressed="true"><strong>Trafne</strong></button>');
 
       const annaPage = await (
         await fetch(`${url}/dopasowania`, { headers: { cookie: (await login(anna.id)).cookie } })

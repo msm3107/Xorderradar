@@ -881,3 +881,43 @@ ustawień także w profilu z powiatami od obsługi (review właściciela PR #19)
 
 - informacja o zamówieniach ponad limit wewnątrz pliku CSV (notka jest na ostatniej stronie listy);
 - inne formaty eksportu (XLSX).
+
+## PR-15 — Spójne teksty i karta bez zgrzytów
+
+**Cel:** ten sam fakt tymi samymi słowami na każdej stronie i karta zamówienia bez drobnych
+zgrzytów na telefonie (zgłoszone w review PR-11, PR-12 i PR #20, zaakceptowane przez
+właściciela).
+
+**Zakres:**
+
+1. **Powiaty i kontakt z obsługą jednym brzmieniem:** notka tylko do odczytu w
+   `/profil/ustawienia` (zostaje „Zmiana powiatów:” — decyzja właściciela), teksty o zapisanych
+   powiatach na `/dopasowania` i strony „tylko obsługa może poprawić” (409 zapisu, profil
+   odrzucany na `/dopasowania`). Fakt zawsze jako „Ogłoszenia nie podają powiatu”, kontakt
+   zawsze jako adres `CONTACT_EMAIL` (`mailLink`), a bez niego „odpowiedz na nasz e-mail”.
+2. **Telefon w karcie nie łamie się w środku numeru** (web i e-mail): spacje między cyframi
+   numeru jako spacje nierozdzielające przy wyświetlaniu; zapisane dane bez zmian (cyfry nie są
+   przeformatowane, brak telefonu zostaje brakiem).
+3. **Data „Stan na …” w stopce e-maila** w polskim formacie strony („12.11.2026 07:00”) —
+   jeden wspólny formater dla strony `/dopasowania` i e-maila (część tekstowa i HTML).
+4. **Karta oceniona „Nietrafne”** na `/dopasowania`: krótka widoczna etykieta „Oznaczone jako
+   nietrafne” na górze karty; przyciski oceny zawsze z `aria-pressed="true|false"` (bez JS,
+   CSP bez zmian). Wyszarzenie i miejsce na końcu listy zostają.
+5. **Higiena testów:** temat w fixture `tests/email-sender.test.ts` w obecnym formacie
+   (bez nazwy firmy).
+
+**Kryteria akceptacji:**
+
+1. Każdy punkt ma test (jednostkowy lub integracyjny); zmienione teksty sprawdzane dokładnymi
+   ciągami (zastąpienie nieaktualnych asercji, nie ich osłabienie).
+2. Najgorszy przypadek formularza ustawień przy 390 px (3 powiaty od obsługi, zmiana e-maila w
+   toku; z `CONTACT_EMAIL` i bez) nie jest wyższy niż 1494 px (pomiar jak w D-027).
+3. Zrzuty 390 px przed i po: formularz w najgorszym przypadku, karta z długim telefonem, karta
+   „nietrafne”.
+4. `pnpm check` zielone z wymaganymi testami bazy (`REQUIRE_DB_TESTS=1`); D-027/D-032
+   i README/RUNBOOK zaktualizowane tam, gdzie cytują zmienione teksty.
+
+**Poza zakresem:**
+
+- wyrównanie dwóch siatek `<dl>` karty na desktopie;
+- wersja klienta kopii zapasowej, zmiany scoringu i pozostałe punkty „Next action”.

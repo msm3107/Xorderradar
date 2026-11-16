@@ -580,7 +580,9 @@ Szczegóły i uzasadnienie: D-010 (SMTP, biblioteka) i D-024 (wybór ofert, idem
   z zapisanego tekstu `numeric` (`formatAmount`, nigdy przez float), termin w czasie polskim
   z dniem tygodnia ze stałej tabeli i odległością w dniach kalendarzowych
   (`formatDeadline`; „PILNE” dla 0–2 dni), „Dlaczego pasuje” jednym zdaniem
-  (`whySentence`), kody CPV i powody techniczne osobno (`matchDetails`). Chwila `now`:
+  (`whySentence`), kody CPV i powody techniczne osobno (`matchDetails`); telefon z twardymi
+  spacjami między grupami cyfr (`formatPhone`, PR-15, tylko wyświetlanie); „Stan na” strony
+  i stopki e-maila — `formatPolishMinute` (`DD.MM.RRRR GG:MM`, PR-15). Chwila `now`:
   digest — chwila przebiegu; web — `WebServerOptions.now` (domyślnie zegar procesu;
   tokeny i sesje dalej liczy zegar bazy).
 - `EmailSender` (`sender.ts`): `transport` (`test`/`smtp`), `send(email)`, `close()`. Tryb
@@ -749,7 +751,8 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   zapytaniem (`feedbackVerdicts`, `= ANY(uuid[])`), przesuwa „nietrafne” na koniec (kolejność
   digestu w obu częściach) przed podziałem na strony i na końcu każdej karty (po
   `<details>` „Więcej szczegółów”) pokazuje formularz `POST /dopasowania/ocena` (sesja + CSRF; karta „nietrafne” wyszarzona, kotwica
-  `#oferta-<id>`; przycisk bieżącej oceny `aria-pressed="true"`; ukryte `nastepna` — id
+  `#oferta-<id>` i od PR-15 etykieta „Oznaczone jako nietrafne” na górze; oba przyciski z
+  `aria-pressed`, bieżącej oceny `"true"`; ukryte `nastepna` — id
   następnej karty, kotwica powrotu po „Nietrafne”, sprawdzane wzorcem uuid, nigdy nie wybiera
   ocenianej oferty; od PR-13 także ukryte `strona` > 1, czytane tym samym parserem — zły numer →
   powrót na stronę 1). Ocenić z listy można ofertę wysłaną profilowi (`wasDelivered`) albo

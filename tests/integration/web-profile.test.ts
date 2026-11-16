@@ -21,9 +21,12 @@ import { upsertOpportunity } from "../../src/infrastructure/db/opportunities-rep
 import type { Database } from "../../src/infrastructure/db/schema.js";
 import { upsertSource } from "../../src/infrastructure/db/sources-repository.js";
 import { createLogger } from "../../src/infrastructure/logger.js";
-import { formatDeadline, formatPolishDay } from "../../src/notifications/card.js";
+import {
+  formatDeadline,
+  formatPolishDay,
+  formatPolishMinute,
+} from "../../src/notifications/card.js";
 import type { EmailSender, OutgoingEmail } from "../../src/notifications/sender.js";
-import { formatWarsawMinute } from "../../src/sources/normalize/warsaw-time.js";
 import { REGION_ERRORS } from "../../src/web/profile-form.js";
 import { csrfTokenFor, NOTICE_COOKIE, SESSION_COOKIE } from "../../src/web/session.js";
 import {
@@ -523,7 +526,9 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
 
       const page = await (await fetch(`${url}/profil/ustawienia`, { headers: { cookie } })).text();
       expect(page).not.toContain('name="counties"');
-      expect(page).toContain("Powiaty (ustawia obsługa): warszawski zachodni, piaseczyński.");
+      expect(page).toContain(
+        "Powiaty (ustawia obsługa serwisu): warszawski zachodni, piaseczyński.",
+      );
       // Without CONTACT_EMAIL: the way to the operator is our e-mail (PR-14: shorter).
       expect(page).toContain("Zmiana powiatów: odpowiedz na nasz e-mail.</p>");
       expect(page).toContain('<fieldset aria-describedby="powiaty-uwaga"><legend>');
@@ -637,9 +642,8 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
               "tylko obsługa serwisu (na przykład powiaty). Dopóki go nie poprawi, zmian w " +
               "formularzu nie da się zapisać.</p>",
           );
-          expect(html).toContain(
-            "Odpowiedz na ostatnią wiadomość od nas — obsługa serwisu poprawi profil.",
-          );
+          // PR-15: the settings note's way to support.
+          expect(html).toContain("<p>Kontakt z obsługą serwisu: odpowiedz na nasz e-mail.</p>");
           expect(html).not.toContain(long);
           expect(html).not.toContain("invalid_stored_row");
           expect(await rowText()).toBe(before);
@@ -689,7 +693,8 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
         );
         expect(response.status).toBe(409);
         expect(await response.text()).toContain(
-          'Napisz do obsługi serwisu: <a href="mailto:pomoc@example.invalid">pomoc@example.invalid</a>.',
+          '<p>Kontakt z obsługą serwisu: <a href="mailto:pomoc@example.invalid">' +
+            "pomoc@example.invalid</a>.</p>",
         );
       } finally {
         await withContact.close();
@@ -1193,7 +1198,9 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
         expect(html).toContain(
           `<dt>Termin składania ofert:</dt><dd><strong class="pilne">PILNE</strong> ${expected.text}</dd>`,
         );
-        expect(html).toContain(`Stan na ${formatWarsawMinute(at)} (czas polski).`);
+        // PR-15: the Polish format, as in the e-mail's footer.
+        expect(html).toContain(`Stan na ${formatPolishMinute(at)} (czas polski).`);
+        expect(html).toMatch(/Stan na \d{2}\.\d{2}\.\d{4} \d{2}:\d{2} \(czas polski\)\./u);
       } finally {
         await clocked.close();
       }
@@ -1374,9 +1381,7 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
             "<p>Profil zawiera ustawienie, które może poprawić tylko obsługa serwisu (na przykład " +
               "powiaty).</p>",
           );
-          expect(html).toContain(
-            "Odpowiedz na ostatnią wiadomość od nas — obsługa serwisu poprawi profil.",
-          );
+          expect(html).toContain("<p>Kontakt z obsługą serwisu: odpowiedz na nasz e-mail.</p>");
           expect(html).not.toContain("Popraw go w");
           expect(html).not.toContain('href="/profil/ustawienia"');
           expect(html).not.toContain(long);

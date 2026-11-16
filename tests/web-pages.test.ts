@@ -15,6 +15,7 @@ import {
   matchesPage,
   matchesTooManyPage,
   matchesUnavailablePage,
+  NOT_RELEVANT_MARK,
   profilePage,
   profileSaveBlockedPage,
   settingsPage,
@@ -219,7 +220,7 @@ describe("matchesPage", () => {
       active: true,
       hasVoivodeships: true,
       hasCounties: false,
-      stateAt: "2026-11-02 07:00",
+      stateAt: "02.11.2026 07:00",
       windowDays: 7,
       items: [cardOf(offer)],
       pagination: { page: 1, pages: 1, offset: 0, listed: 1, limit: 1000 },
@@ -250,7 +251,7 @@ describe("matchesPage", () => {
         'rel="noopener noreferrer">Otwórz ogłoszenie</a></p>',
     );
     expect(html).toContain("ostatnich 7 dni");
-    expect(html).toContain("Stan na 2026-11-02 07:00 (czas polski).");
+    expect(html).toContain("Stan na 02.11.2026 07:00 (czas polski).");
     expect(html).not.toContain('class="note"');
     expect(html).toContain('<a href="/profil">Twój profil</a>');
   });
@@ -278,7 +279,7 @@ describe("matchesPage", () => {
         "<dt>Opis:</dt><dd>Wymiana opraw &lt;LED&gt; &amp; słupów</dd></dl>" +
         "<details><summary>Więcej szczegółów (data publikacji, kontakt, szczegóły dopasowania)</summary><dl>" +
         "<dt>Data publikacji:</dt><dd>30.10.2026</dd>" +
-        "<dt>Kontakt:</dt><dd>zamowienia@example.invalid, 000 000 000</dd>" +
+        "<dt>Kontakt:</dt><dd>zamowienia@example.invalid, 000\u00a0000\u00a0000</dd>" +
         "<dt>Szczegóły dopasowania:</dt><dd><ul><li>CPV: 45310000-3</li></ul></dd></dl></details>",
     );
     // One disclosure for the details, never one inside another.
@@ -427,18 +428,18 @@ describe("matchesPage", () => {
     expect(withRegions).not.toContain("powiat");
     const counties = matchesPage(view({ items: [], hasCounties: true })).html;
     // PR-13: counties are the operator's; no note asks the customer to edit them.
+    // PR-15: the counties fact in the settings note's words.
     expect(counties).toContain(
-      "<p>Powiaty zapisane w profilu nie zawężają listy: ogłoszenia nie podają jeszcze " +
-        "powiatu, więc liczy się województwo.</p>",
+      "<p>Powiaty zapisane w profilu nie zawężają listy. Ogłoszenia nie podają powiatu, " +
+        "więc liczy się województwo.</p>",
     );
     const countiesOnly = matchesPage(
       view({ items: [], hasCounties: true, hasVoivodeships: false }),
     ).html;
     expect(countiesOnly).toContain(
-      "<p>Profil ma zapisane powiaty, a ogłoszenia nie podają jeszcze powiatu: bez " +
-        "zaznaczonego województwa pokazujemy tylko zamówienia pasujące jednocześnie kategorią " +
-        "i słowem kluczowym. Wybierz w ustawieniach „Wybrane województwa” i zaznacz " +
-        "województwo.</p>",
+      "<p>Profil ma zapisane powiaty. Ogłoszenia nie podają powiatu, więc przy „Cała Polska” " +
+        "tylko zamówienia z pasującą kategorią i słowem kluczowym. Wybierz w ustawieniach " +
+        "„Wybrane województwa” i zaznacz województwo.</p>",
     );
     expect(countiesOnly).not.toContain("nie zawężają listy");
     expect(counties).not.toContain("Profil ma zapisane powiaty");
@@ -492,10 +493,11 @@ describe("matchesPage", () => {
       );
       expect(page.html).not.toContain("Popraw go w");
       expect(page.html).not.toContain('href="/profil/ustawienia"');
+      // PR-15: the settings note's way to support („odpowiedz na nasz e-mail” without the address).
       expect(page.html).toContain(
         contact === null
-          ? "<p>Odpowiedz na ostatnią wiadomość od nas — obsługa serwisu poprawi profil.</p>"
-          : '<p>Napisz do obsługi serwisu: <a href="mailto:pomoc@example.invalid">' +
+          ? "<p>Kontakt z obsługą serwisu: odpowiedz na nasz e-mail.</p>"
+          : '<p>Kontakt z obsługą serwisu: <a href="mailto:pomoc@example.invalid">' +
               "pomoc@example.invalid</a>.</p>",
       );
     }
@@ -517,8 +519,9 @@ describe("matchesPage", () => {
       );
       expect(page.html).toContain(
         contact === null
-          ? "Odpowiedz na ostatnią wiadomość od nas"
-          : 'href="mailto:pomoc@example.invalid"',
+          ? "<p>Kontakt z obsługą serwisu: odpowiedz na nasz e-mail.</p>"
+          : '<p>Kontakt z obsługą serwisu: <a href="mailto:pomoc@example.invalid">' +
+              "pomoc@example.invalid</a>.</p>",
       );
       expect(page.html).toContain('<a href="/profil">Twój profil</a>');
     }
@@ -770,9 +773,10 @@ describe("matchesPage", () => {
           `<input type="hidden" name="csrf" value="${CSRF}">` +
           `<input type="hidden" name="oferta" value="${offer.id}">` +
           '<button type="submit" name="werdykt" value="trafne" ' +
-          'aria-label="Trafne: Modernizacja oświetlenia">Trafne</button>' +
+          'aria-label="Trafne: Modernizacja oświetlenia" aria-pressed="false">Trafne</button>' +
           '<button type="submit" name="werdykt" value="nietrafne" ' +
-          'aria-label="Nietrafne: Modernizacja oświetlenia">Nietrafne</button></form>',
+          'aria-label="Nietrafne: Modernizacja oświetlenia" aria-pressed="false">' +
+          "Nietrafne</button></form>",
       );
     });
 
@@ -804,14 +808,24 @@ describe("matchesPage", () => {
       const relevant = matchesPage(view({ items: [rated(offer, "relevant")] })).html;
       expect(relevant).toContain("<p>Twoja ocena: <strong>trafne</strong>. Możesz ją zmienić.</p>");
       expect(relevant).not.toContain('class="nietrafne"');
+      expect(relevant).not.toContain(NOT_RELEVANT_MARK);
       const notRelevant = matchesPage(view({ items: [rated(offer, "not_relevant")] })).html;
-      expect(notRelevant).toContain(`<li id="oferta-${offer.id}"><article class="nietrafne"><h2>`);
+      // PR-15: a visible label at the card's top, before its title.
+      expect(NOT_RELEVANT_MARK).toBe("Oznaczone jako nietrafne");
+      expect(notRelevant).toContain(
+        `<li id="oferta-${offer.id}"><article class="nietrafne">` +
+          '<p class="oznaczenie">Oznaczone jako nietrafne</p><h2>',
+      );
+      expect(notRelevant.match(/class="oznaczenie"/g)).toHaveLength(1);
+      expect(matchesPage(view({ items: [rated(offer, null)] })).html).not.toContain(
+        NOT_RELEVANT_MARK,
+      );
       expect(notRelevant).toContain(
         "<p>Twoja ocena: <strong>nietrafne</strong>. Możesz ją zmienić.</p>",
       );
     });
 
-    it("marks the current verdict's button pressed and bold, only once rated", () => {
+    it("marks the current verdict's button pressed and bold, both unpressed before rating", () => {
       const relevant = matchesPage(view({ items: [rated(offer, "relevant")] })).html;
       expect(relevant).toContain(
         '<button type="submit" name="werdykt" value="trafne" ' +
@@ -829,7 +843,12 @@ describe("matchesPage", () => {
         'aria-label="Nietrafne: Modernizacja oświetlenia" aria-pressed="true">' +
           "<strong>Nietrafne</strong></button>",
       );
-      expect(matchesPage(view({ items: [rated(offer, null)] })).html).not.toContain("aria-pressed");
+      // PR-15: toggle buttons from the start, so the state is always exposed.
+      const unrated = matchesPage(view({ items: [rated(offer, null)] })).html;
+      expect(unrated.match(/aria-pressed="false"/g)).toHaveLength(2);
+      expect(unrated).not.toContain('aria-pressed="true"');
+      expect(unrated).not.toContain("<strong>Trafne</strong>");
+      expect(unrated).not.toContain("<strong>Nietrafne</strong>");
     });
 
     it("names the card that follows in the form (`nastepna`), the last card none", () => {
@@ -1126,8 +1145,9 @@ describe("copy", () => {
       ["warszawski zachodni", "<b>piaseczyński</b>"],
     );
     // PR-14: shorter, in the group's hint style (6 lines at 390 px, the box took 9).
+    // PR-15: support named as on the support pages („obsługa serwisu”), still 6 lines.
     expect(html).toContain(
-      '<p class="hint" id="powiaty-uwaga">Powiaty (ustawia obsługa): warszawski zachodni, ' +
+      '<p class="hint" id="powiaty-uwaga">Powiaty (ustawia obsługa serwisu): warszawski zachodni, ' +
         "&lt;b&gt;piaseczyński&lt;/b&gt;. Ogłoszenia nie podają powiatu, więc przy " +
         "„Cała Polska” tylko zamówienia z pasującą kategorią i słowem kluczowym. " +
         "Zmiana powiatów: odpowiedz na nasz e-mail.</p>",
@@ -1149,7 +1169,7 @@ describe("copy", () => {
       'pomoc"@example.invalid',
     ).html;
     expect(html).toContain(
-      '<p class="hint" id="powiaty-uwaga">Powiaty (ustawia obsługa): warszawski zachodni. ' +
+      '<p class="hint" id="powiaty-uwaga">Powiaty (ustawia obsługa serwisu): warszawski zachodni. ' +
         "Ogłoszenia nie podają powiatu, więc przy „Cała Polska” tylko zamówienia z pasującą " +
         "kategorią i słowem kluczowym. Zmiana powiatów: " +
         '<a href="mailto:pomoc&quot;@example.invalid">pomoc&quot;@example.invalid</a>.</p>',
@@ -1159,6 +1179,49 @@ describe("copy", () => {
     const plain = settingsPage(values, "c", {}, null, false, [], "pomoc@example.invalid").html;
     expect(plain).not.toMatch(/powiat/i);
     expect(plain).not.toContain("mailto:");
+  });
+
+  // PR-15: the same fact in the same words, and one way to support, on every page that says it.
+  it("states the counties fact and the way to support in one wording across pages", () => {
+    const fact = "Ogłoszenia nie podają powiatu";
+    const allPoland = `${fact}, więc przy „Cała Polska” tylko zamówienia z pasującą kategorią i słowem kluczowym.`;
+    const settings = (contact: string | null): string =>
+      settingsPage(values, "c", {}, null, false, ["grodziski"], contact).html;
+    const list = (hasVoivodeships: boolean): string =>
+      matchesPage({
+        active: true,
+        hasVoivodeships,
+        hasCounties: true,
+        stateAt: "02.11.2026 07:00",
+        windowDays: 7,
+        items: [],
+        pagination: { page: 1, pages: 1, offset: 0, listed: 0, limit: 1000 },
+        more: 0,
+        truncated: false,
+      }).html;
+    expect(settings(null)).toContain(allPoland);
+    expect(list(false)).toContain(allPoland);
+    expect(list(true)).toContain(`${fact}, więc liczy się województwo.`);
+    for (const html of [settings(null), list(false), list(true)]) {
+      expect(html).not.toContain("nie podają jeszcze");
+      expect(html).not.toContain("ogłoszenia nie podają");
+    }
+    const ways = [
+      [null, "odpowiedz na nasz e-mail"],
+      ["pomoc@example.invalid", '<a href="mailto:pomoc@example.invalid">pomoc@example.invalid</a>'],
+    ] as const;
+    for (const [contact, way] of ways) {
+      expect(settings(contact)).toContain(`Zmiana powiatów: ${way}.</p>`);
+      for (const page of [
+        matchesUnavailablePage(false, contact),
+        profileSaveBlockedPage(contact),
+      ]) {
+        expect(page.html).toContain(`<p>Kontakt z obsługą serwisu: ${way}.</p>`);
+        expect(page.html).toContain("może poprawić tylko obsługa serwisu (na przykład powiaty)");
+        expect(page.html).not.toContain("ostatnią wiadomość");
+      }
+    }
+    expect(settings(null)).toContain("(ustawia obsługa serwisu)");
   });
 
   it("describes the region group by the counties note, next to its errors", () => {

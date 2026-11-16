@@ -44,10 +44,10 @@ import {
   readDigestCandidates,
 } from "../notifications/candidates.js";
 import { matchOpportunity } from "../matching/match.js";
-import { offerCard } from "../notifications/card.js";
+import { formatPolishMinute, offerCard } from "../notifications/card.js";
 import { digestOrder, type DigestItem } from "../notifications/digest.js";
 import type { EmailSender } from "../notifications/sender.js";
-import { formatWarsawMinute, warsawDay } from "../sources/normalize/warsaw-time.js";
+import { warsawDay } from "../sources/normalize/warsaw-time.js";
 import { createAccessMailer, type AccessMailer } from "./access-mail.js";
 import { matchesCsv } from "./csv.js";
 import { exampleView } from "./example.js";
@@ -1288,7 +1288,7 @@ function matchesReply(list: MatchesList, cut: MatchesListPage, now: Date, csrf: 
       active: list.active,
       hasVoivodeships: list.hasVoivodeships,
       hasCounties: list.hasCounties,
-      stateAt: formatWarsawMinute(now),
+      stateAt: formatPolishMinute(now),
       windowDays: DIGEST_NEW_DAYS,
       items: cut.shown.map(({ item, verdict }, index) => ({
         ...offerCard(item, now),
