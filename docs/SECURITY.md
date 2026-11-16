@@ -390,9 +390,10 @@ Stan od PR-06A (`serve`, `src/web/`, D-025, D-026):
   niezależnie od wieku oferty — D-032) — inna
   (także cudza) → 404. Zapis to jeden atomowy upsert (`match_feedback`, para profil–oferta
   unikalna, `ON DELETE CASCADE` z obu stron); w bazie tylko id, werdykt i czasy. Oceny są
-  czytane wyłącznie dla profilu sesji. `GET /dopasowania.csv`: tylko z sesją, ta sama lista,
-  ten sam podział na strony (`MATCHES_SHOWN` na stronę, najwyżej 20 stron; od PR-13) i ten sam
-  slot co `/dopasowania`,
+  czytane wyłącznie dla profilu sesji. `GET /dopasowania.csv`: tylko z sesją, ta sama lista
+  i ten sam limit (najwyżej 20 stron po `MATCHES_SHOWN`, 1000 pozycji) — bez `strona` cała
+  lista w jednym pliku (PR-14), z `?strona=N` jedna strona (PR-13) — i ten sam slot co
+  `/dopasowania`,
   `Content-Disposition: attachment`, `Cache-Control: no-store`; komórka zaczynająca się od
   `=`, `+`, `-`, `@`, tabulatora lub CR dostaje prefiks `'` (OWASP CSV injection — `=1+1`
   zostaje tekstem), cudzysłowy według RFC 4180, brak wartości → pusta komórka (nigdy `0`),

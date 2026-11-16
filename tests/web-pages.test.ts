@@ -556,6 +556,10 @@ describe("matchesPage", () => {
     expect(csv).not.toContain("Odśwież teraz");
     expect(csv).not.toContain("strona odświeży się");
     expect(csv).not.toMatch(NO_SCRIPT);
+    // PR-14: the whole list's CSV reloads the whole list's CSV.
+    const whole = matchesBusyPage("/dopasowania.csv", "csv").html;
+    expect(whole).toContain('<meta http-equiv="refresh" content="3; url=/dopasowania.csv">');
+    expect(whole).toContain('<p><a href="/dopasowania.csv">Pobierz teraz</a></p>');
     // Every other page has no refresh.
     expect(matchesPage(view()).html).not.toContain("http-equiv");
     expect(matchesTooManyPage("/dopasowania").html).not.toContain("http-equiv");
@@ -652,14 +656,15 @@ describe("matchesPage", () => {
       expect(html).not.toContain('rel="next"');
     });
 
-    // Merged with PR-12's short CSV line: one line on a 390 px phone, the range
-    // is in the page line just above it; no „pierwsze N z M — zawęź profil”.
-    it("links the CSV of the page shown, in one short line under the page line", () => {
+    // PR-14: every page links the whole list's CSV (one file, not one per page), in
+    // the short line of PR-12 — one line on a 390 px phone; no „pierwsze N z M”.
+    it("links the whole list's CSV on page 2, in one short line under the page line", () => {
       const { html } = matchesPage(second);
       const csv =
-        '<p><a href="/dopasowania.csv?strona=2">Ta strona jako CSV</a> ' +
-        "(Excel, Arkusze Google).</p>";
+        '<p><a href="/dopasowania.csv">Pobierz listę jako CSV</a> (Excel, Arkusze Google).</p>';
       expect(html).toContain(csv);
+      expect(html).not.toContain("/dopasowania.csv?strona=");
+      expect(html.match(/href="\/dopasowania\.csv/g)).toHaveLength(1);
       expect(html).not.toContain("pierwsze");
       expect(html).not.toContain("zawęź profil, aby mieć wszystkie");
       // Above the list: the page line, the window paragraph, the CSV line, then the cards.
@@ -679,6 +684,20 @@ describe("matchesPage", () => {
         '<p><a href="/dopasowania.csv">Pobierz listę jako CSV</a> (Excel, Arkusze Google).</p>',
       );
       expect(html).not.toContain("Ta strona jako CSV");
+    });
+
+    it("links the same whole-list CSV on the last page", () => {
+      const { html } = matchesPage(
+        view({
+          items: many(23),
+          pagination: { page: 3, pages: 3, offset: 100, listed: 123, limit: 1000 },
+        }),
+      );
+      expect(html).toContain(
+        '<p><a href="/dopasowania.csv">Pobierz listę jako CSV</a> (Excel, Arkusze Google).</p>',
+      );
+      expect(html).not.toContain("Ta strona jako CSV");
+      expect(html).not.toContain("/dopasowania.csv?strona=");
     });
 
     it("puts the pager under the list, before the rating paragraph", () => {
@@ -1106,18 +1125,19 @@ describe("copy", () => {
       false,
       ["warszawski zachodni", "<b>piaseczyński</b>"],
     );
+    // PR-14: shorter, in the group's hint style (6 lines at 390 px, the box took 9).
     expect(html).toContain(
-      '<p class="note" id="powiaty-uwaga">Obsługa serwisu ustawiła w profilu powiaty: ' +
-        "warszawski zachodni, " +
-        "&lt;b&gt;piaseczyński&lt;/b&gt;. Ogłoszenia nie podają jeszcze powiatu, więc przy " +
-        "„Cała Polska” pokazujemy tylko zamówienia pasujące jednocześnie kategorią i słowem " +
-        "kluczowym. Powiaty zmienia obsługa — odpowiedz na ostatnią wiadomość od nas.</p>",
+      '<p class="hint" id="powiaty-uwaga">Powiaty (ustawia obsługa): warszawski zachodni, ' +
+        "&lt;b&gt;piaseczyński&lt;/b&gt;. Ogłoszenia nie podają powiatu, więc przy " +
+        "„Cała Polska” tylko zamówienia z pasującą kategorią i słowem kluczowym. " +
+        "Zmiana powiatów: odpowiedz na nasz e-mail.</p>",
     );
+    expect(html).not.toContain("mailto:");
     expect(html).not.toContain('name="counties"');
     expect(html).not.toMatch(NO_MARKUP_FROM_DATA);
   });
 
-  // PR-13 minors: with CONTACT_EMAIL set, the note gives the address, in the shared words.
+  // PR-13 minors: with CONTACT_EMAIL set, the note gives the address (PR-14: shorter words).
   it("gives the support address in the counties note when CONTACT_EMAIL is set", () => {
     const html = settingsPage(
       values,
@@ -1129,10 +1149,12 @@ describe("copy", () => {
       'pomoc"@example.invalid',
     ).html;
     expect(html).toContain(
-      "kluczowym. Powiaty zmienia obsługa. Napisz do obsługi serwisu: " +
+      '<p class="hint" id="powiaty-uwaga">Powiaty (ustawia obsługa): warszawski zachodni. ' +
+        "Ogłoszenia nie podają powiatu, więc przy „Cała Polska” tylko zamówienia z pasującą " +
+        "kategorią i słowem kluczowym. Zmiana powiatów: " +
         '<a href="mailto:pomoc&quot;@example.invalid">pomoc&quot;@example.invalid</a>.</p>',
     );
-    expect(html).not.toContain("odpowiedz na ostatnią wiadomość");
+    expect(html).not.toContain("odpowiedz na");
     // No counties: no note and no address, CONTACT_EMAIL or not.
     const plain = settingsPage(values, "c", {}, null, false, [], "pomoc@example.invalid").html;
     expect(plain).not.toMatch(/powiat/i);

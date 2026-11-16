@@ -1,7 +1,7 @@
 # Current State
 
 Current phase: PHASE 4 — PILOT
-Current PR: PR-13 — Ustawienia bez pułapek (UX/QOL series PR-10 – PR-13)
+Current PR: PR-14 — CSV całej listy i krótsza notka o powiatach (UX/QOL series)
 Status: PR-08 **MERGED in PR #14 (366618e)**. PR-09 **MERGED in PR #15 (42dd008)**. PR-10
 **MERGED in PR #16 (3b70f94)**. PR-11 **MERGED in PR #17 (b974984)**. PR-12 **MERGED in PR #18
 (b4c7e4c)** after the owner's review 2026-11-12 (delivery coverage in `feedback:report`; the
@@ -12,7 +12,12 @@ D-030 card, the rating at the card's end and the short intro from the base, and 
 of 50, region radio, read-only powiaty and 503/429/409 pages; `pnpm check` green (2332 tests);
 Code & Safety Review PASS (05dc031, f98c90c), Quality Review ACCEPT WITH NOTES (88e0964) → PR
 open for owner review (not merged by the agents). Owner review of PR #19: PASS with one Medium
-(`region=all` with ticks → 400) fixed — `all` now ignores the ticks and saves `[]` (2335 tests). Owner steps on the VPS for PR-08 (AC1,
+(`region=all` with ticks → 400) fixed — `all` now ignores the ticks and saves `[]` (2335 tests).
+PR-13 **MERGED in PR #19 (716a85f)**. PR-14 (whole-list CSV, shorter counties note):
+implemented; Code & Safety Review PASS (round 2), Quality Review ACCEPT WITH NOTES; PR #20 open.
+Owner review of PR #20: PASS; owner decisions applied („Zmiana powiatów:” in the note, whole-list
+CSV cut at 1000 named `-pierwsze-1000`); Code & Safety Review PASS, Quality Review ACCEPT WITH
+NOTES; 2340 tests → back in owner review (not merged by the agents). Owner steps on the VPS for PR-08 (AC1,
 `bk` backfill, DEPLOY §6) remain in Blockers.
 
 ## Completed
@@ -690,7 +695,18 @@ Round-1 fixes:
 
 ## In progress
 
-**PR-13 — Ustawienia bez pułapek** (`docs/PR_PLAN.md` → PR-13) — base branch (b4c7e4c, PR-11 +
+**PR-14 — CSV całej listy i krótsza notka o powiatach** (`docs/PR_PLAN.md` → PR-14) —
+`GET /dopasowania.csv` without `strona` = the whole list (≤ 1000 rows, list order, „Nietrafne”
+last, one computation in the same slot); `?strona=N` kept for old links (every page file named
+`-strona-N`, incl. 1); one whole-list link on every list page; read-only counties note 10 → 5
+lines in the hint style (form 1619 → 1473 px, owner-accepted). Code & Safety Review: round 1
+CHANGES REQUIRED (AC3; Low file name) → round 2 PASS; Quality Review ACCEPT WITH NOTES; 2339
+tests. Owner review of PR #20: PASS; decisions applied: note says „Zmiana powiatów:” (6 lines,
+form 1494 px), a whole-list CSV cut at 1000 is named `dopasowania-RRRR-MM-DD-pierwsze-1000.csv`
+(content unchanged); Code & Safety Review PASS, Quality Review ACCEPT WITH NOTES; 2340 tests. PR open for owner review (not merged
+by the agents).
+
+**PR-13 — Ustawienia bez pułapek** (MERGED in PR #19, 716a85f) (`docs/PR_PLAN.md` → PR-13) — base branch (b4c7e4c, PR-11 +
 PR-12 merged) merged in 2026-11-15 (05dc031); `pnpm check` green (2332 tests in 65 files, DB
 tests required). Code & Safety Review PASS on the merge (05dc031) and on its follow-up
 (f98c90c, last-page order test); Quality Review ACCEPT WITH NOTES after the docs fix (88e0964). Before
@@ -1400,9 +1416,13 @@ invalid operator counties → 409 with the support contact, not 500).
    `[]` (D-027 updated; Code & Safety PASS, Quality ACCEPT WITH NOTES; 2335 tests). Not merged by
    the agents. QR note: no extra form text (AC3 margin); if the pilot shows lost selections, a
    `/profil` notice variant „zaznaczone województwa usunięte”. Owner decisions:
-   - **Next PR (PR-14, small):** whole-list CSV (≤ 1000 rows) and, with it, a shorter
-     read-only counties note (about 3 lines) so a profile with operator counties also gets
-     ≥ 40% lower.
+   - **PR-14 (done, in owner review):** whole-list CSV (≤ 1000 rows) and a shorter read-only
+     counties note. The ≥ 40% target with operator counties proved unreachable (form without the
+     note 1355 px); owner accepted 1473 px (−36%, 5-line hint) on 2026-11-15 (PR_PLAN AC3, D-027).
+     Owner review of PR #20 (PASS): „Zmiana powiatów:” in the note — **done** (6 lines, 1494 px);
+     a cut whole-list CSV is named `-pierwsze-1000` — **done**; one wording for the counties fact
+     and the support contact across settings, `/dopasowania` and support text — **at the next
+     text change**; „(najwyżej 1000)” next to the CSV link — superseded by the file name.
    - „Trafne” on a greyed card on page 2+ (card moves back to its deadline position, maybe an
      earlier page; redirect opens the same page at the top): **stays as is** — data correct,
      a redirect to page 1 would lose context.
@@ -1687,6 +1707,15 @@ Non-blocking follow-ups (handle when touching the files, no separate PR):
 
 ## Last verification
 
+- 2026-11-15, PR-14 owner-review fixes: `TEST_DATABASE_URL=… REQUIRE_DB_TESTS=1 pnpm check` —
+  format, lint, typecheck PASS; 65 files, 2340 tests PASS (new: exactly-1000 boundary → plain
+  file name; 1003 rows → `-pierwsze-1000`). Playwright 390 px: worst-case settings form 1494 px
+  (note 6 lines), same with and without CONTACT_EMAIL.
+- 2026-11-15, PR-14: `TEST_DATABASE_URL=… REQUIRE_DB_TESTS=1 pnpm check` with PostgreSQL 16 —
+  format, lint, typecheck PASS; 65 files, 2339 tests PASS. Playwright 390 px: settings form with
+  3 operator counties and a pending e-mail change 1619 → 1473 px (note 10 → 5 lines); the CSV
+  line on `/dopasowania` page 2 is one line linking `/dopasowania.csv`. `pnpm audit`: 1 moderate
+  dev-only advisory (pre-existing, eslint → minimatch).
 - 2026-11-15, PR-13 base merge: `origin/ccr-919f3e62-g6j3w9` (b4c7e4c, PR #17 + PR #18)
   merged into PR-13. Conflicts in `src/web/pages.ts`, tests and docs resolved: base keeps the
   D-030 card, the short intro and the rating paragraph under the list; PR-13 keeps pages of 50

@@ -414,9 +414,11 @@ PUBLIC_BASE_URL=https://radar.example.invalid node dist/main.js serve
     ocena wraca na tę samą stronę. Gdy inna lista jest liczona, strona „Liczymy listę…” (503)
     odświeża się sama po 3 s (bez JavaScriptu); trzecie równoczesne żądanie jednej sesji
     dostaje stronę 429 z linkiem „Otwórz listę ponownie”;
-  - `/dopasowania.csv` — ta sama lista jako plik CSV, strona po stronie (`?strona=N`: te same
-    oferty, kolejność i 50 pozycji co strona; nad listą link „Pobierz listę jako CSV”, przy
-    kilku stronach „Ta strona jako CSV”): separator `;`, UTF-8 z BOM, kwota z
+  - `/dopasowania.csv` — cała lista jako jeden plik CSV (te same oferty i kolejność co
+    wszystkie strony razem, najwyżej 1000 — dłuższa lista daje plik
+    `dopasowania-RRRR-MM-DD-pierwsze-1000.csv`; od PR-14; link „Pobierz listę jako CSV” nad
+    listą na każdej stronie); `?strona=N` (PR-13) daje jedną stronę — dla starych linków, lista go już
+    nie linkuje: separator `;`, UTF-8 z BOM, kwota z
     przecinkiem dziesiętnym, brak wartości → pusta komórka, komórki zaczynające się od `=`,
     `+`, `-`, `@`, tabulatora lub CR poprzedzone `'` (Excel nie wykona ich jako formuły). Tylko
     z sesją.

@@ -523,13 +523,9 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
 
       const page = await (await fetch(`${url}/profil/ustawienia`, { headers: { cookie } })).text();
       expect(page).not.toContain('name="counties"');
-      expect(page).toContain(
-        "Obsługa serwisu ustawiła w profilu powiaty: warszawski zachodni, piaseczyński.",
-      );
-      // Without CONTACT_EMAIL: the way to the operator is the last message.
-      expect(page).toContain(
-        "Powiaty zmienia obsługa — odpowiedz na ostatnią wiadomość od nas.</p>",
-      );
+      expect(page).toContain("Powiaty (ustawia obsługa): warszawski zachodni, piaseczyński.");
+      // Without CONTACT_EMAIL: the way to the operator is our e-mail (PR-14: shorter).
+      expect(page).toContain("Zmiana powiatów: odpowiedz na nasz e-mail.</p>");
       expect(page).toContain('<fieldset aria-describedby="powiaty-uwaga"><legend>');
 
       const saved = await post("/profil/ustawienia", settingsForm(csrf, { name: "Nowa nazwa" }), {
@@ -568,11 +564,10 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       try {
         const contactUrl = `http://127.0.0.1:${String(withContact.port)}/profil/ustawienia`;
         const contactNote =
-          "Powiaty zmienia obsługa. Napisz do obsługi serwisu: " +
-          '<a href="mailto:pomoc@example.invalid">pomoc@example.invalid</a>.</p>';
+          'Zmiana powiatów: <a href="mailto:pomoc@example.invalid">pomoc@example.invalid</a>.</p>';
         const form = await (await fetch(contactUrl, { headers: { cookie } })).text();
         expect(form).toContain(contactNote);
-        expect(form).not.toContain("odpowiedz na ostatnią wiadomość");
+        expect(form).not.toContain("odpowiedz na nasz e-mail");
         // A region error: „Wybrane województwa” with none ticked.
         const withoutVoivodeship = new URLSearchParams(settingsForm(csrf, { name: "Inna nazwa" }));
         withoutVoivodeship.delete("voivodeships");
@@ -1238,7 +1233,9 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
       expect(secondHtml).toContain("<p><strong>Strona 2 z 2</strong>: zamówienia 51–53 z 53.</p>");
       expect(secondHtml).toContain('<a href="/dopasowania" rel="prev">← Poprzednia strona</a>');
       expect(secondHtml).not.toContain('rel="next"');
-      expect(secondHtml).toContain('<a href="/dopasowania.csv?strona=2">');
+      // PR-14: page 2 links the whole list's CSV, not its own page's.
+      expect(secondHtml).toContain('<a href="/dopasowania.csv">Pobierz listę jako CSV</a>');
+      expect(secondHtml).not.toContain("/dopasowania.csv?strona=");
 
       // A valid number past the last page shows the last page, with its own number.
       for (const query of ["?strona=3", `?strona=${String(MATCHES_MAX_PAGES)}`]) {
@@ -1525,6 +1522,22 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
           expect(csvHtml).toContain("Przygotowujemy plik… pobierze się sam za kilka sekund.");
           expect(csvHtml).toContain('<a href="/dopasowania.csv?strona=2">Pobierz teraz</a>');
           expect(csvHtml).not.toContain("Liczymy listę");
+          // PR-14: the whole list's CSV reloads itself; a CSV page 1 keeps its `strona`
+          // (without it the reload would fetch the whole list instead).
+          for (const [query, href] of [
+            ["?x=%22%3E", "/dopasowania.csv"],
+            ["?strona=1", "/dopasowania.csv?strona=1"],
+          ] as const) {
+            const busy = await fetch(`${gated.url}/dopasowania.csv${query}`, {
+              headers: { cookie: (await login()).cookie },
+            });
+            expect(busy.status).toBe(503);
+            expect(busy.headers.get("retry-after")).toBe(String(MATCHES_RETRY_AFTER_SECONDS));
+            const busyHtml = await busy.text();
+            expect(busyHtml).toContain(`<meta http-equiv="refresh" content="3; url=${href}">`);
+            expect(busyHtml).toContain(`<a href="${href}">Pobierz teraz</a>`);
+            expect(busyHtml).not.toContain("x=");
+          }
           expect(await stillPending(second)).toBe(true);
 
           lock.resume();
@@ -1560,6 +1573,12 @@ describe.skipIf(skipWithoutDatabase)("customer pages (PostgreSQL)", () => {
         );
         expect(tooMany).toContain('<a href="/dopasowania">Otwórz listę ponownie</a>');
         expect(tooMany).not.toContain("http-equiv");
+        // PR-14: the whole list's CSV shares the session's limit and links itself.
+        const tooManyCsv = await fetch(`${url}/dopasowania.csv`, { headers: { cookie } });
+        expect(tooManyCsv.status).toBe(429);
+        expect(await tooManyCsv.text()).toContain(
+          '<a href="/dopasowania.csv">Otwórz listę ponownie</a>',
+        );
         // Refused before the queue: the waiting request and the count are unchanged.
         expect(server.matchesWaiting).toBe(1);
         expect(await stillPending(second)).toBe(true);

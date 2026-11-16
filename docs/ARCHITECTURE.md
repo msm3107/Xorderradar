@@ -637,7 +637,7 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   | `/profil/wlacz` (`profile_resubscribe`)                | POST            | `active = true` (sesja + CSRF) → 303 `/profil`       |
   | `/profil/anuluj-email` (`profile_cancel_email`)        | POST            | anuluje zmianę adresu (sesja + CSRF) → 303 `/profil` |
   | `/dopasowania` (`matches`)                             | GET, HEAD       | pasujące oferty profilu z ocenami (sesja; `?strona`) |
-  | `/dopasowania.csv` (`matches_csv`)                     | GET, HEAD       | ta sama strona listy jako CSV (sesja; `?strona`)     |
+  | `/dopasowania.csv` (`matches_csv`)                     | GET, HEAD       | cała lista jako CSV (sesja; `?strona`: jedna strona) |
   | `/dopasowania/ocena` (`matches_feedback`)              | POST            | ocena oferty (sesja + CSRF) → 303 do karty           |
   | `/wyloguj` (`logout`)                                  | POST            | usuwa sesję i ciasteczko (sesja + CSRF) → 303 `/`    |
   | `/wypis/<token>` (`unsubscribe`)                       | GET, HEAD, POST | GET: strona z nazwą firmy i przyciskiem; POST: wypis |
@@ -716,11 +716,12 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   najwyżej `MATCHES_MAX_PAGES` = 20; od PR-13 — wcześniej 50 + „I N kolejnych…”). Numer strony
   czyta `matchesPageFromUrl`/`parsePageNumber` (`[1-9][0-9]{0,5}`, ≤ 20, jeden `strona`) po
   sprawdzeniu sesji, przed slotem — zły → 404 bez liczenia; numer za ostatnią stroną →
-  ostatnia strona. Każde żądanie liczy całą listę i wycina stronę (`matchesList`), więc
+  ostatnia strona. Każde żądanie liczy całą listę (`matchesList`) i wycina stronę (`listPage`), więc
   kolejność i „nietrafne” na końcu dotyczą całej listy; nadmiar ponad 1000 jest liczony na
   ostatniej stronie. Nad listą (krótko, żeby przycisk pierwszej karty był na pierwszym
   ekranie telefonu 390 × 844): przy kilku stronach „Strona X z Y: zamówienia a–b z N.” ze
-  zwykłym linkiem „Następna strona →”, jeden akapit o oknie 7 dni i jedna linia CSV. Pod
+  zwykłym linkiem „Następna strona →”, jeden akapit o oknie 7 dni i jedna linia z linkiem do
+  CSV całej listy (od PR-14 ten sam na każdej stronie). Pod
   listą (przy kilku stronach) wiersz „Strona X z Y” i linki poprzednia/następna (`rel`, cele
   dotyku ≥ 44 px), potem objaśnienie ocen. `<ol start>`, ta sama karta co e-mail
   (`offerCard`, §4.5), przycisk „Otwórz ogłoszenie” tylko dla `http(s)` z
@@ -736,7 +737,8 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   czeka w kolejce FIFO (najwyżej 8 żądań, najwyżej 3 s; po zwolnieniu miejsce przechodzi wprost na
   najstarsze), pełna kolejka albo upływ czasu → 503 `matchesBusyPage` z `Retry-After: 5` (od PR-13
   strona z `<meta http-equiv="refresh" content="3; url=…">` na ten sam adres, zbudowany z
-  odczytanego numeru strony; bez skryptu; dla CSV tekst o pliku i „Pobierz teraz”); rozłączony
+  odczytanego żądania — `matchesRequestHref`: strona, strona CSV albo CSV całej listy; bez
+  skryptu; dla CSV tekst o pliku i „Pobierz teraz”); rozłączony
   czekający wypada z kolejki bez liczenia; zwolnienie w `finally` (D-027). Jedna sesja ma naraz
   najwyżej 2 żądania `/dopasowania` w toku albo w kolejce (`MATCHES_MAX_PER_SESSION`, licznik po
   id sesji w `ServerState`, nigdy po tokenie z ciasteczka); trzecie → od razu 429
@@ -753,8 +755,13 @@ cleanupIntervalMs, … })` (`server.ts`) → `{ host, port, close() }`; `sender`
   powrót na stronę 1). Ocenić z listy można ofertę wysłaną profilowi (`wasDelivered`) albo
   pasującą do niego teraz (`matchOpportunity`, regułami profilu niezależnie od wieku oferty,
   D-032); inna → 404. `GET /dopasowania.csv` liczy tę
-  samą listę w tym samym slocie (`withMatchesSlot`) i zwraca stronę `?strona=N` (PR-13; nazwa
-  pliku z `-strona-N` dla N > 1) przez czyste `csv.ts` (BOM,
+  samą listę w tym samym slocie (`withMatchesSlot`) i bez `strona` zwraca całą listę — pierwsze
+  `MATCHES_MAX_PAGES × MATCHES_SHOWN` (1000) pozycji, jedno obliczenie (PR-14, plik
+  `dopasowania-RRRR-MM-DD.csv`, a gdy lista jest dłuższa i ucięta —
+  `dopasowania-RRRR-MM-DD-pierwsze-1000.csv`, liczba z limitu); z `?strona=N` jedną stronę (PR-13, dla starych linków; nazwa
+  pliku z `-strona-N` dla każdej strony, także `-strona-1`, żeby nie brała nazwy pliku całej
+  listy). Żądanie to unia `MatchesRequest` (`page` / `csv_page` /
+  `csv_all`, `matchesRequestFromUrl`). Plik przez czyste `csv.ts` (BOM,
   `;`, CRLF, neutralizacja formuł, `Content-Disposition: attachment`). Link z digestu
   `/ocena/<token>/<id>/<trafne|nietrafne>`: ścieżka sprawdzana przed bazą
   (`parseFeedbackPath`: 3 segmenty, werdykt z listy, uuid małymi literami); GET/HEAD tylko

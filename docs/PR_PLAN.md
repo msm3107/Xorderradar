@@ -843,3 +843,41 @@ błędem 503.
 
 - przycisk „zaznacz wszystkie” (wymaga JS i zmiany CSP);
 - drugi odbiorca na profil (zmienia klucz D-024; po pilotażu, jeśli firmy poproszą).
+
+## PR-14 — CSV całej listy i krótsza notka o powiatach
+
+**Cel:** jeden plik z całą listą dopasowań zamiast składania plików ze stron; niższy formularz
+ustawień także w profilu z powiatami od obsługi (review właściciela PR #19).
+
+**Zakres:**
+
+1. **`GET /dopasowania.csv` bez `strona`** → cała lista: te same wiersze co wszystkie strony
+   razem (≤ `MATCHES_MAX_PAGES × MATCHES_SHOWN` = 1000), ta sama kolejność („Nietrafne” na
+   końcu), ta sama neutralizacja formuł. Plik `dopasowania-RRRR-MM-DD.csv`.
+   _Poprawka z review właściciela PR #20:_ ucięta lista (> 1000) ma plik
+   `dopasowania-RRRR-MM-DD-pierwsze-1000.csv` (treść bez zmian).
+2. **`?strona=N` na CSV** działa jak dotąd (jedna strona) — stare linki nie psują się; strona
+   listy już go nie linkuje.
+3. **Strona `/dopasowania`:** na każdej stronie jeden link do CSV całej listy; jedna linia na
+   390 px.
+4. **Notka o powiatach tylko do odczytu** w `/profil/ustawienia`: krótsza (cel ~3 linie na
+   390 px; przyjęte 5, po review PR #20 6 — patrz kryterium 3), ta sama treść merytoryczna (powiaty, wpływ na
+   „Cała Polska”, kontakt do obsługi). _Poprawka z review właściciela PR #20:_ „Zmiana powiatów:”
+   zamiast „Zmiana:” (formularz 1494 px).
+
+**Kryteria akceptacji:**
+
+1. CSV bez `strona` zawiera wszystkie wiersze listy (do 1000) w kolejności z listy; jedno
+   obliczenie listy, bez N+1, ten sam limit współbieżności co strona.
+2. `?strona=N` na CSV zwraca tę stronę jak w PR-13; błędne `strona` → 404 jak dotąd.
+3. Formularz na 390 px z 3 powiatami od obsługi i zmianą e-maila w toku jest niższy niż w PR-13
+   (1619 px); zrzuty przed i po. _Zmienione decyzją właściciela 2026-11-15:_ pierwotny cel
+   −40% (≤ 1379 px) jest nieosiągalny — formularz bez notki ma 1355 px, więc na notkę zostaje
+   jedna linia; przyjęte 1473 px (−36%), notka w 5 liniach w stylu podpowiedzi. Po review PR #20
+   („Zmiana powiatów:”): 1494 px (−35%), notka w 6 liniach.
+4. D-032 zaktualizowana (CSV całej listy).
+
+**Poza zakresem:**
+
+- informacja o zamówieniach ponad limit wewnątrz pliku CSV (notka jest na ostatniej stronie listy);
+- inne formaty eksportu (XLSX).

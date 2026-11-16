@@ -124,6 +124,37 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
     return result.opportunity.id;
   }
 
+  /**
+   * `count` matching offers in one INSERT (PR-14: lists of over a thousand), titled
+   * „Oświetlenie numer 0001”…, deadlines in that order (draft adds a minute each).
+   */
+  async function offers(count: number): Promise<void> {
+    const rows = Array.from({ length: count }, (_, i) => {
+      const next = draft({ title: `Oświetlenie numer ${String(i + 1).padStart(4, "0")}` });
+      return {
+        source_id: next.sourceId,
+        source_url: next.sourceUrl,
+        external_id: next.externalId,
+        tender_id: next.tenderId,
+        issuer_name: next.issuerName,
+        title: next.title,
+        description: next.description,
+        location: JSON.stringify(next.location),
+        published_at: next.publishedAt,
+        deadline: next.deadline,
+        estimated_value: next.estimatedValue,
+        currency: next.currency,
+        categories: next.categories,
+        contact: null,
+        fetched_at: next.fetchedAt,
+        fingerprint: next.fingerprint,
+        content_hash: next.contentHash,
+        status: next.status,
+      };
+    });
+    await schema.db.insertInto("opportunities").values(rows).execute();
+  }
+
   async function deliver(
     profileId: string,
     opportunityId: string,
@@ -718,11 +749,11 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
         expect(at.every((index) => index >= 0)).toBe(true);
         expect(at).toEqual([...at].sort((a, b) => a - b));
       }
-      // The page line, the window, this page's CSV, the cards, the pager, the rating note.
+      // The page line, the window, the whole list's CSV (PR-14), the cards, the pager, the rating note.
       const layout = [
         html.indexOf("<p><strong>Strona 2 z 2</strong>: zamówienia 51–53 z 53.</p>"),
         html.indexOf("<p>Pokazujemy zamówienia dodane do Radaru"),
-        html.indexOf('<a href="/dopasowania.csv?strona=2">Ta strona jako CSV</a>'),
+        html.indexOf('<a href="/dopasowania.csv">Pobierz listę jako CSV</a>'),
         html.indexOf('<ol class="matches" start="51">'),
         html.indexOf("</ol>"),
         html.indexOf('<nav aria-label="Strony listy">'),
@@ -776,12 +807,91 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
       expect(lines).toHaveLength(4);
     });
 
-    it(`has the page's limit of ${String(MATCHES_SHOWN)} rows`, async () => {
-      for (let i = 0; i < MATCHES_SHOWN + 3; i++) await offer();
+    /** The first cell of each data row (the title), header and final CRLF left out. */
+    const titlesOf = (file: string) =>
+      file
+        .split("\r\n")
+        .slice(1, -1)
+        .map((row) => row.split(";")[0]);
+    const numbered = (from: number, to: number) =>
+      Array.from(
+        { length: to - from + 1 },
+        (_, i) => `Oświetlenie numer ${String(from + i).padStart(4, "0")}`,
+      );
+    const titleIds = async () =>
+      new Map(
+        (await schema.db.selectFrom("opportunities").select(["id", "title"]).execute()).map(
+          (row) => [row.title, row.id],
+        ),
+      );
+
+    // PR-14: without `strona` the CSV is the whole list, not page 1.
+    it("downloads the whole list without `strona`: every row, the list's order, „Nietrafne” last", async () => {
+      await offers(120);
+      const ids = await titleIds();
+      const notRelevant = ["Oświetlenie numer 0001", "Oświetlenie numer 0060"];
+      for (const title of notRelevant) {
+        await rateOffer(schema.db, jan.id, ids.get(title) ?? "", "not_relevant");
+      }
+      await rateOffer(schema.db, jan.id, ids.get("Oświetlenie numer 0002") ?? "", "relevant");
       const { cookie } = await login(jan.id);
-      const file = await (await fetch(`${url}/dopasowania.csv`, { headers: { cookie } })).text();
-      // Header, the rows, and the empty string after the last CRLF.
-      expect(file.split("\r\n")).toHaveLength(MATCHES_SHOWN + 2);
+      const response = await fetch(`${url}/dopasowania.csv`, { headers: { cookie } });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-disposition")).toMatch(
+        /^attachment; filename="dopasowania-\d{4}-\d{2}-\d{2}\.csv"$/,
+      );
+      const file = await response.text();
+      const titles = titlesOf(file);
+      expect(titles).toHaveLength(120);
+      expect(titles).toEqual([
+        ...numbered(2, 120).filter((title) => !notRelevant.includes(title)),
+        ...notRelevant,
+      ]);
+      const rows = file.split("\r\n");
+      expect(rows[1]?.endsWith(";trafne")).toBe(true);
+      expect(rows[119]?.endsWith(";nietrafne")).toBe(true);
+      expect(rows[120]?.endsWith(";nietrafne")).toBe(true);
+
+      // The page of PR-13 still works for old links: rows 51–100 of the same order.
+      const second = await fetch(`${url}/dopasowania.csv?strona=2`, { headers: { cookie } });
+      expect(second.status).toBe(200);
+      expect(second.headers.get("content-disposition")).toMatch(
+        /^attachment; filename="dopasowania-\d{4}-\d{2}-\d{2}-strona-2\.csv"$/,
+      );
+      expect(titlesOf(await second.text())).toEqual(titles.slice(MATCHES_SHOWN, 2 * MATCHES_SHOWN));
+      // One computation per file, in the one slot: none left behind.
+      expect(server.matchesSessions).toBe(0);
+      expect(server.matchesWaiting).toBe(0);
+    });
+
+    it("ends the whole list's CSV at the list's limit of 1000 rows", async () => {
+      await offers(1003);
+      const { cookie } = await login(jan.id);
+      const response = await fetch(`${url}/dopasowania.csv`, { headers: { cookie } });
+      // Owner's review of PR #20: the name says the list was cut (the file has no marker).
+      expect(response.headers.get("content-disposition")).toMatch(
+        /^attachment; filename="dopasowania-\d{4}-\d{2}-\d{2}-pierwsze-1000\.csv"$/,
+      );
+      const file = await response.text();
+      const titles = titlesOf(file);
+      expect(titles).toHaveLength(1000);
+      expect(titles).toEqual(numbered(1, 1000));
+      expect(file).not.toContain("Oświetlenie numer 1001");
+      // The last page of the list is the file's last 50 rows.
+      const last = await (
+        await fetch(`${url}/dopasowania.csv?strona=20`, { headers: { cookie } })
+      ).text();
+      expect(titlesOf(last)).toEqual(numbered(951, 1000));
+    });
+
+    it("names a whole list of exactly 1000 rows without the cut's suffix", async () => {
+      await offers(1000);
+      const { cookie } = await login(jan.id);
+      const response = await fetch(`${url}/dopasowania.csv`, { headers: { cookie } });
+      expect(response.headers.get("content-disposition")).toMatch(
+        /^attachment; filename="dopasowania-\d{4}-\d{2}-\d{2}\.csv"$/,
+      );
+      expect(titlesOf(await response.text())).toEqual(numbered(1, 1000));
     });
 
     // PR-13: the CSV is the page shown, with the page's number in its name.
@@ -799,14 +909,21 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
           .slice(1, -1)
           .map((row) => row.split(";")[0]);
 
-      const first = await csv("");
+      // PR-14: page 1 by its number, named as a page (without `strona`: the whole
+      // list, all 53, under the name without a suffix).
+      const first = await csv("?strona=1");
       expect(first.headers.get("content-disposition")).toMatch(
-        /^attachment; filename="dopasowania-\d{4}-\d{2}-\d{2}\.csv"$/,
+        /^attachment; filename="dopasowania-\d{4}-\d{2}-\d{2}-strona-1\.csv"$/,
       );
       const firstTitles = titles(await first.text());
       expect(firstTitles).toHaveLength(MATCHES_SHOWN);
       expect(firstTitles[0]).toBe("Oświetlenie numer 001");
       expect(firstTitles[MATCHES_SHOWN - 1]).toBe("Oświetlenie numer 050");
+      const whole = await csv("");
+      expect(whole.headers.get("content-disposition")).toMatch(
+        /^attachment; filename="dopasowania-\d{4}-\d{2}-\d{2}\.csv"$/,
+      );
+      expect(titles(await whole.text())).toHaveLength(MATCHES_SHOWN + 3);
 
       for (const query of ["?strona=2", "?strona=3"]) {
         const second = await csv(query);
@@ -820,8 +937,14 @@ describe.skipIf(skipWithoutDatabase)("rating and export (PostgreSQL)", () => {
           "Oświetlenie numer 053",
         ]);
       }
-      expect((await csv("?strona=1")).headers.get("content-disposition")).not.toContain("strona");
-      for (const query of ["?strona=0", "?strona=02", "?strona=21", "?strona=1&strona=2"]) {
+      for (const query of [
+        "?strona=0",
+        "?strona=02",
+        "?strona=21",
+        "?strona=1&strona=2",
+        "?strona=",
+        "?strona=abc",
+      ]) {
         const refused = await csv(query);
         expect(refused.status).toBe(404);
         expect(refused.headers.get("content-type")).toMatch(/^text\/html/);
